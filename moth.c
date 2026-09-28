@@ -465,6 +465,9 @@ typedef struct {
     int *hrow, nh;                            //   and the nonzero rows of the long kernel
 #ifdef VNNI
     IMon im[7];
+    uint8_t *uh;                              // long conv history for vpdpbusd: u + 128 at [2T positions / 4][D][4]
+    uint8_t *kp; int *kg, ko[4][D / 16 + 1];  // packed kernel: nonzero 16-channel x 4-tap blocks, 2 bits a trit (16 B),
+    int32_t hc[D];                            //   their groups, per-(phase, chunk) offsets; 128 sum_j h[j] per channel
 #endif
 } Layer;
 // a stack of layers over sequences of length T (bytes or patches); X[0] is its input, X[L] its output
@@ -1050,10 +1053,36 @@ static void stack_prep(Stack *S) {            // freeze the trits once
         filter_fwd(S, c); conv_prep(c);
         y->nh = 0;
         for (int j = 0; j < S->T; j++) { int nz = 0; for (int ch = 0; ch < D; ch++) nz |= c->hq[j * D + ch]; if (nz) y->hrow[y->nh++] = j; }
+#ifdef VNNI
+        // The long kernel for the 4-tap vpdpbusd, in 4 phase-shifted copies (tap j at group g, slot k, j = 4g + k -
+        // phase), cut into 16-channel x 4-tap blocks of 64 trits. Only nonzero blocks are kept (~40%), each packed
+        // to 16 bytes, 2 bits a trit (w + 1), in the order one vpmultishiftqb unpacks: output qword q holds trits
+        // 8q..8q+7, taken from 2-bit fields (q / 2) * 8 + k of packed qword q % 2.
+        int T = S->T, G1 = T / 4 + 1, nb = 0;
+        if (!y->kp) { y->uh = malloc((size_t)2 * T * D); y->kp = malloc((size_t)4 * G1 * (D / 16) * 16); y->kg = malloc((size_t)4 * G1 * (D / 16) * sizeof(int)); }
+        for (int ph = 0; ph < 4; ph++) for (int c16 = 0; c16 < D / 16; c16++) {
+            y->ko[ph][c16] = nb;
+            for (int g = 0; g < G1; g++) {
+                int8_t w[64]; int nz = 0;
+                for (int b = 0; b < 64; b++) { int j = 4 * g + b % 4 - ph, ch = 16 * c16 + b / 4; w[b] = j >= 0 && j < T ? c->hq[j * D + ch] : 0; nz |= w[b]; }
+                if (!nz) continue;
+                uint8_t *pk = y->kp + (size_t)nb * 16; memset(pk, 0, 16);
+                for (int b = 0; b < 64; b++) { int q = b / 8, k = b % 8, bit = ((q / 2) * 8 + k) * 2; pk[(q % 2) * 8 + bit / 8] |= (uint8_t)((w[b] + 1) << (bit % 8)); }
+                y->kg[nb++] = g;
+            }
+        }
+        for (int ph = 0; ph < 4; ph++) y->ko[ph][D / 16] = ph < 3 ? y->ko[ph + 1][0] : nb;   // (end of each phase's list)
+        for (int ch = 0; ch < D; ch++) { int sum = 0; for (int j = 0; j < T; j++) sum += c->hq[j * D + ch]; y->hc[ch] = 128 * sum; }
+#endif
     }
 }
 static void stack_reset(Stack *S) {
-    for (int l = 0; l < S->L; l++) { memset(S->ly[l].hist, 0, sizeof S->ly[l].hist); memset(S->ly[l].ring, 0, (size_t)S->T * D); }
+    for (int l = 0; l < S->L; l++) {
+        memset(S->ly[l].hist, 0, sizeof S->ly[l].hist); memset(S->ly[l].ring, 0, (size_t)S->T * D);
+#ifdef VNNI
+        memset(S->ly[l].uh, 0x80, (size_t)2 * S->T * D);   // u = 0
+#endif
+    }
     S->ipos = 0;
 }
 static void glu(float *restrict g, const float *restrict f) {   // g *= gelu(f)
@@ -1075,11 +1104,49 @@ static void stack_step(Stack *S, float *x) {  // x [D]: input in, output out
         memcpy(y->hist[1], y->hist[0], sizeof y->hist[0]); memcpy(y->hist[0], cur, sizeof cur);
         int8_t *u = y->ring + (p % T) * D;
         float iu = 1 / c->as[3]; for (int ch = 0; ch < D; ch++) u[ch] = sc8(post[1][ch] * post[2][ch], iu);
+#ifdef VNNI
+        // long conv on vpdpbusd, 4 taps per lane. History runs backwards: u[p - j] sits at position r + j, r =
+        // T - 1 - p mod T, stored twice (r and r + T) so every window is contiguous. Positions are grouped by 4
+        // per channel; the kernel copy matching r's alignment lines taps up with them.
+        int32_t acc[D];
+        {
+            int r0 = T - 1 - (int)(p % T), ph = r0 & 3, G0 = r0 >> 2;
+            static const uint8_t sp[64] = {0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3, 4,4,4,4, 5,5,5,5, 6,6,6,6, 7,7,7,7,
+                                           8,8,8,8, 9,9,9,9, 10,10,10,10, 11,11,11,11, 12,12,12,12, 13,13,13,13, 14,14,14,14, 15,15,15,15};
+            const __m512i spread = _mm512_loadu_si512(sp), flip = _mm512_set1_epi8((char)0x80);
+            for (int copy = 0; copy < 2; copy++) {   // write u_p + 128 into slot (pos & 3) of each channel at pos = r0, r0 + T
+                int pos = r0 + copy * T; uint8_t *dst = y->uh + (size_t)(pos >> 2) * D * 4;
+                __mmask64 mk = 0x1111111111111111ull << (pos & 3);
+                for (int c0 = 0; c0 < D; c0 += 16) {
+                    __m512i v = _mm512_xor_si512(_mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i *)(u + c0))), flip);
+                    _mm512_mask_storeu_epi8(dst + c0 * 4, mk, _mm512_permutexvar_epi8(spread, v));
+                }
+            }
+            static const uint8_t ms[64] = {0,2,4,6,8,10,12,14, 0,2,4,6,8,10,12,14, 16,18,20,22,24,26,28,30, 16,18,20,22,24,26,28,30,
+                                           32,34,36,38,40,42,44,46, 32,34,36,38,40,42,44,46, 48,50,52,54,56,58,60,62, 48,50,52,54,56,58,60,62};
+            const __m512i sel = _mm512_loadu_si512(ms), three = _mm512_set1_epi8(3), one = _mm512_set1_epi8(1);
+            #define KUNP(i) _mm512_sub_epi8(_mm512_and_si512(_mm512_multishift_epi64_epi8(sel, _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i *)(y->kp + (size_t)(i) * 16)))), three), one)
+            #define HIST(i) _mm512_loadu_si512(y->uh + (size_t)(G0 + y->kg[i]) * D * 4 + c * 64)
+            for (int c = 0; c < D / 16; c++) {    // per chunk, only its nonzero blocks; 4 accumulators hide the latency
+                __m512i a0 = _mm512_setzero_si512(), a1 = a0, a2 = a0, a3 = a0; int i = y->ko[ph][c], e = y->ko[ph][c + 1];
+                for (; i + 4 <= e; i += 4) {
+                    a0 = _mm512_dpbusd_epi32(a0, HIST(i), KUNP(i)); a1 = _mm512_dpbusd_epi32(a1, HIST(i + 1), KUNP(i + 1));
+                    a2 = _mm512_dpbusd_epi32(a2, HIST(i + 2), KUNP(i + 2)); a3 = _mm512_dpbusd_epi32(a3, HIST(i + 3), KUNP(i + 3));
+                }
+                for (; i < e; i++) a0 = _mm512_dpbusd_epi32(a0, HIST(i), KUNP(i));
+                __m512i sum = _mm512_add_epi32(_mm512_add_epi32(a0, a1), _mm512_add_epi32(a2, a3));
+                _mm512_storeu_si512(acc + 16 * c, _mm512_sub_epi32(sum, _mm512_loadu_si512(y->hc + 16 * c)));
+            }
+            #undef KUNP
+            #undef HIST
+        }
+#else
         cacc acc[D] = {0};                    // long conv: sum_j h[j] u[p - j] over the nonzero kernel rows
         for (int r = 0; r < y->nh && y->hrow[r] <= p; r++) {
             int j = y->hrow[r]; const int8_t *hj = c->hq + j * D, *uj = y->ring + ((p - j) % T) * D;
             for (int ch = 0; ch < D; ch++) acc[ch] += hj[ch] * uj[ch];
         }
+#endif
         for (int ch = 0; ch < D; ch++) g[ch] = post[0][ch] * (acc[ch] * c->hs[ch] + c->be[ch] * u[ch]) * c->as[3];
         float so = q8t(g, q, 1); IMON(y, 3, &y->o, q, so, o);
         for (int i = 0; i < D; i++) x1[i] = x[i] + o[i];
