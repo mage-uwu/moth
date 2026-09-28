@@ -94,6 +94,17 @@
 #define HSTEPS 1000     // entropy model steps
 #endif
 #define LR 3e-3f
+#if defined(__AVX512VNNI__) && defined(__AVX512VBMI__) && M % 16 == 0
+#define VNNI 1                                 // int8 dot-product kernels (vpdpbusd), else portable C
+#include <immintrin.h>
+static const uint8_t PM4[64] = {0,16,32,48, 1,17,33,49, 2,18,34,50, 3,19,35,51, 4,20,36,52, 5,21,37,53, 6,22,38,54, 7,23,39,55,
+                                8,24,40,56, 9,25,41,57, 10,26,42,58, 11,27,43,59, 12,28,44,60, 13,29,45,61, 14,30,46,62, 15,31,47,63};
+// four 16-byte rows -> one register, lane l holding byte l of each row: [l][row], the 4-term groups vpdpbusd wants
+#define ROWS4(p0, p1, p2, p3) _mm512_permutexvar_epi8(_mm512_loadu_si512(PM4), _mm512_inserti32x4(_mm512_inserti32x4(_mm512_inserti32x4( \
+    _mm512_castsi128_si512(_mm_loadu_si128((const __m128i *)(p0))), _mm_loadu_si128((const __m128i *)(p1)), 1), \
+    _mm_loadu_si128((const __m128i *)(p2)), 2), _mm_loadu_si128((const __m128i *)(p3)), 3))
+#endif
+#define MAXF(a, b) ((a) > (b) ? (a) : (b))   // unlike fmaxf, vectorises without -ffast-math
 
 static uint64_t rs = 0x9E3779B97F4A7C15ull;
 static float urand(void) { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return (rs >> 40) / 16777216.f; }
@@ -115,7 +126,8 @@ static P *param(int n, float sd) {
 // ---- quantizers ------------------------------------------------------------------------------
 static float tern(const float *w, int8_t *q, int n, int st) {        // absmean ternary, returns scale
     float s = 1e-8f; for (int i = 0; i < n; i++) s += fabsf(w[i * st]); s /= n;
-    for (int i = 0; i < n; i++) { float r = roundf(w[i * st] / s); q[i * st] = r > 1 ? 1 : r < -1 ? -1 : r; }
+    float h = 0.5f * s;                                                // round(w / s) clipped to +-1, without roundf
+    for (int i = 0; i < n; i++) q[i * st] = (w[i * st] >= h) - (w[i * st] <= -h);
     return s;
 }
 static float q8t(const float *x, int8_t *q, float mul) {              // per-token absmax int8; scale*mul
@@ -125,19 +137,23 @@ static float q8t(const float *x, int8_t *q, float mul) {              // per-tok
     float is = 127 / m; for (int i = 0; i < D; i++) q[i] = (int8_t)rintf(x[i] * is);
     return m * mul / 127;
 }
+static inline float floor_(float x) { float t = (float)(int32_t)x; return t > x ? t - 1 : t; }   // |x| < 2^31; unlike floorf, vectorises
 static int8_t sr8(float v, uint32_t idx) {                            // stochastic round + saturate
-    float r = floorf(v + (hash(idx ^ seed) >> 8) * 0x1p-24f);
+    v = v > 130.f ? 130.f : v < -130.f ? -130.f : v;                   // (saturates to the same codes; keeps floor_ in range)
+    float r = floor_(v + (hash(idx ^ seed) >> 8) * 0x1p-24f);
     return r > 127 ? 127 : r < -127 ? -127 : (int8_t)r;
 }
-typedef struct { float prev, cur[64]; } Amax;                          // delayed gradient scale
+typedef struct { float prev, cur[64][16]; } Amax;                      // delayed gradient scale (a cache line per thread)
 static float gscale(Amax *a) { return (a->prev > 0 ? a->prev : 1e-3f) / 127; }
-static void roll(Amax *a) { a->prev = 0; for (int t = 0; t < NT; t++) { a->prev = fmaxf(a->prev, a->cur[t]); a->cur[t] = 0; } }
+static void roll(Amax *a) { a->prev = 0; for (int t = 0; t < NT; t++) { a->prev = fmaxf(a->prev, a->cur[t][0]); a->cur[t][0] = 0; } }
 
 // ---- Monarch: R (row blocks, weights [b][i][o]) then L (column blocks, weights [o][i][lane]) ----
 typedef struct { P *r, *l; int8_t rq[W3], rt[W3], lq[W3], *mq; float rs, ls, *ms; Amax gl, gr; int32_t *dw; uint32_t salt; } Mon;
+#define SLAB (2 * W3 + 2 * D)                  // per-thread grad slab: dR [b][o][i], dL [o][i][b], and the two
+                                               // offset corrections the 4-token VNNI path needs (cR [b][o], cL [o][b])
 static void mon_init(Mon *m, float sd, uint32_t salt, int ntok) {
     m->r = param(W3, sd / sqrtf(M)); m->l = param(W3, 1 / sqrtf(M));
-    m->mq = ia((size_t)ntok * D); m->ms = fa(ntok); m->dw = calloc((size_t)NT * 2 * W3, 4); m->salt = salt * 0x9E3779B9u;
+    m->mq = ia((size_t)ntok * D); m->ms = fa(ntok); m->dw = calloc((size_t)NT * SLAB, 4); m->salt = salt * 0x9E3779B9u;
 }
 static void mon_prep(Mon *m) {                                              // once per step, O(params):
     m->rs = tern(m->r->w, m->rq, W3, 1); m->ls = tern(m->l->w, m->lq, W3, 1);  // a 4KB ternary transpose so R^T
@@ -145,7 +161,7 @@ static void mon_prep(Mon *m) {                                              // o
         m->rt[(b * M + o) * M + i] = m->rq[(b * M + i) * M + o];
 }
 // token t: x = int8 codes with scale sx -> y (float). Stores the int8 mid codes for the backward.
-static void mon_fwd(Mon *m, const int8_t *x, float sx, float *y, int t) {
+static void __attribute__((unused)) mon_fwd(Mon *m, const int8_t *x, float sx, float *y, int t) {
     int16_t z[D] = {0}, acc[D] = {0}; int mx = 1; int8_t *q = m->mq + t * D;  // |ternary.int8| <= 16*127: int16
     for (int b = 0; b < M; b++) for (int i = 0; i < M; i++) {                 // R: z_b += x_bi * R_bi.
         int xi = x[b * M + i]; const int8_t *w = m->rq + (b * M + i) * M; int16_t *zb = z + b * M;
@@ -160,58 +176,111 @@ static void mon_fwd(Mon *m, const int8_t *x, float sx, float *y, int t) {
     }
     for (int k = 0; k < D; k++) y[k] = acc[k] * sm * m->ls;
 }
-// token t: dy (float) -> dx (float); int8 x int8 dW into thread tid's int32 slab
-static void mon_bwd(Mon *m, const int8_t *x, float sx, const float *dy, float *dx, int t, int tid) {
-    const int8_t *q = m->mq + t * D; float sm = m->ms[t], gl = gscale(&m->gl), gr = gscale(&m->gr), am = 0;
-    int8_t g[D]; int16_t dm[D] = {0}; int32_t *dwr = m->dw + (size_t)tid * 2 * W3, *dwl = dwr + W3;
-    for (int k = 0; k < D; k++) { float v = dy[k] * sm; am = fmaxf(am, fabsf(v)); g[k] = sr8(v / gl, (t * D + k) ^ m->salt); }
-    m->gl.cur[tid] = fmaxf(m->gl.cur[tid], am);
-    for (int o = 0; o < M; o++) for (int i = 0; i < M; i++) {                 // L^T g and dL, lane-wise
-        const int8_t *w = m->lq + (o * M + i) * M, *go = g + o * M, *qi = q + i * M;
-        int16_t *a = dm + i * M; int32_t *dl = dwl + (o * M + i) * M;
-        for (int b = 0; b < M; b++) { a[b] += w[b] * go[b]; dl[b] += go[b] * qi[b]; }
+// token t: dy (float) -> dx (float), and the int8 grad codes at L's output (g1) and R's output (g2), which
+// mon_dw4 turns into weight grads four tokens at a time
+static void __attribute__((unused)) mon_bwdx(Mon *m, float sx, const float *dy, float *dx, int t, int tid, int8_t *g1, int8_t *g2) {
+    float sm = m->ms[t], gl = gscale(&m->gl), gr = gscale(&m->gr), am = 0;
+    int16_t dm[D] = {0};
+    #pragma omp simd reduction(max:am)
+    for (int k = 0; k < D; k++) { float v = dy[k] * sm, a = fabsf(v); am = a > am ? a : am; g1[k] = sr8(v / gl, (t * D + k) ^ m->salt); }
+    m->gl.cur[tid][0] = MAXF(m->gl.cur[tid][0], am);
+    for (int o = 0; o < M; o++) for (int i = 0; i < M; i++) {                 // L^T g, lane-wise
+        const int8_t *w = m->lq + (o * M + i) * M, *go = g1 + o * M; int16_t *a = dm + i * M;
+        for (int b = 0; b < M; b++) a[b] += w[b] * go[b];
     }
     float c = gl * m->ls / sm * sx / gr; am = 0;                             // fold sx so dR reuses x's codes
-    for (int k = 0; k < D; k++) { float v = dm[k] * c; am = fmaxf(am, fabsf(v)); g[k] = sr8(v, (t * D + k) ^ ~m->salt); }
-    m->gr.cur[tid] = fmaxf(m->gr.cur[tid], am * gr);
+    #pragma omp simd reduction(max:am)
+    for (int k = 0; k < D; k++) { float v = dm[k] * c, a = fabsf(v); am = a > am ? a : am; g2[k] = sr8(v, (t * D + k) ^ ~m->salt); }
+    m->gr.cur[tid][0] = MAXF(m->gr.cur[tid][0], am * gr);
     float cx = gr * m->rs / sx; int16_t ax[D] = {0};
-    for (int b = 0; b < M; b++) for (int o = 0; o < M; o++) {                 // R^T g and dR, broadcast g_bo
-        int go = g[b * M + o]; const int8_t *w = m->rt + (b * M + o) * M, *xb = x + b * M;
-        int16_t *a = ax + b * M; int32_t *dr = dwr + (b * M + o) * M;           // dR slab is [b][o][i]
-        for (int i = 0; i < M; i++) { a[i] += go * w[i]; dr[i] += xb[i] * go; }
+    for (int b = 0; b < M; b++) for (int o = 0; o < M; o++) {                 // R^T g, broadcast g_bo
+        int go = g2[b * M + o]; const int8_t *w = m->rt + (b * M + o) * M; int16_t *a = ax + b * M;
+        for (int i = 0; i < M; i++) a[i] += go * w[i];
     }
     for (int k = 0; k < D; k++) dx[k] = ax[k] * cx;
+}
+// weight grads of tokens t0..t0+3 into thread tid's slab: dL[o][i][b] += sum_j g1_j[o][b] q_j[i][b] (q: the
+// token's mid codes), dR[b][o][i] += sum_j x_j[b][i] g2_j[b][o]. Padding tokens carry zero codes.
+static void mon_dw4(Mon *m, int tid, int t0, const int8_t *xbase, int8_t (*g1)[D], int8_t (*g2)[D]) {
+    int32_t *dwr = m->dw + (size_t)tid * SLAB, *dwl = dwr + W3;
+    const int8_t *q[4], *x[4];
+    for (int j = 0; j < 4; j++) { q[j] = m->mq + (size_t)(t0 + j) * D; x[j] = xbase + (size_t)(t0 + j) * D; }
+#ifdef VNNI
+    // vpdpbusd wants one unsigned operand: use (code + 128) = code ^ 0x80, and count sum_j g per output in
+    // cR / cL so mon_reduce can take the 128 sum_j g back out. vpermb interleaves the four tokens per lane.
+    const __m512i flip = _mm512_set1_epi8((char)0x80), ones = _mm512_set1_epi8(1);
+    int32_t *cR = dwr + 2 * W3, *cL = cR + D;
+    for (int h = 0; h < M / 16; h++) {                                        // dL: lanes b = 16h..16h+15
+        __m512i gt[M], qt[M];
+        for (int o = 0; o < M; o++) {
+            gt[o] = ROWS4(g1[0] + o * M + 16 * h, g1[1] + o * M + 16 * h, g1[2] + o * M + 16 * h, g1[3] + o * M + 16 * h);
+            __m512i c = _mm512_loadu_si512(cL + o * M + 16 * h);
+            _mm512_storeu_si512(cL + o * M + 16 * h, _mm512_dpbusd_epi32(c, ones, gt[o]));
+        }
+        for (int i = 0; i < M; i++) qt[i] = _mm512_xor_si512(ROWS4(q[0] + i * M + 16 * h, q[1] + i * M + 16 * h, q[2] + i * M + 16 * h, q[3] + i * M + 16 * h), flip);
+        for (int o = 0; o < M; o++) for (int i = 0; i < M; i++) {
+            int32_t *p = dwl + (o * M + i) * M + 16 * h;
+            _mm512_storeu_si512(p, _mm512_dpbusd_epi32(_mm512_loadu_si512(p), qt[i], gt[o]));
+        }
+        for (int b = 0; b < M; b++) {                                         // dR: lanes i = 16h..16h+15
+            __m512i xt = _mm512_xor_si512(ROWS4(x[0] + b * M + 16 * h, x[1] + b * M + 16 * h, x[2] + b * M + 16 * h, x[3] + b * M + 16 * h), flip);
+            for (int o = 0; o < M; o++) {
+                int k = b * M + o; uint32_t g4 = (uint8_t)g2[0][k] | (uint8_t)g2[1][k] << 8 | (uint8_t)g2[2][k] << 16 | (uint32_t)(uint8_t)g2[3][k] << 24;
+                if (h == 0) cR[k] += g2[0][k] + g2[1][k] + g2[2][k] + g2[3][k];
+                int32_t *p = dwr + k * M + 16 * h;
+                _mm512_storeu_si512(p, _mm512_dpbusd_epi32(_mm512_loadu_si512(p), xt, _mm512_set1_epi32((int32_t)g4)));
+            }
+        }
+    }
+#else
+    for (int j = 0; j < 4; j++) {
+        for (int o = 0; o < M; o++) for (int i = 0; i < M; i++) {
+            int32_t *dl = dwl + (o * M + i) * M; const int8_t *go = g1[j] + o * M, *qi = q[j] + i * M;
+            for (int b = 0; b < M; b++) dl[b] += go[b] * qi[b];
+        }
+        for (int b = 0; b < M; b++) for (int o = 0; o < M; o++) {
+            int go = g2[j][b * M + o]; int32_t *dr = dwr + (b * M + o) * M; const int8_t *xb = x[j] + b * M;
+            for (int i = 0; i < M; i++) dr[i] += xb[i] * go;
+        }
+    }
+#endif
 }
 static void mon_reduce(Mon *m) {                                             // sum thread slabs, O(params)
     float gr = gscale(&m->gr), gl = gscale(&m->gl);
     #pragma omp parallel for
     for (int k = 0; k < W3; k++) {
         int32_t sr = 0, sl = 0;
-        for (int t = 0; t < NT; t++) { int32_t *s = m->dw + (size_t)t * 2 * W3; sr += s[k]; sl += s[W3 + k]; s[k] = s[W3 + k] = 0; }
-        int b = k / (M * M), o = k / M % M, i = k % M;
+        int b = k / (M * M), o = k / M % M, i = k % M;             // (for dL: o = b, i = o, b = i)
+        for (int t = 0; t < NT; t++) {
+            int32_t *s = m->dw + (size_t)t * SLAB;
+            sr += s[k] - 128 * s[2 * W3 + k / M]; sl += s[W3 + k] - 128 * s[2 * W3 + D + b * M + i]; s[k] = s[W3 + k] = 0;
+        }
         m->r->g[(b * M + i) * M + o] += sr * gr; m->l->g[k] += sl * gl;
     }
+    for (int t = 0; t < NT; t++) memset(m->dw + (size_t)t * SLAB + 2 * W3, 0, 2 * D * sizeof(int32_t));
     roll(&m->gr); roll(&m->gl);
 }
 
-#if defined(__AVX512VNNI__) && defined(__AVX512VBMI__) && M % 16 == 0
-#define VNNI 1
+#ifdef VNNI
 // Monarch forward on vpdpbusd (u8 x s8, 4-term dots into int32), 16 lanes per register: trits are stored as
 // w + 1 in {0, 1, 2} and the input's sum is subtracted, so the result is exact. R: lane o of block b dots
 // x_b[4k..4k+3] (broadcast) with R_b[o][4k..4k+3]. L: lane b of output row o dots q[4k..4k+3][b] with
 // L_o[4k..4k+3][b]; vpermb turns four 16-wide tile row pieces into that [b][j] order in one instruction,
 // so the permutations still never touch memory.
-#include <immintrin.h>
 #define MK (M / 4)                                 // 4-term groups per block row
 #define MH (M / 16)                                // 16-lane registers per block row
-typedef struct { uint8_t r[W3], l[W3]; } IMon;
+typedef struct { uint8_t r[W3], l[W3], lt[W3], rt[W3]; } IMon;   // forward R, L; backward L^T, R^T
 static void imon_prep(IMon *im, const Mon *m) {
     for (int b = 0; b < M; b++) for (int k = 0; k < MK; k++) for (int o = 0; o < M; o++) for (int j = 0; j < 4; j++)
         im->r[((b * MK + k) * M + o) * 4 + j] = m->rq[(b * M + 4 * k + j) * M + o] + 1;
     for (int o = 0; o < M; o++) for (int k = 0; k < MK; k++) for (int b = 0; b < M; b++) for (int j = 0; j < 4; j++)
         im->l[((o * MK + k) * M + b) * 4 + j] = m->lq[(o * M + 4 * k + j) * M + b] + 1;
+    for (int i = 0; i < M; i++) for (int k = 0; k < MK; k++) for (int b = 0; b < M; b++) for (int j = 0; j < 4; j++)
+        im->lt[((i * MK + k) * M + b) * 4 + j] = m->lq[((4 * k + j) * M + i) * M + b] + 1;   // L^T: sum over o
+    for (int b = 0; b < M; b++) for (int k = 0; k < MK; k++) for (int i = 0; i < M; i++) for (int j = 0; j < 4; j++)
+        im->rt[((b * MK + k) * M + i) * 4 + j] = m->rq[(b * M + i) * M + 4 * k + j] + 1;     // R^T: sum over o
 }
-static void imon_fwd(const IMon *im, const Mon *m, const int8_t *x, float sx, float *y) {
+static void imon_fwd(const IMon *im, const Mon *m, const int8_t *x, float sx, float *y, int8_t *mid, float *msc) {
     static const uint8_t pm[64] = {0,16,32,48, 1,17,33,49, 2,18,34,50, 3,19,35,51, 4,20,36,52, 5,21,37,53, 6,22,38,54, 7,23,39,55,
                                    8,24,40,56, 9,25,41,57, 10,26,42,58, 11,27,43,59, 12,28,44,60, 13,29,45,61, 14,30,46,62, 15,31,47,63};
     const __m512i ones = _mm512_set1_epi8(1), perm = _mm512_loadu_si512(pm);
@@ -232,7 +301,7 @@ static void imon_fwd(const IMon *im, const Mon *m, const int8_t *x, float sx, fl
     int m32 = _mm512_reduce_max_epi32(mx); if (m32 < 1) m32 = 1;
     float qs = 127.f / m32, sm = sx * m->rs * m32 / 127;
     __m512 vqs = _mm512_set1_ps(qs);
-    int8_t q[D];
+    int8_t qb[D], *q = mid ? mid : qb; if (msc) *msc = sm;
     for (int k = 0; k < D; k += 16) _mm_storeu_si128((__m128i *)(q + k), _mm512_cvtepi32_epi8(_mm512_cvtps_epi32(_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_loadu_si512(z + k)), vqs))));
     __m512i qt[MK][MH], qsum[MH];
     for (int h = 0; h < MH; h++) {
@@ -251,9 +320,51 @@ static void imon_fwd(const IMon *im, const Mon *m, const int8_t *x, float sx, fl
         _mm512_storeu_ps(y + o * M + 16 * h, _mm512_mul_ps(_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_sub_epi32(acc, qsum[h])), sc), ls));
     }
 }
-#define IMON(y, i, m, x, sx, out) imon_fwd(&(y)->im[i], m, x, sx, out)
+// mon_bwdx on vpdpbusd: same arithmetic (exact), the two matvecs as 4-term int8 dots
+static void imon_bwdx(const IMon *im, Mon *m, float sx, const float *dy, float *dx, int t, int tid, int8_t *g1, int8_t *g2) {
+    float sm = m->ms[t], gl = gscale(&m->gl), gr = gscale(&m->gr), am = 0;
+    const __m512i ones = _mm512_set1_epi8(1);
+    #pragma omp simd reduction(max:am)
+    for (int k = 0; k < D; k++) { float v = dy[k] * sm, a = fabsf(v); am = a > am ? a : am; g1[k] = sr8(v / gl, (t * D + k) ^ m->salt); }
+    m->gl.cur[tid][0] = MAXF(m->gl.cur[tid][0], am);
+    int32_t dm[D], ax[D];
+    for (int h = 0; h < MH; h++) {                                            // dm[i][b] = sum_o L[o][i][b] g1[o][b]
+        __m512i gt[MK], gs = _mm512_setzero_si512();
+        for (int k = 0; k < MK; k++) {
+            const int8_t *p = g1 + 4 * k * M + 16 * h;
+            gt[k] = ROWS4(p, p + M, p + 2 * M, p + 3 * M); gs = _mm512_dpbusd_epi32(gs, ones, gt[k]);
+        }
+        for (int i = 0; i < M; i++) {
+            __m512i acc = _mm512_setzero_si512();
+            for (int k = 0; k < MK; k++) acc = _mm512_dpbusd_epi32(acc, _mm512_loadu_si512(im->lt + ((i * MK + k) * M + 16 * h) * 4), gt[k]);
+            _mm512_storeu_si512(dm + i * M + 16 * h, _mm512_sub_epi32(acc, gs));
+        }
+    }
+    float c = gl * m->ls / sm * sx / gr; am = 0;
+    #pragma omp simd reduction(max:am)
+    for (int k = 0; k < D; k++) { float v = dm[k] * c, a = fabsf(v); am = a > am ? a : am; g2[k] = sr8(v, (t * D + k) ^ ~m->salt); }
+    m->gr.cur[tid][0] = MAXF(m->gr.cur[tid][0], am * gr);
+    for (int b = 0; b < M; b++) {                                             // ax[b][i] = sum_o R[b][i][o] g2[b][o]
+        int gsum = 0; for (int o = 0; o < M; o++) gsum += g2[b * M + o];
+        for (int h = 0; h < MH; h++) {
+            __m512i acc = _mm512_setzero_si512();
+            for (int k = 0; k < MK; k++) {
+                int32_t g4; memcpy(&g4, g2 + b * M + 4 * k, 4);
+                acc = _mm512_dpbusd_epi32(acc, _mm512_loadu_si512(im->rt + ((b * MK + k) * M + 16 * h) * 4), _mm512_set1_epi32(g4));
+            }
+            _mm512_storeu_si512(ax + b * M + 16 * h, _mm512_sub_epi32(acc, _mm512_set1_epi32(gsum)));
+        }
+    }
+    float cx = gr * m->rs / sx;
+    for (int k = 0; k < D; k++) dx[k] = ax[k] * cx;
+}
+#define BWDX(y, i, m, sx, dy, dx, t, tid, g1, g2) imon_bwdx(&(y)->im[i], m, sx, dy, dx, t, tid, g1, g2)
+#define IMON(y, i, m, x, sx, out) imon_fwd(&(y)->im[i], m, x, sx, out, NULL, NULL)
+#define TMON(y, i, m, x, sx, out, t) imon_fwd(&(y)->im[i], m, x, sx, out, (m)->mq + (size_t)(t) * D, (m)->ms + (t))   // training: keeps mids
 #else
 #define IMON(y, i, m, x, sx, out) mon_fwd(m, x, sx, out, 0)
+#define BWDX(y, i, m, sx, dy, dx, t, tid, g1, g2) mon_bwdx(m, sx, dy, dx, t, tid, g1, g2)
+#define TMON(y, i, m, x, sx, out, t) mon_fwd(m, x, sx, out, t)
 #endif
 
 // ---- RMSNorm (no gain). Forward is folded into q8t's scale; backward recomputes y = x r ---------
@@ -357,12 +468,12 @@ typedef struct {
 #endif
 } Layer;
 // a stack of layers over sequences of length T (bytes or patches); X[0] is its input, X[L] its output
-typedef struct { int T, L, N; Plan pl; Layer *ly; float **X; long ipos; } Stack;
+typedef struct { int T, L, N; Plan pl; Layer *ly; float **X; long ipos; const int *len; } Stack;   // len: valid steps per sequence, or NULL
 static float *VB, *DP;                        // shared scratch: conv input (grad), short conv out grads
 
 static inline float tanh_(float u) {           // tanh as a clamped [7/6] Pade
-    float v = fminf(fmaxf(u, -4.97f), 4.97f), v2 = v * v;
-    return v * (135135 + v2 * (17325 + v2 * (378 + v2))) / (135135 + v2 * (62370 + v2 * (3150 + v2 * 28)));
+    float v = u < -4.97f ? -4.97f : u > 4.97f ? 4.97f : u, v2 = v * v;     // (fminf / fmaxf would block vectorising)
+    return v * (135135.f + v2 * (17325.f + v2 * (378.f + v2))) / (135135.f + v2 * (62370.f + v2 * (3150.f + v2 * 28.f)));
 }
 static inline float gelu0(float x) { return 0.5f * x * (1 + tanh_(0.7978846f * (x + 0.044715f * x * x * x))); }
 static float gelu(float x, float *d) {        // tanh GELU and its derivative
@@ -411,8 +522,8 @@ static void conv_prep(Conv *c) {                      // ternarise short conv (p
         float s = 1e-8f; for (int j = 0; j < 3; j++) for (int ch = 0; ch < D; ch++) s += fabsf(c->sw->w[j * 3 * D + w * D + ch]);
         s /= 3 * D; c->sws[w] = s;
         for (int j = 0; j < 3; j++) for (int ch = 0; ch < D; ch++) {
-            int k = j * 3 * D + w * D + ch; float r = roundf(c->sw->w[k] / s);
-            c->swq[k] = r > 1 ? 1 : r < -1 ? -1 : r; c->swe[k] = c->swq[k] * s;
+            int k = j * 3 * D + w * D + ch;
+            c->swq[k] = (c->sw->w[k] >= 0.5f * s) - (c->sw->w[k] <= -0.5f * s); c->swe[k] = c->swq[k] * s;
         }
         c->sbs[w] = tern(c->sb->w + w * D, c->sbq + w * D, D, 1);
         for (int ch = 0; ch < D; ch++) c->sbe[w * D + ch] = c->sbq[w * D + ch] * c->sbs[w];
@@ -421,33 +532,52 @@ static void conv_prep(Conv *c) {                      // ternarise short conv (p
     for (int ch = 0; ch < D; ch++) c->be[ch] = c->bq[ch] * c->bs;
     for (int i = 0; i < 4; i++) c->as[i] = (c->amax[i] > 0 ? c->amax[i] : 1) / 127;
 }
-static int8_t sc8(float x, float is) { float r = rintf(x * is); return r > 127 ? 127 : r < -127 ? -127 : (int8_t)r; }   // is: 1 / scale
+static inline int8_t sc8(float x, float is) {   // round(x / scale), saturated; is = 1 / scale. Branch-free: vectorises
+    float r = rintf(x * is); r = r > 127.f ? 127.f : r < -127.f ? -127.f : r; return (int8_t)(int32_t)r;
+}
 // static-scale int8 fake quant (STE): x <- s clip(round(x / s)); returns max |x| for the EMA
-static float sq8(float *x, int n, float s) {
-    float m = 0, is = 1 / s; for (int i = 0; i < n; i++) { m = fmaxf(m, fabsf(x[i])); x[i] = sc8(x[i], is) * s; }
+static float sq8(float *x, int n, float s) {  // (= sc8(x, 1 / s) * s, written branch-free so it vectorises)
+    float m = 0, is = 1 / s;
+    #pragma omp simd reduction(max:m)
+    for (int i = 0; i < n; i++) {
+        float a = fabsf(x[i]), r = rintf(x[i] * is); m = a > m ? a : m;
+        r = r > 127.f ? 127.f : r < -127.f ? -127.f : r; x[i] = r * s;
+    }
     return m;
 }
+static inline float fsin(float x) {           // |err| ~1e-7 for moderate |x|: reduce to [-pi/2, pi/2], odd Taylor to x^11
+    float r = x - floor_(x * 0.15915494f + 0.5f) * 6.2831853f;
+    r = r > 1.5707963f ? 3.1415927f - r : r < -1.5707963f ? -3.1415927f - r : r;
+    float r2 = r * r;
+    return r * (1 + r2 * (-1 / 6.f + r2 * (1 / 120.f + r2 * (-1 / 5040.f + r2 * (1 / 362880.f - r2 / 39916800.f)))));
+}
+static inline float fcos(float x) { return fsin(x + 1.5707963f); }
 static void filter_fwd(Stack *S, Conv *c) {           // h = FFN(pos) * mod, ternarised per channel, and its spectrum
     int T = S->T, NF = S->pl.NF;
+    static float w3t[FO * D];                         // w3 transposed: the last layer accumulates whole rows
+    for (int ch = 0; ch < D; ch++) for (int o = 0; o < FO; o++) w3t[o * D + ch] = c->w3->w[ch * FO + o];
     #pragma omp parallel for
     for (int t = 0; t < T; t++) {
-        float *p1 = c->p1 + t * FO, *a1 = c->a1 + t * FO, *p2 = c->p2 + t * FO, *a2 = c->a2 + t * FO;
+        float *p1 = c->p1 + t * FO, *a1 = c->a1 + t * FO, *p2 = c->p2 + t * FO, *a2 = c->a2 + t * FO, hr[D] = {0};
         for (int o = 0; o < FO; o++) {
             float s = c->b1->w[o]; for (int e = 0; e < FE; e++) s += c->w1->w[o * FE + e] * c->pz[t * FE + e];
-            p1[o] = s; a1[o] = sinf(s);
+            p1[o] = s;
         }
+        for (int o = 0; o < FO; o++) a1[o] = fsin(p1[o]);
         for (int o = 0; o < FO; o++) {
             float s = c->b2->w[o]; for (int i = 0; i < FO; i++) s += c->w2->w[o * FO + i] * a1[i];
-            p2[o] = s; a2[o] = sinf(s);
+            p2[o] = s;
         }
-        for (int ch = 0; ch < D; ch++) {
-            float s = 0; for (int o = 0; o < FO; o++) s += c->w3->w[ch * FO + o] * a2[o];
-            c->h[t * D + ch] = s * c->mod[t * D + ch];
-        }
+        for (int o = 0; o < FO; o++) a2[o] = fsin(p2[o]);
+        for (int o = 0; o < FO; o++) { float a = a2[o]; const float *w = w3t + o * D; for (int ch = 0; ch < D; ch++) hr[ch] += a * w[ch]; }
+        for (int ch = 0; ch < D; ch++) c->h[t * D + ch] = hr[ch] * c->mod[t * D + ch];
     }
-    for (int ch = 0; ch < D; ch++) {                  // the kernel inference sees: trits, one scale per channel
-        c->hs[ch] = tern(c->h + ch, c->hq + ch, T, D);
-        for (int t = 0; t < T; t++) c->he[t * D + ch] = c->hq[t * D + ch] * c->hs[ch];
+    for (int ch = 0; ch < D; ch++) c->hs[ch] = 1e-8f; // the kernel inference sees: trits, one absmean scale per channel
+    for (int t = 0; t < T; t++) for (int ch = 0; ch < D; ch++) c->hs[ch] += fabsf(c->h[t * D + ch]);   // row-major: no
+    for (int ch = 0; ch < D; ch++) c->hs[ch] /= T;                                                    // 1 KB strides
+    for (int t = 0; t < T; t++) for (int ch = 0; ch < D; ch++) {
+        float x = c->h[t * D + ch], h = 0.5f * c->hs[ch]; int8_t q = (x >= h) - (x <= -h);
+        c->hq[t * D + ch] = q; c->he[t * D + ch] = q * c->hs[ch];
     }
     #pragma omp parallel for
     for (int ch = 0; ch < NCH; ch++) {
@@ -465,10 +595,10 @@ static void filter_bwd(Stack *S, Conv *c) {           // dh -> filter FFN grads
             float g = c->dh[t * D + ch] *= c->mod[t * D + ch]; const float *w = c->w3->w + ch * FO;
             for (int o = 0; o < FO; o++) s[o] += g * w[o];
         }
-        for (int o = 0; o < FO; o++) g2[t * FO + o] = s[o] * cosf(c->p2[t * FO + o]);
+        for (int o = 0; o < FO; o++) g2[t * FO + o] = s[o] * fcos(c->p2[t * FO + o]);
         for (int i = 0; i < FO; i++) {
             float s = 0; for (int o = 0; o < FO; o++) s += g2[t * FO + o] * c->w2->w[o * FO + i];
-            g1[t * FO + i] = s * cosf(c->p1[t * FO + i]);
+            g1[t * FO + i] = s * fcos(c->p1[t * FO + i]);
         }
     }
     #pragma omp parallel for
@@ -559,25 +689,33 @@ static void mixer_bwd(Stack *S, Layer *y, int nb) {
             DP[((size_t)N + t) * D + ch] = du * v[ch]; DP[((size_t)2 * N + t) * D + ch] = du * k[ch];
         }
     }
-    #pragma omp parallel for
-    for (int c0 = 0; c0 < D; c0 += CH) {            // skip bias and short conv weight grads, CH lanes at a time
-        float gb[CH] = {0}, gw[9][CH] = {{0}}, gs[3][CH] = {{0}};
+    static float *acc; if (!acc) acc = fa((size_t)NT * 13 * D);   // skip bias and short conv grads: per-thread rows
+    #pragma omp parallel
+    {
+        float *A = acc + (size_t)TID * 13 * D, iu = 1 / c->as[3], su = c->as[3];   // [bias][sb x3][sw j=0..2 x w=0..2]
+        memset(A, 0, 13 * D * sizeof(float));
+        #pragma omp for
         for (int t = 0; t < n; t++) {
-            int tt = t % T; const float *k = y->post + ((size_t)N + t) * D + c0, *v = k + (size_t)N * D, *cc = y->cc + t * D + c0;
-            for (int l = 0; l < CH; l++) gb[l] += cc[l] * sc8(k[l] * v[l], 1 / c->as[3]) * c->as[3];
+            int tt = t % T; const float *k = y->post + ((size_t)N + t) * D, *v = k + (size_t)N * D, *cc = y->cc + (size_t)t * D;
+            for (int ch = 0; ch < D; ch++) {        // the int8 u the forward used (as sq8)
+                float r = rintf(k[ch] * v[ch] * iu); r = r > 127.f ? 127.f : r < -127.f ? -127.f : r; A[ch] += cc[ch] * r * su;
+            }
             for (int w = 0; w < 3; w++) {
-                const float *g = DP + ((size_t)w * N + t) * D + c0;
-                for (int l = 0; l < CH; l++) gs[w][l] += g[l];
+                const float *g = DP + ((size_t)w * N + t) * D; float *sb = A + (1 + w) * D;
+                for (int ch = 0; ch < D; ch++) sb[ch] += g[ch];
                 for (int j = 0; j < 3 && j <= tt; j++) {
-                    const float *p = y->pre + ((size_t)w * N + t - j) * D + c0;
-                    for (int l = 0; l < CH; l++) gw[j * 3 + w][l] += g[l] * p[l];
+                    const float *p = y->pre + ((size_t)w * N + t - j) * D; float *sw = A + (4 + j * 3 + w) * D;
+                    for (int ch = 0; ch < D; ch++) sw[ch] += g[ch] * p[ch];
                 }
             }
         }
-        for (int l = 0; l < CH; l++) {
-            c->bias->g[c0 + l] += gb[l];
-            for (int w = 0; w < 3; w++) { c->sb->g[w * D + c0 + l] += gs[w][l]; for (int j = 0; j < 3; j++) c->sw->g[j * 3 * D + w * D + c0 + l] += gw[j * 3 + w][l]; }
-        }
+    }
+    #pragma omp parallel for
+    for (int ch = 0; ch < D; ch++) {
+        float s[13] = {0};
+        for (int th = 0; th < NT; th++) for (int i = 0; i < 13; i++) s[i] += acc[((size_t)th * 13 + i) * D + ch];
+        c->bias->g[ch] += s[0];
+        for (int w = 0; w < 3; w++) { c->sb->g[w * D + ch] += s[1 + w]; for (int j = 0; j < 3; j++) c->sw->g[j * 3 * D + w * D + ch] += s[4 + j * 3 + w]; }
     }
     #pragma omp parallel for
     for (int t = 0; t < n; t++) {                       // short conv^T: d pre[t] = sum_j w_j d post[t + j]
@@ -599,29 +737,37 @@ static void stack_fwd(Stack *S, int nb, int train) {    // S->X[0] -> S->X[L], n
         Layer *y = &S->ly[l]; Conv *c = &y->cv;
         Mon *ms[] = {&y->q, &y->k, &y->v, &y->o, &y->g, &y->u, &y->d};
         for (int i = 0; i < 7; i++) mon_prep(ms[i]);
+#ifdef VNNI
+        for (int i = 0; i < 7; i++) imon_prep(&y->im[i], ms[i]);
+#endif
         #pragma omp parallel for
         for (int t = 0; t < n; t++) {           // phase 1 (per token): rms+quant, Mon_q, Mon_k, Mon_v
+            if (S->len && t % T >= S->len[t / T]) {   // padding: zeros keep the FFT finite, and causality keeps
+                for (int w = 0; w < 3; w++) memset(y->pre + ((size_t)w * N + t) * D, 0, D * sizeof(float));   // it out of valid steps
+                continue;
+            }
             const float *x = X[l] + t * D; int8_t *q = y->q1 + t * D;
             y->r1[t] = rinv(x); y->s1[t] = q8t(x, q, y->r1[t]);
-            for (int w = 0; w < 3; w++) mon_fwd(ms[w], q, y->s1[t], y->pre + ((size_t)w * N + t) * D, t);
+            for (int w = 0; w < 3; w++) TMON(y, w, ms[w], q, y->s1[t], y->pre + ((size_t)w * N + t) * D, t);
         }
         mixer_fwd(S, y, nb, train);
         #pragma omp parallel for
         for (int t = 0; t < n; t++) {           // phase 2 (per token): gate, Mon_o, +res, rms, GLU, +res
+            if (S->len && t % T >= S->len[t / T]) { memset(X[l + 1] + (size_t)t * D, 0, D * sizeof(float)); continue; }
             float g[D], o[D], dd;
             float *cc = y->cc + t * D, *q = y->post + (size_t)t * D, *u = VB + t * D, *x = X[l] + t * D, *x1 = y->x1 + t * D;
             float *ga = y->ga + t * D, *ub = y->ub + t * D;
             for (int ch = 0; ch < D; ch++) g[ch] = q[ch] * (cc[ch] + c->be[ch] * u[ch]);
             y->so[t] = q8t(g, y->qo + t * D, 1);
-            mon_fwd(&y->o, y->qo + t * D, y->so[t], o, t);
+            TMON(y, 3, &y->o, y->qo + t * D, y->so[t], o, t);
             for (int i = 0; i < D; i++) x1[i] = x[i] + o[i];
             y->r2[t] = rinv(x1); y->s2[t] = q8t(x1, y->q2 + t * D, y->r2[t]);
-            mon_fwd(&y->g, y->q2 + t * D, y->s2[t], ga, t);
-            mon_fwd(&y->u, y->q2 + t * D, y->s2[t], ub, t);
+            TMON(y, 4, &y->g, y->q2 + t * D, y->s2[t], ga, t);
+            TMON(y, 5, &y->u, y->q2 + t * D, y->s2[t], ub, t);
             #pragma omp simd private(dd)
             for (int i = 0; i < D; i++) g[i] = gelu(ga[i], &dd) * ub[i];
             y->sd[t] = q8t(g, y->qd + t * D, 1);
-            mon_fwd(&y->d, y->qd + t * D, y->sd[t], o, t);
+            TMON(y, 6, &y->d, y->qd + t * D, y->sd[t], o, t);
             for (int i = 0; i < D; i++) X[l + 1][t * D + i] = x1[i] + o[i];
         }
     }
@@ -632,65 +778,105 @@ static void stack_bwd(Stack *S, float *DX, int nb) {    // DX: grad wrt X[L] in,
     for (int l = S->L - 1; l >= 0; l--) {               // DX: grad wrt X[l+1] -> grad wrt X[l]
         Layer *y = &S->ly[l]; Conv *c = &y->cv;
         #pragma omp parallel for
-        for (int t = 0; t < n; t++) {                   // phase A (per token): GLU, rms2, Mon_o, output gate
-            int tid = TID; float a[D], b[D], e[D], dd, *dx = DX + t * D, *ga = y->ga + t * D, *ub = y->ub + t * D;
-            mon_bwd(&y->d, y->qd + t * D, y->sd[t], dx, a, t, tid);
-            #pragma omp simd private(dd)
-            for (int i = 0; i < D; i++) { float gl = gelu(ga[i], &dd); b[i] = a[i] * ub[i] * dd; a[i] *= gl; }
-            mon_bwd(&y->u, y->q2 + t * D, y->s2[t], a, e, t, tid);
-            mon_bwd(&y->g, y->q2 + t * D, y->s2[t], b, a, t, tid);
-            for (int i = 0; i < D; i++) a[i] += e[i];
-            rms_bwd(y->x1 + t * D, y->r2[t], a, dx);
-            mon_bwd(&y->o, y->qo + t * D, y->so[t], dx, a, t, tid);
-            float *cc = y->cc + t * D, *q = y->post + (size_t)t * D, *k = q + (size_t)N * D, *v = k + (size_t)N * D;
-            for (int ch = 0; ch < D; ch++) {            // DP[0] <- dq; cc <- d(conv out)
-                float u = sc8(k[ch] * v[ch], 1 / c->as[3]) * c->as[3];   // the int8 u the forward used
-                DP[(size_t)t * D + ch] = a[ch] * (cc[ch] + c->be[ch] * u); cc[ch] = a[ch] * q[ch];
+        for (int t0 = 0; t0 < n; t0 += 4) {             // phase A (4 tokens at a time): GLU, rms2, Mon_o, output gate
+            int tid = TID; int8_t gc[4][2][4][D];       // grad codes [Mon d, u, g, o][L side, R side][token]
+            for (int j = 0; j < 4; j++) {
+                int t = t0 + j;
+                if (S->len && t % T >= S->len[t / T]) {
+                    memset(DP + (size_t)t * D, 0, D * sizeof(float)); memset(y->cc + (size_t)t * D, 0, D * sizeof(float));
+                    for (int w = 0; w < 4; w++) memset(gc[w][0][j], 0, D), memset(gc[w][1][j], 0, D);
+                    continue;
+                }
+                float a[D], b[D], e[D], dd, *dx = DX + t * D, *ga = y->ga + t * D, *ub = y->ub + t * D;
+                BWDX(y, 6, &y->d, y->sd[t], dx, a, t, tid, gc[0][0][j], gc[0][1][j]);
+                #pragma omp simd private(dd)
+                for (int i = 0; i < D; i++) { float gl = gelu(ga[i], &dd); b[i] = a[i] * ub[i] * dd; a[i] *= gl; }
+                BWDX(y, 5, &y->u, y->s2[t], a, e, t, tid, gc[1][0][j], gc[1][1][j]);
+                BWDX(y, 4, &y->g, y->s2[t], b, a, t, tid, gc[2][0][j], gc[2][1][j]);
+                for (int i = 0; i < D; i++) a[i] += e[i];
+                rms_bwd(y->x1 + t * D, y->r2[t], a, dx);
+                BWDX(y, 3, &y->o, y->so[t], dx, a, t, tid, gc[3][0][j], gc[3][1][j]);
+                float *cc = y->cc + t * D, *q = y->post + (size_t)t * D, *k = q + (size_t)N * D, *v = k + (size_t)N * D;
+                float iu = 1 / c->as[3], su = c->as[3], *dq = DP + (size_t)t * D;
+                for (int ch = 0; ch < D; ch++) {        // DP[0] <- dq; cc <- d(conv out)
+                    float r = rintf(k[ch] * v[ch] * iu); r = r > 127.f ? 127.f : r < -127.f ? -127.f : r;   // the int8 u
+                    dq[ch] = a[ch] * (cc[ch] + c->be[ch] * r * su); cc[ch] = a[ch] * q[ch];                 // the forward used
+                }
             }
+            mon_dw4(&y->d, tid, t0, y->qd, gc[0][0], gc[0][1]); mon_dw4(&y->u, tid, t0, y->q2, gc[1][0], gc[1][1]);
+            mon_dw4(&y->g, tid, t0, y->q2, gc[2][0], gc[2][1]); mon_dw4(&y->o, tid, t0, y->qo, gc[3][0], gc[3][1]);
         }
         mixer_bwd(S, y, nb);
         #pragma omp parallel for
-        for (int t = 0; t < n; t++) {                   // phase B (per token): Mon_q/k/v, rms1
-            int tid = TID; float b[D], sum[D] = {0};
+        for (int t0 = 0; t0 < n; t0 += 4) {             // phase B (4 tokens at a time): Mon_q/k/v, rms1
+            int tid = TID; int8_t gc[3][2][4][D];
             Mon *ms[] = {&y->q, &y->k, &y->v};
-            for (int w = 0; w < 3; w++) {
-                mon_bwd(ms[w], y->q1 + t * D, y->s1[t], y->pre + ((size_t)w * N + t) * D, b, t, tid);
-                for (int ch = 0; ch < D; ch++) sum[ch] += b[ch];
+            for (int j = 0; j < 4; j++) {
+                int t = t0 + j;
+                if (S->len && t % T >= S->len[t / T]) { for (int w = 0; w < 3; w++) memset(gc[w][0][j], 0, D), memset(gc[w][1][j], 0, D); continue; }
+                float b[D], sum[D] = {0};
+                for (int w = 0; w < 3; w++) {
+                    BWDX(y, w, ms[w], y->s1[t], y->pre + ((size_t)w * N + t) * D, b, t, tid, gc[w][0][j], gc[w][1][j]);
+                    for (int ch = 0; ch < D; ch++) sum[ch] += b[ch];
+                }
+                rms_bwd(X[l] + t * D, y->r1[t], sum, DX + t * D);
             }
-            rms_bwd(X[l] + t * D, y->r1[t], sum, DX + t * D);
+            for (int w = 0; w < 3; w++) mon_dw4(ms[w], tid, t0, y->q1, gc[w][0], gc[w][1]);
         }
         Mon *ms[] = {&y->q, &y->k, &y->v, &y->o, &y->g, &y->u, &y->d};
         for (int i = 0; i < 7; i++) mon_reduce(ms[i]);
     }
 }
 
-// ---- heads: rms + logits over a [V][D] fp32 matrix ------------------------------------------------
-static float *HN, *RF, *LOGIT, *S1, *G1, *G2;    // normed x, its rms, logits (then their grad), scratch, grads
+// ---- heads: rms + logits over a [V][D] matrix, int8 x int8 with STE ----------------------------------
+// Weights are int8 per output row (absmax), the normed input int8 per token (absmax), so inference runs the
+// head as one int8 dot product per logit; training runs the same fake-quantised values in fp32.
+static float *HN, *RF, *LOGIT, *S1, *G1, *G2, *WD;   // quantised normed x, its rms, logits (then grad), scratch, grads, W
+static void head_quant(const float *W, float *Wd, int8_t *wq, float *sw) {   // per-row int8; Wd: dequantised
+    for (int c = 0; c < V; c++) {
+        int8_t q[D]; float s = q8t(W + c * D, q, 1);
+        for (int i = 0; i < D; i++) { if (Wd) Wd[c * D + i] = q[i] * s; if (wq) wq[c * D + i] = q[i]; }
+        if (sw) sw[c] = s;
+    }
+}
+static float *WT;                             // dequantised head transposed [D][V]
+#define HB 8                                  // tokens per tile: each weight row is read once per tile, not per token
 static void head_fwd(const float *X, int n, const float *W) {
+    head_quant(W, WD, NULL, NULL);
+    for (int c = 0; c < V; c++) for (int i = 0; i < D; i++) WT[i * V + c] = WD[c * D + i];
     #pragma omp parallel for
-    for (int t = 0; t < n; t++) {
-        float r = RF[t] = rinv(X + t * D), *h = HN + (size_t)t * D;
-        for (int i = 0; i < D; i++) h[i] = X[(size_t)t * D + i] * r;
-        for (int c = 0; c < V; c++) {
-            float s = 0; const float *w = W + c * D;
-            #pragma omp simd reduction(+:s)
-            for (int i = 0; i < D; i++) s += h[i] * w[i];
-            LOGIT[(size_t)t * V + c] = s;
+    for (int t0 = 0; t0 < n; t0 += HB) {
+        float acc[HB][V] = {{0}};
+        for (int t = t0; t < t0 + HB; t++) {
+            int8_t q[D]; float *h = HN + (size_t)t * D, r = RF[t] = rinv(X + (size_t)t * D), sx = q8t(X + (size_t)t * D, q, r);
+            for (int i = 0; i < D; i++) h[i] = q[i] * sx;
         }
+        for (int i = 0; i < D; i++) {
+            const float *w = WT + i * V;
+            for (int j = 0; j < HB; j++) { float hi = HN[(size_t)(t0 + j) * D + i]; for (int c = 0; c < V; c++) acc[j][c] += hi * w[c]; }
+        }
+        memcpy(LOGIT + (size_t)t0 * V, acc, sizeof acc);
     }
 }
 static void head_bwd(const float *X, int n, const float *W, float *Wg, float *G) {   // LOGIT holds dLoss/dlogits
+    head_quant(W, WD, NULL, NULL);
     #pragma omp parallel for
-    for (int t = 0; t < n; t++) {
-        float *s = S1 + (size_t)t * D, *g = G + (size_t)t * D; const float *z = LOGIT + (size_t)t * V;
-        for (int i = 0; i < D; i++) s[i] = g[i] = 0;
-        for (int c = 0; c < V; c++) { float a = z[c]; const float *w = W + c * D; for (int i = 0; i < D; i++) s[i] += a * w[i]; }
-        rms_bwd(X + (size_t)t * D, RF[t], s, g);
+    for (int t0 = 0; t0 < n; t0 += HB) {                                    // d h = dlogits . W, a tile of tokens per W row
+        float s[HB][D] = {{0}};
+        for (int c = 0; c < V; c++) {
+            const float *w = WD + c * D;
+            for (int j = 0; j < HB; j++) { float a = LOGIT[(size_t)(t0 + j) * V + c]; for (int i = 0; i < D; i++) s[j][i] += a * w[i]; }
+        }
+        for (int j = 0; j < HB; j++) {
+            int t = t0 + j; float *g = G + (size_t)t * D;
+            for (int i = 0; i < D; i++) g[i] = 0;
+            rms_bwd(X + (size_t)t * D, RF[t], s[j], g);
+        }
     }
     #pragma omp parallel for
-    for (int c = 0; c < V; c++) for (int t = 0; t < n; t++) {
-        float a = LOGIT[(size_t)t * V + c], *w = Wg + c * D; const float *h = HN + (size_t)t * D;
-        if (a != 0) for (int i = 0; i < D; i++) w[i] += a * h[i];
+    for (int c0 = 0; c0 < V; c0 += 16) for (int t = 0; t < n; t++) {       // dW += dlogits^T h, 16 rows per h read
+        const float *h = HN + (size_t)t * D;
+        for (int c = c0; c < c0 + 16; c++) { float a = LOGIT[(size_t)t * V + c], *w = Wg + c * D; for (int i = 0; i < D; i++) w[i] += a * h[i]; }
     }
 }
 static float xent(const uint8_t *const *tgt, int n, int grad) {   // mean CE (nats/byte); tgt[b][t]
@@ -698,7 +884,7 @@ static float xent(const uint8_t *const *tgt, int n, int grad) {   // mean CE (na
     #pragma omp parallel for reduction(+:loss)
     for (int t = 0; t < n; t++) {
         float *z = LOGIT + (size_t)t * V, mx = z[0], s = 0; int y = tgt[t / TB][t % TB];
-        for (int c = 1; c < V; c++) mx = fmaxf(mx, z[c]);
+        for (int c = 1; c < V; c++) mx = MAXF(mx, z[c]);
         for (int c = 0; c < V; c++) s += expf(z[c] - mx);
         loss += logf(s) + mx - z[y];
         if (grad) { for (int c = 0; c < V; c++) z[c] = expf(z[c] - mx) / s / n; z[y] -= 1.f / n; }
@@ -727,11 +913,19 @@ static long pick(int val) {                   // window offset; >= 8 so every ha
     long lo = val ? ntrain : 8, hi = (val ? ndata : ntrain) - TB - 2;
     return lo + (long)(urand() * (hi - lo));
 }
-static float entropy_of(const float *z) {
-    float mx = z[0], s = 0, e = 0; for (int c = 1; c < V; c++) mx = fmaxf(mx, z[c]);
-    for (int c = 0; c < V; c++) s += expf(z[c] - mx);
-    for (int c = 0; c < V; c++) { float p = expf(z[c] - mx) / s; if (p > 0) e -= p * logf(p); }
-    return e;
+static inline float fexp(float x) {           // e^x for x <= 0: 2^floor * a degree-5 polynomial for 2^frac; vectorises
+    float t = MAXF(x, -87.f) * 1.44269504f, fl = floor_(t), f = t - fl;
+    float p = 1.8775767e-3f; p = p * f + 8.9893397e-3f; p = p * f + 5.5826318e-2f; p = p * f + 2.4015361e-1f; p = p * f + 6.9315308e-1f; p = p * f + 9.9999994e-1f;
+    int32_t b = ((int32_t)fl + 127) << 23; float sc; memcpy(&sc, &b, 4);
+    return p * sc;
+}
+static float entropy_of(const float *z) {     // H = log sum e^d - sum e^d d / sum e^d, d = z - max: one exp per byte value
+    float mx = z[0], s = 0, sd = 0;
+    #pragma omp simd reduction(max:mx)
+    for (int c = 0; c < V; c++) mx = z[c] > mx ? z[c] : mx;
+    #pragma omp simd reduction(+:s, sd)
+    for (int c = 0; c < V; c++) { float d = z[c] - mx, e = fexp(d); s += e; sd += e * d; }
+    return logf(s) - sd / s;
 }
 static void entropies(void) {                 // run the entropy model over the corpus once, windows overlapping by half
     ENT = fa(ndata + 1);
@@ -793,7 +987,7 @@ static void blt_fwd(const uint8_t *const *win, const long *off, int nb, int trai
             else for (int i = 0; i < D; i++) if (et[i] > gk[i]) { gk[i] = et[i]; ak[i] = t; }
         }
     }
-    stack_fwd(&SG, nb, train);
+    SG.len = npat; stack_fwd(&SG, nb, train);
     const float *z = SG.X[LG]; float *d = SD.X[0];
     #pragma omp parallel for
     for (int t = 0; t < n; t++) {             // decoder input: encoder state + the global state of its patch
@@ -862,6 +1056,9 @@ static void stack_reset(Stack *S) {
     for (int l = 0; l < S->L; l++) { memset(S->ly[l].hist, 0, sizeof S->ly[l].hist); memset(S->ly[l].ring, 0, (size_t)S->T * D); }
     S->ipos = 0;
 }
+static void glu(float *restrict g, const float *restrict f) {   // g *= gelu(f)
+    for (int i = 0; i < D; i++) g[i] *= gelu0(f[i]);
+}
 static void stack_step(Stack *S, float *x) {  // x [D]: input in, output out
     float x1[D], o[D], f[D], g[D]; int8_t q[D], cur[3][D]; long p = S->ipos++; int T = S->T;
     for (int l = 0; l < S->L; l++) {
@@ -887,17 +1084,34 @@ static void stack_step(Stack *S, float *x) {  // x [D]: input in, output out
         float so = q8t(g, q, 1); IMON(y, 3, &y->o, q, so, o);
         for (int i = 0; i < D; i++) x1[i] = x[i] + o[i];
         float s2 = q8t(x1, q, rinv(x1)); IMON(y, 4, &y->g, q, s2, f); IMON(y, 5, &y->u, q, s2, g);
-        for (int i = 0; i < D; i++) g[i] *= gelu0(f[i]);
+        glu(g, f);
         float sd = q8t(g, q, 1); IMON(y, 6, &y->d, q, sd, o);
         for (int i = 0; i < D; i++) x[i] = x1[i] + o[i];
     }
 }
-static float *EhT, *WoT;                      // heads transposed [D][V]: all logits accumulate at once
-static float *transpose(const float *W) { float *t = fa((size_t)D * V); for (int c = 0; c < V; c++) for (int i = 0; i < D; i++) t[i * V + c] = W[c * D + i]; return t; }
-static void head_step(const float *x, const float *WT, float *logits) {
-    float r = rinv(x);
-    for (int c = 0; c < V; c++) logits[c] = 0;
-    for (int i = 0; i < D; i++) { float xi = x[i] * r; const float *e = WT + i * V; for (int c = 0; c < V; c++) logits[c] += xi * e[c]; }
+typedef struct { int8_t q[V * D]; uint8_t p[V * D]; float s[V]; } IHead;   // head: int8 rows, VNNI layout, scales
+static IHead ih_ent, ih_out;
+static void ihead_prep(IHead *h, const float *W) {
+    head_quant(W, NULL, h->q, h->s);
+    for (int k = 0; k < D / 4; k++) for (int c = 0; c < V; c++) for (int j = 0; j < 4; j++)   // [i/4][c][i%4], + 128: u8
+        h->p[(k * V + c) * 4 + j] = (uint8_t)(h->q[c * D + 4 * k + j] + 128);
+}
+static void head_step(const float *x, const IHead *h, float *logits) {   // int8 dot per logit, exact
+    int8_t q[D]; float sx = q8t(x, q, rinv(x));
+#ifdef VNNI
+    __m512i acc[V / 16], sum = _mm512_setzero_si512();                  // (w + 128) . x - 128 sum x
+    for (int c = 0; c < V / 16; c++) acc[c] = _mm512_setzero_si512();
+    for (int k = 0; k < D / 4; k++) {
+        int32_t x4; memcpy(&x4, q + 4 * k, 4); __m512i xv = _mm512_set1_epi32(x4);
+        for (int c = 0; c < V / 16; c++) acc[c] = _mm512_dpbusd_epi32(acc[c], _mm512_loadu_si512(h->p + (k * V + 16 * c) * 4), xv);
+        sum = _mm512_dpbusd_epi32(sum, _mm512_set1_epi8(1), xv);
+    }
+    __m512i s128 = _mm512_slli_epi32(sum, 7); __m512 vs = _mm512_set1_ps(sx);
+    for (int c = 0; c < V / 16; c++)
+        _mm512_storeu_ps(logits + 16 * c, _mm512_mul_ps(_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_sub_epi32(acc[c], s128)), vs), _mm512_loadu_ps(h->s + 16 * c)));
+#else
+    for (int c = 0; c < V; c++) { int32_t a = 0; const int8_t *w = h->q + c * D; for (int i = 0; i < D; i++) a += w[i] * q[i]; logits[c] = a * sx * h->s[c]; }
+#endif
 }
 static struct { uint8_t hist[8]; float pm[D], z[D]; int plen, start; long pos, npatch; } bs;
 static void blt_reset(const uint8_t *prev8) { // prev8: the 8 bytes before the stream (hash context), or NULL
@@ -914,15 +1128,15 @@ static void blt_step(int byte, int force, float *logits) {
     for (int k = 0; k < NG; k++) { const float *r = Hs[k]->w + (size_t)hrow(bs.hist + 7, k + 3, k) * D; for (int i = 0; i < D; i++) e[i] += r[i]; }
     stack_step(&SE, e);
     if (bs.start) { memcpy(bs.pm, e, sizeof e); bs.plen = 1; }        // max-pool the running patch
-    else { for (int i = 0; i < D; i++) bs.pm[i] = fmaxf(bs.pm[i], e[i]); bs.plen++; }
+    else { for (int i = 0; i < D; i++) bs.pm[i] = MAXF(bs.pm[i], e[i]); bs.plen++; }
     memcpy(h, Eh->w + byte * D, sizeof h); stack_step(&SH, h);        // entropy of the next byte
-    head_step(h, EhT, logits);
+    head_step(h, &ih_ent, logits);
     int st = force >= 0 ? force : bs.pos == 0 || entropy_of(logits) > theta || bs.plen >= PMAX;
     if (st) { memcpy(h, bs.pm, sizeof h); stack_step(&SG, h); memcpy(bs.z, h, sizeof h); bs.npatch++; }   // patch done
     bs.start = st;
     for (int i = 0; i < D; i++) d[i] = e[i] + bs.z[i];
     stack_step(&SD, d);
-    head_step(d, WoT, logits);
+    head_step(d, &ih_out, logits);
     bs.pos++;
 }
 
@@ -947,7 +1161,7 @@ int main(int argc, char **argv) {
     int NMAX = B * TB;
     SCR = fa((size_t)NT * 6 * 2 * TB * CH); VB = fa((size_t)NMAX * D); DP = fa((size_t)3 * NMAX * D);
     HN = fa((size_t)NMAX * D); RF = fa(NMAX); LOGIT = fa((size_t)NMAX * V); S1 = fa((size_t)NMAX * D);
-    G1 = fa((size_t)NMAX * D); G2 = fa((size_t)B * TG * D); arg = calloc((size_t)B * TG * D, 2); cpb = calloc(NMAX, sizeof(int));
+    G1 = fa((size_t)NMAX * D); WD = fa((size_t)V * D); WT = fa((size_t)V * D); G2 = fa((size_t)B * TG * D); arg = calloc((size_t)B * TG * D, 2); cpb = calloc(NMAX, sizeof(int));
     for (int k = 0; k < NG; k++) hidx[k] = calloc(NMAX, sizeof(int));
     const uint8_t *win[B], *tgt[B]; long off[B]; double t0;
 
@@ -988,7 +1202,7 @@ int main(int argc, char **argv) {
     }
 
     // 3. inference ------------------------------------------------------------------------------------------
-    stack_prep(&SH); stack_prep(&SE); stack_prep(&SG); stack_prep(&SD); EhT = transpose(Eh->w); WoT = transpose(Wo->w);
+    stack_prep(&SH); stack_prep(&SE); stack_prep(&SG); stack_prep(&SD); ihead_prep(&ih_ent, Eh->w); ihead_prep(&ih_out, Wo->w);
     float lg[V], err = 0, mag = 0; int agree = 0;
     off[0] = pick(1); win[0] = data + off[0];                          // replay a window with the training patches
     blt_fwd(win, off, 1, 0);
