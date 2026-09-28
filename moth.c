@@ -5,16 +5,19 @@
 //   Mon: view a width-d vector as an MxM tile (d = M^2). R mixes along each row, L along each column.
 //        That is P L P^T R. The permutations are never materialised: a column op on a row-major tile is
 //        lane-wise vector math with weights stored [o][i][lane], so every loop streams contiguous int8.
+//   conv: Monarch Mixer's sequence mixing. The length-T causal conv is an FFT conv of length 2T, and the DFT
+//        is itself a Monarch (block DFTs, twiddle, block DFTs), so it costs O(T^1.5 D) per sequence, not O(T^2 D).
 //
-// forward : ternary {-1,0,1} weights (absmean) x int8 activations (per-token absmax), STE. A ternary dot
-//           over 16 (Monarch) or 128 (conv) int8 terms fits in int16, so those accumulators use 32 lanes, not 16.
+// forward : ternary {-1,0,1} Monarch weights (absmean) x int8 activations (per-token absmax), STE. A
+//           ternary dot over 16 int8 terms fits in int16, so those accumulators use 32 lanes, not 16.
 //           Absmax codes are scale-invariant, so RMSNorm, R->L requantisation and the gate all fold into
-//           per-token scales. No float tensor is written that the backward doesn't need. The conv input uses a
-//           static EMA scale, so it stays strictly causal.
+//           per-token scales. No float tensor is written that the backward doesn't need. The long conv (kernel
+//           and signal) is fp32: it is the one mixer where ternary costs real quality, and the FFT wants floats.
 // backward: gradients are int8 with a delayed per-tensor scale (last step's amax, as in FP8 training) and
 //           stochastic rounding. There is no amax pre-pass and no barrier inside a Monarch. The input's per-token
 //           scale is folded into the gradient, so dW = g8^T x8 reuses the forward's int8 codes.
 //           dx = W^T g8 (ternary x int8, int16) and dW (int8 x int8) accumulate in per-thread int32 slabs.
+//           The conv's backward is two more FFT correlations: dv = g corr k, dk = sum_b g corr v.
 //
 // cc -O3 -march=native -fopenmp moth.c -o moth -lm && ./moth input.txt
 #include <stdio.h>
@@ -35,7 +38,9 @@
 #define D (M * M)       // model width
 #define W3 (M * M * M)  // weights per monarch factor
 #define L 4             // layers
-#define T 128           // context = long-conv length
+#ifndef T
+#define T 128           // context = long-conv length (power of 2)
+#endif
 #define B 16            // batch size
 #define N (B * T)       // tokens per batch
 #define STEPS 3000
@@ -145,70 +150,156 @@ static void rms_bwd(const float *x, float r, const float *dy, float *dx) {   // 
     for (int i = 0; i < D; i++) dx[i] += (dy[i] - x[i] * dot) * r;
 }
 
+// ---- Monarch FFT: the long conv as F^-1 (F k . F v), zero-padded to NF = 2T so it is causal ---------
+// F_NF = (I (x) F_P2) Tw P (I (x) F_P1) P with NF = P1 P2 (16 x 16 at T = 128): block DFTs down the columns of
+// the P1 x P2 time tile, a twiddle, block DFTs along its rows. Each block is a radix-2 FFT, lane-wise over CH
+// channels. Blocks run decimation-in-frequency forward and decimation-in-time inverse, so spectra stay in a
+// scrambled bin order that is never undone: everything done to them is pointwise. Two real sequences ride
+// in one complex transform (re, im); a real kernel keeps them apart, so no unpacking is needed.
+#define NF (2 * T)
+#define CH 16                                 // channels per vector lane group
+#define NCH (D / CH)
+static int P1, P2;
+static float *W1r, *W1i, *W2r, *W2i, *TWr, *TWi, *SCR;   // block twiddles, NF twiddle (scrambled k1), scratch
+static void fft_init(void) {
+    int lg = 0; while ((1 << lg) < NF) lg++;
+    P1 = 1 << lg / 2; P2 = NF / P1;
+    W1r = fa(P1); W1i = fa(P1); W2r = fa(P2); W2i = fa(P2); TWr = fa(NF); TWi = fa(NF);
+    for (int j = 0; j < P1; j++) { W1r[j] = cos(2 * M_PI * j / P1); W1i[j] = -sin(2 * M_PI * j / P1); }
+    for (int j = 0; j < P2; j++) { W2r[j] = cos(2 * M_PI * j / P2); W2i[j] = -sin(2 * M_PI * j / P2); }
+    for (int p = 0; p < P1; p++) {
+        int k1 = 0; for (int b = 1, q = p; b < P1; b <<= 1, q >>= 1) k1 = k1 << 1 | (q & 1);   // bit reverse
+        for (int n2 = 0; n2 < P2; n2++) { TWr[p * P2 + n2] = cos(2 * M_PI * k1 * n2 / NF); TWi[p * P2 + n2] = -sin(2 * M_PI * k1 * n2 / NF); }
+    }
+    SCR = fa((size_t)NT * 6 * NF * CH);
+}
+// forward block: natural in, bit-reversed out. z: upper half of the input is zero (the causal padding)
+static void dif(float *re, float *im, int n, const float *wr, const float *wi, int z) {
+    for (int len = n; len >= 2; len >>= 1) for (int s = 0, h = len / 2, st = n / len; s < n; s += len) for (int j = 0; j < h; j++) {
+        float c = wr[j * st], d = wi[j * st], *ar = re + (s + j) * CH, *ai = im + (s + j) * CH, *br = ar + h * CH, *bi = ai + h * CH;
+        if (z && len == n) for (int l = 0; l < CH; l++) { br[l] = ar[l] * c - ai[l] * d; bi[l] = ar[l] * d + ai[l] * c; }
+        else for (int l = 0; l < CH; l++) {
+            float xr = ar[l] - br[l], xi = ai[l] - bi[l]; ar[l] += br[l]; ai[l] += bi[l];
+            br[l] = xr * c - xi * d; bi[l] = xr * d + xi * c;
+        }
+    }
+}
+// inverse block (unscaled): bit-reversed in, natural out. z: only the lower half of the output is wanted
+static void dit(float *re, float *im, int n, const float *wr, const float *wi, int z) {
+    for (int len = 2; len <= n; len <<= 1) for (int s = 0, h = len / 2, st = n / len; s < n; s += len) for (int j = 0; j < h; j++) {
+        float c = wr[j * st], d = -wi[j * st], *ar = re + (s + j) * CH, *ai = im + (s + j) * CH, *br = ar + h * CH, *bi = ai + h * CH;
+        for (int l = 0; l < CH; l++) {
+            float tr = br[l] * c - bi[l] * d, ti = br[l] * d + bi[l] * c;
+            if (!(z && len == n)) { br[l] = ar[l] - tr; bi[l] = ai[l] - ti; }
+            ar[l] += tr; ai[l] += ti;
+        }
+    }
+}
+// x (+ i y), T steps of CH lanes at stride xs (y may be NULL) -> spectrum (or, oi) [NF][CH], scrambled order
+static void mfft(const float *x, const float *y, int xs, float *or, float *oi, float *tr, float *ti) {
+    for (int n2 = 0; n2 < P2; n2++) {                                         // columns: F_P1 over n1
+        for (int n1 = 0; n1 < P1 / 2; n1++) for (int l = 0; l < CH; l++) {
+            tr[n1 * CH + l] = x[(P2 * n1 + n2) * xs + l]; ti[n1 * CH + l] = y ? y[(P2 * n1 + n2) * xs + l] : 0;
+        }
+        dif(tr, ti, P1, W1r, W1i, 1);
+        for (int p = 0; p < P1; p++) {                                         // twiddle on the way out
+            float c = TWr[p * P2 + n2], d = TWi[p * P2 + n2], *a = tr + p * CH, *b = ti + p * CH;
+            float *u = or + (p * P2 + n2) * CH, *v = oi + (p * P2 + n2) * CH;
+            for (int l = 0; l < CH; l++) { u[l] = a[l] * c - b[l] * d; v[l] = a[l] * d + b[l] * c; }
+        }
+    }
+    for (int p = 0; p < P1; p++) dif(or + p * P2 * CH, oi + p * P2 * CH, P2, W2r, W2i, 0);   // rows: F_P2
+}
+// spectrum (zr, zi) (destroyed) -> first T steps: real part to x, imaginary part to y (if not NULL), times s
+static void mifft(float *zr, float *zi, float *x, float *y, int xs, float s, float *tr, float *ti) {
+    for (int p = 0; p < P1; p++) {
+        float *u = zr + p * P2 * CH, *v = zi + p * P2 * CH;
+        dit(u, v, P2, W2r, W2i, 0);
+        for (int n2 = 0; n2 < P2; n2++) {
+            float c = TWr[p * P2 + n2] * s, d = -TWi[p * P2 + n2] * s, *a = u + n2 * CH, *b = v + n2 * CH;
+            for (int l = 0; l < CH; l++) { float r = a[l] * c - b[l] * d; b[l] = a[l] * d + b[l] * c; a[l] = r; }
+        }
+    }
+    for (int n2 = 0; n2 < P2; n2++) {
+        for (int p = 0; p < P1; p++) memcpy(tr + p * CH, zr + (p * P2 + n2) * CH, CH * 4), memcpy(ti + p * CH, zi + (p * P2 + n2) * CH, CH * 4);
+        dit(tr, ti, P1, W1r, W1i, 1);
+        for (int n1 = 0; n1 < P1 / 2; n1++) {
+            memcpy(x + (P2 * n1 + n2) * xs, tr + n1 * CH, CH * 4);
+            if (y) memcpy(y + (P2 * n1 + n2) * xs, ti + n1 * CH, CH * 4);
+        }
+    }
+}
+
 // ---- model -------------------------------------------------------------------------------------
-typedef struct { P *k; int8_t kq[T * D]; float ks[D], alpha, s; Amax ga; } Conv;   // ternary kernel [T][D]
+typedef struct { P *k; float *Kr, *Ki, *Zr, *Zi; } Conv;   // fp32 kernel [T][D]; its spectrum; input spectra
 typedef struct {
     Mon a, v, o, u, d; Conv cv;
-    int8_t *q1, *qo, *q2, *qd, *vq, *gc;      // int8 codes: Monarch inputs, conv input, conv grad
+    int8_t *q1, *qo, *q2, *qd;                // int8 codes: Monarch inputs
     float *s1, *so, *s2, *sd, *r1, *r2;       // per-token scales and rms
     float *av, *cc, *x1, *h;                  // the only float activations kept for backward
 } Layer;
 static Layer ly[L];
 static P *E;                                  // token embedding, tied with the output head (fp32)
 static int V;
-static float *X[L + 1], *NF, *RF, *LG, *DX, *S1;
+static float *X[L + 1], *HN, *RF, *LG, *DX, *S1, *VB;   // VB: conv input / conv input grad
 
 static void build(void) {
     NT = omp_get_max_threads(); if (NT > 64) NT = 64;
+    fft_init();
     E = param(V * D, 0.02f);
     for (int l = 0; l < L; l++) {
         Layer *y = &ly[l]; float ro = 1 / sqrtf(2 * L);
         mon_init(&y->a, 1, 10 * l + 1); mon_init(&y->v, 1, 10 * l + 2); mon_init(&y->o, ro, 10 * l + 3);
         mon_init(&y->u, 1, 10 * l + 4); mon_init(&y->d, ro, 10 * l + 5);
-        y->cv.k = param(T * D, 1);
-        for (int ch = 0; ch < D; ch++) {         // decaying init: far taps quantize to 0 -> local prior
+        Conv *c = &y->cv; c->k = param(T * D, 0.1f);
+        for (int ch = 0; ch < D; ch++) {         // decaying init: a local prior
             float tau = 1 + urand() * T / 4;
-            for (int j = 0; j < T; j++) y->cv.k->w[j * D + ch] *= expf(-j / tau);
+            for (int j = 0; j < T; j++) c->k->w[j * D + ch] *= expf(-j / tau);
         }
-        int8_t **q[] = {&y->q1, &y->qo, &y->q2, &y->qd, &y->vq, &y->gc};
-        for (int i = 0; i < 6; i++) *q[i] = ia(N * D);
+        c->Kr = fa(NF * D); c->Ki = fa(NF * D); c->Zr = fa((size_t)(B + 1) / 2 * NF * D); c->Zi = fa((size_t)(B + 1) / 2 * NF * D);
+        int8_t **q[] = {&y->q1, &y->qo, &y->q2, &y->qd};
+        for (int i = 0; i < 4; i++) *q[i] = ia(N * D);
         float **s[] = {&y->s1, &y->so, &y->s2, &y->sd, &y->r1, &y->r2};
         for (int i = 0; i < 6; i++) *s[i] = fa(N);
         y->av = fa(N * D); y->cc = fa(N * D); y->x1 = fa(N * D); y->h = fa(N * D);
     }
     for (int l = 0; l <= L; l++) X[l] = fa(N * D);
-    NF = fa(N * D); RF = fa(N); DX = fa(N * D); S1 = fa(N * D); LG = fa(N * V);
+    HN = fa(N * D); RF = fa(N); VB = fa(N * D); DX = fa(N * D); S1 = fa(N * D); LG = fa(N * V);
 }
 
-static void forward(const int *tok, int nb, int train) {
+static void forward(const int *tok, int nb) {
     int n = nb * T;
     for (int t = 0; t < n; t++) memcpy(X[0] + t * D, E->w + tok[t] * D, D * sizeof(float));
     for (int l = 0; l < L; l++) {
-        Layer *y = &ly[l]; Conv *c = &y->cv; float mx = 0;
+        Layer *y = &ly[l]; Conv *c = &y->cv; int np2 = (nb + 1) / 2;
         mon_prep(&y->a); mon_prep(&y->v); mon_prep(&y->o); mon_prep(&y->u); mon_prep(&y->d);
-        for (int ch = 0; ch < D; ch++) c->ks[ch] = tern(c->k->w + ch, c->kq + ch, T, D);
-        c->s = (c->alpha > 0 ? c->alpha : 1) / 127;
-        #pragma omp parallel for reduction(max:mx)
-        for (int t = 0; t < n; t++) {           // phase 1 (per token): rms+quant, Mon_a, Mon_v -> conv codes
-            const float *x = X[l] + t * D; int8_t *q = y->q1 + t * D, *vq = y->vq + t * D; float v[D];
+        #pragma omp parallel for
+        for (int ch = 0; ch < NCH; ch++) {       // kernel spectrum, once per step
+            float *s = SCR + (size_t)TID * 6 * NF * CH;
+            mfft(c->k->w + ch * CH, NULL, D, c->Kr + ch * NF * CH, c->Ki + ch * NF * CH, s, s + NF * CH);
+        }
+        #pragma omp parallel for
+        for (int t = 0; t < n; t++) {           // phase 1 (per token): rms+quant, Mon_a, Mon_v -> conv input
+            const float *x = X[l] + t * D; int8_t *q = y->q1 + t * D;
             y->r1[t] = rinv(x); y->s1[t] = q8t(x, q, y->r1[t]);
             mon_fwd(&y->a, q, y->s1[t], y->av + t * D, t);
-            mon_fwd(&y->v, q, y->s1[t], v, t);
-            for (int ch = 0; ch < D; ch++) {
-                float r = rintf(v[ch] / c->s); mx = fmaxf(mx, fabsf(v[ch]));
-                vq[ch] = r > 127 ? 127 : r < -127 ? -127 : (int8_t)r;
-            }
+            mon_fwd(&y->v, q, y->s1[t], VB + t * D, t);
         }
-        if (train) c->alpha = c->alpha > 0 ? 0.99f * c->alpha + 0.01f * mx : mx;   // updated after use: causal
+        #pragma omp parallel for collapse(2)
+        for (int p = 0; p < np2; p++) for (int ch = 0; ch < NCH; ch++) {   // long conv, two sequences at a time
+            float *s = SCR + (size_t)TID * 6 * NF * CH, *ur = s + 2 * NF * CH, *ui = ur + NF * CH;
+            float *zr = c->Zr + (size_t)(p * NCH + ch) * NF * CH, *zi = c->Zi + (size_t)(p * NCH + ch) * NF * CH;
+            const float *kr = c->Kr + ch * NF * CH, *ki = c->Ki + ch * NF * CH;
+            int o0 = 2 * p * T * D + ch * CH, two = 2 * p + 1 < nb;
+            mfft(VB + o0, two ? VB + o0 + T * D : NULL, D, zr, zi, s, s + NF * CH);
+            for (int k = 0; k < NF * CH; k++) { ur[k] = zr[k] * kr[k] - zi[k] * ki[k]; ui[k] = zr[k] * ki[k] + zi[k] * kr[k]; }
+            mifft(ur, ui, y->cc + o0, two ? y->cc + o0 + T * D : NULL, D, 1.f / NF, s, s + NF * CH);
+        }
         #pragma omp parallel for
-        for (int t = 0; t < n; t++) {           // phase 2 (per token): conv, gate, Mon_o, +res, rms, MLP, +res
-            int tt = t % T; int16_t acc[D] = {0}; float g[D], o[D];   // |sum| <= T*127 < 2^15
-            for (int j = 0; j <= tt; j++) {
-                const int8_t *kj = c->kq + j * D, *vj = y->vq + (t - j) * D;
-                for (int ch = 0; ch < D; ch++) acc[ch] += kj[ch] * vj[ch];
-            }
+        for (int t = 0; t < n; t++) {           // phase 2 (per token): gate, Mon_o, +res, rms, MLP, +res
+            float g[D], o[D];
             float *cc = y->cc + t * D, *av = y->av + t * D, *x = X[l] + t * D, *x1 = y->x1 + t * D, *h = y->h + t * D;
-            for (int ch = 0; ch < D; ch++) { cc[ch] = acc[ch] * c->ks[ch] * c->s; g[ch] = av[ch] * cc[ch]; }
+            for (int ch = 0; ch < D; ch++) g[ch] = av[ch] * cc[ch];
             y->so[t] = q8t(g, y->qo + t * D, 1);
             mon_fwd(&y->o, y->qo + t * D, y->so[t], o, t);
             for (int i = 0; i < D; i++) x1[i] = x[i] + o[i];
@@ -223,9 +314,9 @@ static void forward(const int *tok, int nb, int train) {
     #pragma omp parallel for
     for (int t = 0; t < n; t++) {
         float r = RF[t] = rinv(X[L] + t * D);
-        for (int i = 0; i < D; i++) NF[t * D + i] = X[L][t * D + i] * r;
+        for (int i = 0; i < D; i++) HN[t * D + i] = X[L][t * D + i] * r;
         for (int c = 0; c < V; c++) {
-            float s = 0; for (int i = 0; i < D; i++) s += NF[t * D + i] * E->w[c * D + i];
+            float s = 0; for (int i = 0; i < D; i++) s += HN[t * D + i] * E->w[c * D + i];
             LG[t * V + c] = s;
         }
     }
@@ -255,46 +346,47 @@ static void backward(const int *tok, int nb) {
     }
     #pragma omp parallel for
     for (int c = 0; c < V; c++) for (int t = 0; t < n; t++) for (int i = 0; i < D; i++)
-        E->g[c * D + i] += LG[t * V + c] * NF[t * D + i];
+        E->g[c * D + i] += LG[t * V + c] * HN[t * D + i];
     for (int l = L - 1; l >= 0; l--) {                  // DX: grad wrt X[l+1] -> grad wrt X[l]
-        Layer *y = &ly[l]; Conv *c = &y->cv; float gc = gscale(&c->ga);
+        Layer *y = &ly[l]; Conv *c = &y->cv; int np2 = (nb + 1) / 2;
         #pragma omp parallel for
         for (int t = 0; t < n; t++) {                   // phase A (per token): MLP, rms2, Mon_o, gate
-            int tid = TID; float a[D], b[D], am = 0, *dx = DX + t * D, *h = y->h + t * D, *av = y->av + t * D, *cc = y->cc + t * D;
+            int tid = TID; float a[D], b[D], *dx = DX + t * D, *h = y->h + t * D, *av = y->av + t * D, *cc = y->cc + t * D;
             mon_bwd(&y->d, y->qd + t * D, y->sd[t], dx, a, t, tid);
             for (int i = 0; i < D; i++) a[i] *= h[i] > 0 ? 2 * h[i] : 0;
             mon_bwd(&y->u, y->q2 + t * D, y->s2[t], a, b, t, tid);
             rms_bwd(y->x1 + t * D, y->r2[t], b, dx);
             mon_bwd(&y->o, y->qo + t * D, y->so[t], dx, a, t, tid);
-            for (int i = 0; i < D; i++) {               // av <- d av (in place); conv grad -> int8 codes
-                float dc = a[i] * av[i]; av[i] = a[i] * cc[i]; am = fmaxf(am, fabsf(dc));
-                y->gc[t * D + i] = sr8(dc / gc, (t * D + i) ^ (l * 0x51ED27u));
-            }
-            c->ga.cur[tid] = fmaxf(c->ga.cur[tid], am);
+            for (int i = 0; i < D; i++) { float dc = a[i] * av[i]; av[i] = a[i] * cc[i]; cc[i] = dc; }   // cc <- d conv
         }
         #pragma omp parallel for
-        for (int j = 0; j < T; j++) {                   // dk[j] = sum_t g[t] v[t-j]
-            int32_t acc[D] = {0};
-            for (int bb = 0; bb < nb; bb++) for (int t = j; t < T; t++) {
-                const int8_t *g = y->gc + (bb * T + t) * D, *vj = y->vq + (bb * T + t - j) * D;
-                for (int ch = 0; ch < D; ch++) acc[ch] += g[ch] * vj[ch];
+        for (int ch = 0; ch < NCH; ch++) {             // conv^T: dv = g corr k, dk = sum_b g corr v (Re of the
+            float *s = SCR + (size_t)TID * 6 * NF * CH, *gr = s + 2 * NF * CH, *gi = gr + NF * CH, *ar = gi + NF * CH, *ai = ar + NF * CH;
+            const float *kr = c->Kr + ch * NF * CH, *ki = c->Ki + ch * NF * CH;      // packed product: the cross
+            memset(ar, 0, 2 * NF * CH * 4);                                          // terms are imaginary)
+            for (int p = 0; p < np2; p++) {
+                const float *zr = c->Zr + (size_t)(p * NCH + ch) * NF * CH, *zi = c->Zi + (size_t)(p * NCH + ch) * NF * CH;
+                int o0 = 2 * p * T * D + ch * CH, two = 2 * p + 1 < nb;
+                mfft(y->cc + o0, two ? y->cc + o0 + T * D : NULL, D, gr, gi, s, s + NF * CH);
+                for (int k = 0; k < NF * CH; k++) {
+                    ar[k] += gr[k] * zr[k] + gi[k] * zi[k]; ai[k] += gi[k] * zr[k] - gr[k] * zi[k];
+                    float r = gr[k] * kr[k] + gi[k] * ki[k]; gi[k] = gi[k] * kr[k] - gr[k] * ki[k]; gr[k] = r;
+                }
+                mifft(gr, gi, VB + o0, two ? VB + o0 + T * D : NULL, D, 1.f / NF, s, s + NF * CH);
             }
-            for (int ch = 0; ch < D; ch++) c->k->g[j * D + ch] += acc[ch] * gc * c->s;
+            float dk[T * CH];
+            mifft(ar, ai, dk, NULL, CH, 1.f / NF, s, s + NF * CH);
+            for (int j = 0; j < T; j++) for (int i = 0; i < CH; i++) c->k->g[j * D + ch * CH + i] += dk[j * CH + i];
         }
         #pragma omp parallel for
-        for (int t = 0; t < n; t++) {                   // phase B (per token): conv^T, Mon_v, Mon_a, rms1
-            int tid = TID, tt = t % T; int16_t acc[D] = {0}; float dv[D], a[D], b[D];
-            for (int u = tt; u < T; u++) {
-                const int8_t *kj = c->kq + (u - tt) * D, *g = y->gc + (t + u - tt) * D;
-                for (int ch = 0; ch < D; ch++) acc[ch] += kj[ch] * g[ch];
-            }
-            for (int ch = 0; ch < D; ch++) dv[ch] = acc[ch] * c->ks[ch] * gc;
-            mon_bwd(&y->v, y->q1 + t * D, y->s1[t], dv, a, t, tid);
+        for (int t = 0; t < n; t++) {                   // phase B (per token): Mon_v, Mon_a, rms1
+            int tid = TID; float a[D], b[D];
+            mon_bwd(&y->v, y->q1 + t * D, y->s1[t], VB + t * D, a, t, tid);
             mon_bwd(&y->a, y->q1 + t * D, y->s1[t], y->av + t * D, b, t, tid);
             for (int i = 0; i < D; i++) a[i] += b[i];
             rms_bwd(X[l] + t * D, y->r1[t], a, DX + t * D);
         }
-        mon_reduce(&y->a); mon_reduce(&y->v); mon_reduce(&y->o); mon_reduce(&y->u); mon_reduce(&y->d); roll(&c->ga);
+        mon_reduce(&y->a); mon_reduce(&y->v); mon_reduce(&y->o); mon_reduce(&y->u); mon_reduce(&y->d);
     }
     for (int t = 0; t < n; t++) for (int i = 0; i < D; i++) E->g[tok[t] * D + i] += DX[t * D + i];
 }
@@ -338,20 +430,20 @@ int main(int argc, char **argv) {
     build();
     long nparam = 0; for (int k = 0; k < np; k++) nparam += ps[k].n;
     printf("moth: vocab %d, d %d, layers %d, T %d, %.2fM params (%.2fM ternary), %d threads\n",
-           V, D, L, T, nparam / 1e6, (nparam - V * D) / 1e6, NT);
+           V, D, L, T, nparam / 1e6, (nparam - V * D - L * T * D) / 1e6, NT);
 
     int *tok = malloc(N * sizeof(int)), *tgt = malloc(N * sizeof(int));
     double t0 = now();
     for (int step = -1; step <= STEPS; step++) {        // steps -1, 0 calibrate the delayed scales
         seed = hash(step + 2);
         batch(tok, tgt, 0);
-        forward(tok, B, 1);
+        forward(tok, B);
         float loss = xent(tgt, N, 1);
         backward(tok, B);
         adam(step);
         if (step % 50 == 0 && step > 0) { printf("step %4d | loss %.4f | %.0f ms/step\n", step, loss, (now() - t0) * 1e3 / 50); fflush(stdout); t0 = now(); }
         if (step % 500 == 0 && step > 0) {
-            float vl = 0; for (int k = 0; k < 8; k++) { batch(tok, tgt, 1); forward(tok, B, 0); vl += xent(tgt, N, 0) / 8; }
+            float vl = 0; for (int k = 0; k < 8; k++) { batch(tok, tgt, 1); forward(tok, B); vl += xent(tgt, N, 0) / 8; }
             printf("step %4d | val loss %.4f\n", step, vl); t0 = now();
         }
     }
@@ -359,7 +451,7 @@ int main(int argc, char **argv) {
     int ctx[T] = {0}, len = 1; ctx[0] = data[0];           // sample (recomputes the window per token)
     putchar(itos[ctx[0]]);
     for (int k = 0; k < 600; k++) {
-        forward(ctx, 1, 0);
+        forward(ctx, 1);
         float *z = LG + (len - 1) * V, mx = -1e30f, s = 0, r;
         for (int c = 0; c < V; c++) mx = fmaxf(mx, z[c]);
         for (int c = 0; c < V; c++) s += (z[c] = expf((z[c] - mx) / 0.8f));
