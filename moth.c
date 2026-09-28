@@ -37,10 +37,14 @@
 #define omp_get_max_threads() 1
 #endif
 
+#ifndef M
 #define M 16            // monarch block size
+#endif
 #define D (M * M)       // model width
 #define W3 (M * M * M)  // weights per monarch factor
+#ifndef L
 #define L 4             // layers
+#endif
 #ifndef T
 #define T 128           // context = long-conv length (power of 2)
 #endif
@@ -61,7 +65,7 @@ static int NT;          // threads
 static uint32_t seed;   // per-step stochastic rounding seed
 
 typedef struct { float *w, *g, *m, *v; int n; } P;   // master weight, grad, adam moments
-static P ps[128]; static int np;
+static P ps[1 + 22 * L]; static int np;   // embedding + 22 tensors per layer
 static P *param(int n, float sd) {
     P *p = &ps[np++]; p->n = n; p->w = fa(n); p->g = fa(n); p->m = fa(n); p->v = fa(n);
     for (int i = 0; i < n; i++) p->w[i] = sd * randn();
