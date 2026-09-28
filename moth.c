@@ -41,6 +41,8 @@
 //           The long conv's backward is two more FFT correlations: du = g corr h, dh = sum_b g corr u.
 //
 // cc -O3 -march=native -fopenmp moth.c -o moth -lm && ./moth input.txt
+//   ./moth input.txt -o run.ck         also save a checkpoint every CKEVERY steps (resume with -r run.ck)
+//   ./moth -g run.ck -p "prompt" -n 1000   no training: load a checkpoint and continue the prompt
 // (on AVX-512 add -mprefer-vector-width=512: inference runs ~25% faster, training is unchanged)
 #include <stdio.h>
 #include <stdlib.h>
@@ -1218,18 +1220,76 @@ static float blt_val(void) {
     return vl;
 }
 
-int main(int argc, char **argv) {
-    int in = argc > 1 && !strcmp(argv[1], "-");         // "-": read the corpus from a pipe, e.g. a download
-    FILE *f = in ? stdin : fopen(argc > 1 ? argv[1] : "input.txt", "rb");
-    if (!f) f = fopen(__FILE__, "rb");                  // no data? learn to write moth.c
-    if (!f) { fprintf(stderr, "no input\n"); return 1; }
-    for (long cap = 0, r; ; ndata += r) {
-        if (ndata == cap) data = realloc(data, cap = cap ? 2 * cap : 1 << 24);
-        if ((r = fread(data + ndata, 1, cap - ndata, f)) == 0) break;
+// ---- checkpoints: the whole training state, so a run can resume bit-exactly or just generate ------------
+// Layout: header (magic, version, the architecture's compile-time sizes), then the step, RNG and entropy
+// threshold, then every parameter in build order (weights, Adam m, Adam v), then the per-layer static int8
+// scales (EMA amax, which inference also uses) and the Monarchs' delayed gradient scales.
+#define CKMAGIC 0x48544F4Du                   // "MOTH"
+#ifndef CKEVERY
+#define CKEVERY 5000                          // training steps between checkpoints
+#endif
+static Stack *const STK[] = {&SH, &SE, &SG, &SD};
+static int ckio(FILE *f, int wr, int *step) {  // returns 0 if every field transferred and matched
+    #define IO(p, n) do { if ((wr ? fwrite(p, sizeof *(p), n, f) : fread(p, sizeof *(p), n, f)) != (size_t)(n)) return 1; } while (0)
+    int32_t h[] = {CKMAGIC, 1, M, TB, LE, LG, LD, LH, HV, NG, V, PMAX, np}, g[13];
+    if (wr) IO(h, 13); else { IO(g, 13); for (int i = 0; i < 13; i++) if (g[i] != h[i]) {
+        const char *nm[] = {"magic", "version", "M", "TB", "LE", "LG", "LD", "LH", "HV", "NG", "V", "PMAX", "param count"};
+        fprintf(stderr, "checkpoint %s is %d, this build has %d: rebuild with the same -D flags\n", nm[i], g[i], h[i]); return 1; } }
+    int32_t st = *step; float ps_ = PSZ;
+    IO(&st, 1); IO(&rs, 1); IO(&theta, 1); IO(&ps_, 1); *step = st;
+    for (int k = 0; k < np; k++) {
+        int32_t n = ps[k].n; IO(&n, 1);
+        if (n != ps[k].n) { fprintf(stderr, "checkpoint param %d has %d values, expected %d\n", k, n, ps[k].n); return 1; }
+        IO(ps[k].w, n); IO(ps[k].m, n); IO(ps[k].v, n);
     }
-    if (!in) fclose(f);
-    if (ndata < 16 * TB) { fprintf(stderr, "input too small\n"); return 1; }   // val (last 10%) must hold a window
-    ntrain = ndata * 9 / 10;
+    for (int s = 0; s < 4; s++) for (int l = 0; l < STK[s]->L; l++) {
+        Layer *y = &STK[s]->ly[l]; Mon *ms[] = {&y->q, &y->k, &y->v, &y->o, &y->g, &y->u, &y->d};
+        IO(y->cv.amax, 4);
+        for (int i = 0; i < 7; i++) { IO(&ms[i]->gl.prev, 1); IO(&ms[i]->gr.prev, 1); }
+    }
+    return 0;
+    #undef IO
+}
+static void ck_save(const char *path, int step) {  // write a temp file, then rename: a crash never leaves half a checkpoint
+    char tmp[4096]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    if (!f || ckio(f, 1, &step) | fclose(f) || rename(tmp, path)) { fprintf(stderr, "could not write checkpoint %s\n", path); exit(1); }
+}
+static int ck_load(const char *path) {         // returns the step the checkpoint was saved after
+    int step = 0; FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "no checkpoint %s\n", path); exit(1); }
+    if (ckio(f, 0, &step)) { fprintf(stderr, "bad or incompatible checkpoint %s\n", path); exit(1); }
+    fclose(f); return step;
+}
+
+int main(int argc, char **argv) {
+    // moth [data | -] [-o ckpt] [-r ckpt]       train; "-" reads the corpus from a pipe. -o: save a checkpoint
+    //                                             every CKEVERY steps and at the end. -r: resume from one
+    // moth -g ckpt [-p prompt] [-n bytes]        no training: load a checkpoint and generate, e.g. after a prompt
+    const char *path = "input.txt", *out = NULL, *res = NULL, *gen = NULL, *prompt = "\n"; int ngen = 4000;
+    for (int a = 1; a < argc; a++) {
+        if (argv[a][0] == '-' && argv[a][1] && !argv[a][2] && strchr("orgpn", argv[a][1])) {
+            if (a + 1 == argc) { fprintf(stderr, "%s needs a value\n", argv[a]); return 1; }
+            const char *v = argv[++a];
+            switch (argv[a - 1][1]) { case 'o': out = v; break; case 'r': res = v; break; case 'g': gen = v; break;
+                                      case 'p': prompt = v; break; case 'n': ngen = atoi(v); break; }
+        } else path = argv[a];
+    }
+    if (!*prompt || ngen < 1) { fprintf(stderr, "empty prompt or no bytes to generate\n"); return 1; }
+    const char *ck = gen ? gen : res;
+    if (!gen) {
+        int in = !strcmp(path, "-");            // "-": read the corpus from a pipe, e.g. a download
+        FILE *f = in ? stdin : fopen(path, "rb");
+        if (!f) f = fopen(__FILE__, "rb");      // no data? learn to write moth.c
+        if (!f) { fprintf(stderr, "no input\n"); return 1; }
+        for (long cap = 0, r; ; ndata += r) {
+            if (ndata == cap) data = realloc(data, cap = cap ? 2 * cap : 1 << 24);
+            if ((r = fread(data + ndata, 1, cap - ndata, f)) == 0) break;
+        }
+        if (!in) fclose(f);
+        if (ndata < 16 * TB) { fprintf(stderr, "input too small\n"); return 1; }   // val (last 10%) must hold a window
+        ntrain = ndata * 9 / 10;
+    }
     NT = omp_get_max_threads(); if (NT > 64) NT = 64;
     int NMAX = B * TB;
     SCR = fa((size_t)NT * 6 * 2 * TB * CH); VB = fa((size_t)NMAX * D); DP = fa((size_t)3 * NMAX * D);
@@ -1240,6 +1300,7 @@ int main(int argc, char **argv) {
 
     // 1. entropy model -------------------------------------------------------------------------------
     Eh = param(V * D, 0.02f); stack_build(&SH, TB, LH, 1000); int h1 = np;
+    if (!ck) {
     printf("entropy model: %d layer(s), d %d, %d bytes of context, %d threads\n", LH, D, TB, NT);
     t0 = now();
     for (int step = -1; step <= HSTEPS; step++) {
@@ -1250,11 +1311,7 @@ int main(int argc, char **argv) {
     }
     { float vl = 0; for (int k = 0; k < 8; k++) { for (int b = 0; b < B; b++) { off[b] = pick(1); win[b] = data + off[b]; tgt[b] = win[b] + 1; } hm_fwd(win, B, 0); vl += xent(tgt, B * TB, 0) / 8; }
       printf("  val loss %.4f nats/byte\n", vl); }
-    t0 = now(); entropies();
-    { long n = ndata - 1; float *tmp = malloc(n * sizeof(float)); memcpy(tmp, ENT + 1, n * sizeof(float)); qsort(tmp, n, sizeof(float), cmpf);
-      theta = tmp[(long)((1 - 1 / PSZ) * n)]; free(tmp); }
-    { uint8_t s[TB + 1]; double bytes = 0, pat = 0; for (int k = 0; k < 2000; k++) { pat += patchify(pick(0), s); bytes += TB; }
-      printf("entropies over %ld bytes in %.1f s; threshold %.3f nats -> mean patch %.2f bytes\n", ndata, now() - t0, theta, bytes / pat); }
+    }
 
     // 2. BLT --------------------------------------------------------------------------------------------
     int b0 = np;
@@ -1265,18 +1322,30 @@ int main(int argc, char **argv) {
     long trits = (long)(LE + LG + LD) * (7 * 2 * W3 + 13 * D) + (long)(LE + LD) * TB * D + (long)LG * TG * D;
     printf("BLT: encoder %d, global %d, decoder %d layers, d %d; %.2fM params to train (%.2fM embeddings, of which %.2fM hash n-grams); inference on %.2fM trits\n",
            LE, LG, LD, D, nall / 1e6, nemb / 1e6, NG * HV * D / 1e6, trits / 1e6);
+    int step0 = -1;
+    if (ck) { step0 = ck_load(ck) + 1; printf("loaded %s: step %d of %d, threshold %.3f nats\n", ck, step0 - 1, STEPS, theta); }
+    if (!gen) {
+    t0 = now(); entropies();
+    if (!res) { long n = ndata - 1; float *tmp = malloc(n * sizeof(float)); memcpy(tmp, ENT + 1, n * sizeof(float)); qsort(tmp, n, sizeof(float), cmpf);
+      theta = tmp[(long)((1 - 1 / PSZ) * n)]; free(tmp); }
+    { uint8_t s[TB + 1]; double bytes = 0, pat = 0; uint64_t r0 = rs; for (int k = 0; k < 2000; k++) { pat += patchify(pick(0), s); bytes += TB; }
+      if (res) rs = r0;                        // a resumed run draws the same windows as an unbroken one
+      printf("entropies over %ld bytes in %.1f s; threshold %.3f nats -> mean patch %.2f bytes\n", ndata, now() - t0, theta, bytes / pat); }
     t0 = now();
-    for (int step = -1; step <= STEPS; step++) {
+    for (int step = step0; step <= STEPS; step++) {
         seed = hash(step + 7);
         for (int b = 0; b < B; b++) { off[b] = pick(0); win[b] = data + off[b]; tgt[b] = win[b] + 1; }
         blt_fwd(win, off, B, 1); float loss = xent(tgt, B * TB, 1); blt_bwd(win, B); adam(step, b0, np, STEPS);
         if (step % 50 == 0 && step > 0) { printf("step %4d | loss %.4f | %.0f ms/step\n", step, loss, (now() - t0) * 1e3 / 50); fflush(stdout); t0 = now(); }
         if (step % 500 == 0 && step > 0) { float vl = blt_val(); printf("step %4d | val loss %.4f nats/byte (%.3f bits/byte)\n", step, vl, vl / logf(2)); t0 = now(); }
+        if (out && step > 0 && (step % CKEVERY == 0 || step == STEPS)) { ck_save(out, step); printf("saved %s at step %d\n", out, step); fflush(stdout); t0 = now(); }
+    }
     }
 
     // 3. inference ------------------------------------------------------------------------------------------
     stack_prep(&SH); stack_prep(&SE); stack_prep(&SG); stack_prep(&SD); ihead_prep(&ih_ent, Eh->w); ihead_prep(&ih_out, Wo->w);
     float lg[V], err = 0, mag = 0; int agree = 0;
+    if (!gen) {
     off[0] = pick(1); win[0] = data + off[0];                          // replay a window with the training patches
     blt_fwd(win, off, 1, 0);
     blt_reset(win[0] - 8);
@@ -1287,17 +1356,21 @@ int main(int argc, char **argv) {
     blt_reset(win[0] - 8);                                             // same window, patching online
     for (int t = 0; t < TB; t++) { int np0 = bs.npatch; blt_step(win[0][t], -1, lg); agree += (bs.npatch > np0) == sb[0][t + 1]; }
     printf("engine vs training forward: max |dlogit| %.1e (logits up to %.1f); online patch boundaries agree on %d/%d bytes\n", err, mag, agree, TB);
-    int c = '\n', ngen = 4000; char *out = malloc(ngen + 1);
-    blt_reset(NULL); t0 = now();
+    }
+    char *o = malloc(ngen + 1); int np_ = (int)strlen(prompt), c = (uint8_t)prompt[np_ - 1];
+    blt_reset(NULL);
+    for (int k = 0; k < np_ - 1; k++) blt_step((uint8_t)prompt[k], -1, lg);   // read the prompt; sampling starts after it
+    long p0 = bs.npatch; t0 = now();
     for (int k = 0; k < ngen; k++) {
         blt_step(c, -1, lg);
         float mx = -1e30f, s = 0, r;
         for (int j = 0; j < V; j++) mx = fmaxf(mx, lg[j]);
         for (int j = 0; j < V; j++) s += (lg[j] = expf((lg[j] - mx) / 0.8f));
         c = 0; r = urand() * s; while (c < V - 1 && (r -= lg[c]) > 0) c++;
-        out[k] = c;
+        o[k] = c;
     }
-    t0 = now() - t0; out[ngen] = 0;
-    printf("generated %d bytes in %.3f s: %.0f bytes/s, one thread; %ld patches (%.2f bytes each)\n%.600s\n", ngen, t0, ngen / t0, bs.npatch, (double)ngen / bs.npatch, out);
+    t0 = now() - t0; o[ngen] = 0;
+    printf("generated %d bytes in %.3f s: %.0f bytes/s, one thread; %ld patches (%.2f bytes each)\n", ngen, t0, ngen / t0, bs.npatch - p0, (double)ngen / (bs.npatch - p0));
+    if (gen) { fputs(prompt, stdout); fwrite(o, 1, ngen, stdout); putchar('\n'); } else printf("%.600s\n", o);
     return 0;
 }
