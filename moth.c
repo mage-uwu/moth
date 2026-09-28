@@ -624,50 +624,62 @@ static IState ist[L];
 static long ipos;
 static float *ET;                             // embedding transposed [D][VP] for the head: 65 independent sums
 #define VP ((V + 15) / 16 * 16)
-#if defined(__AVX512VNNI__) && defined(__AVX512VBMI__) && M == 16
+#if defined(__AVX512VNNI__) && defined(__AVX512VBMI__) && M % 16 == 0
 #define VNNI 1
-// Monarch forward on vpdpbusd (u8 x s8, 4-term dots into int32): trits are stored as w + 1 in {0, 1, 2} and
-// the input's sum is subtracted, so the result is exact. R: lane o of block b dots x_b[4k..4k+3] (broadcast)
-// with R_b[o][4k..4k+3]. L: lane b of output row o dots q[4k..4k+3][b] with L_o[4k..4k+3][b]; vpermb turns
-// four tile rows into that [b][j] order in one instruction, so the permutations still never touch memory.
+// Monarch forward on vpdpbusd (u8 x s8, 4-term dots into int32), 16 lanes per register: trits are stored as
+// w + 1 in {0, 1, 2} and the input's sum is subtracted, so the result is exact. R: lane o of block b dots
+// x_b[4k..4k+3] (broadcast) with R_b[o][4k..4k+3]. L: lane b of output row o dots q[4k..4k+3][b] with
+// L_o[4k..4k+3][b]; vpermb turns four 16-wide tile row pieces into that [b][j] order in one instruction,
+// so the permutations still never touch memory.
 #include <immintrin.h>
+#define MK (M / 4)                                 // 4-term groups per block row
+#define MH (M / 16)                                // 16-lane registers per block row
 typedef struct { uint8_t r[W3], l[W3]; } IMon;
 static IMon imon[L][7];
 static void imon_prep(IMon *im, const Mon *m) {
-    for (int b = 0; b < M; b++) for (int k = 0; k < 4; k++) for (int o = 0; o < M; o++) for (int j = 0; j < 4; j++)
-        im->r[((b * 4 + k) * M + o) * 4 + j] = m->rq[(b * M + 4 * k + j) * M + o] + 1;
-    for (int o = 0; o < M; o++) for (int k = 0; k < 4; k++) for (int b = 0; b < M; b++) for (int j = 0; j < 4; j++)
-        im->l[((o * 4 + k) * M + b) * 4 + j] = m->lq[(o * M + 4 * k + j) * M + b] + 1;
+    for (int b = 0; b < M; b++) for (int k = 0; k < MK; k++) for (int o = 0; o < M; o++) for (int j = 0; j < 4; j++)
+        im->r[((b * MK + k) * M + o) * 4 + j] = m->rq[(b * M + 4 * k + j) * M + o] + 1;
+    for (int o = 0; o < M; o++) for (int k = 0; k < MK; k++) for (int b = 0; b < M; b++) for (int j = 0; j < 4; j++)
+        im->l[((o * MK + k) * M + b) * 4 + j] = m->lq[(o * M + 4 * k + j) * M + b] + 1;
 }
 static void imon_fwd(const IMon *im, const Mon *m, const int8_t *x, float sx, float *y) {
     static const uint8_t pm[64] = {0,16,32,48, 1,17,33,49, 2,18,34,50, 3,19,35,51, 4,20,36,52, 5,21,37,53, 6,22,38,54, 7,23,39,55,
                                    8,24,40,56, 9,25,41,57, 10,26,42,58, 11,27,43,59, 12,28,44,60, 13,29,45,61, 14,30,46,62, 15,31,47,63};
     const __m512i ones = _mm512_set1_epi8(1), perm = _mm512_loadu_si512(pm);
-    __m512i z[M], mx = _mm512_setzero_si512();
+    int32_t z[D]; __m512i mx = _mm512_setzero_si512();
     for (int b = 0; b < M; b++) {
-        const int8_t *xb = x + b * M; __m512i acc = _mm512_setzero_si512(), sum = _mm512_setzero_si512();
-        for (int k = 0; k < 4; k++) {
-            int32_t x4; memcpy(&x4, xb + 4 * k, 4); __m512i xv = _mm512_set1_epi32(x4);
-            acc = _mm512_dpbusd_epi32(acc, _mm512_loadu_si512(im->r + (b * 4 + k) * 64), xv);
+        __m512i acc[MH], sum = _mm512_setzero_si512();
+        for (int h = 0; h < MH; h++) acc[h] = _mm512_setzero_si512();
+        for (int k = 0; k < MK; k++) {
+            int32_t x4; memcpy(&x4, x + b * M + 4 * k, 4); __m512i xv = _mm512_set1_epi32(x4);
+            for (int h = 0; h < MH; h++) acc[h] = _mm512_dpbusd_epi32(acc[h], _mm512_loadu_si512(im->r + ((b * MK + k) * M + 16 * h) * 4), xv);
             sum = _mm512_dpbusd_epi32(sum, ones, xv);
         }
-        z[b] = _mm512_sub_epi32(acc, sum); mx = _mm512_max_epi32(mx, _mm512_abs_epi32(z[b]));
+        for (int h = 0; h < MH; h++) {
+            __m512i zz = _mm512_sub_epi32(acc[h], sum); mx = _mm512_max_epi32(mx, _mm512_abs_epi32(zz));
+            _mm512_storeu_si512(z + b * M + 16 * h, zz);
+        }
     }
     int m32 = _mm512_reduce_max_epi32(mx); if (m32 < 1) m32 = 1;
     float qs = 127.f / m32, sm = sx * m->rs * m32 / 127;
     __m512 vqs = _mm512_set1_ps(qs);
-    __m128i qr[M]; __m512i qt[4], qsum = _mm512_setzero_si512();
-    for (int b = 0; b < M; b++) qr[b] = _mm512_cvtepi32_epi8(_mm512_cvtps_epi32(_mm512_mul_ps(_mm512_cvtepi32_ps(z[b]), vqs)));
-    for (int k = 0; k < 4; k++) {                              // rows 4k..4k+3 of the mid tile, as [b][j]
-        __m512i rows = _mm512_inserti32x4(_mm512_inserti32x4(_mm512_inserti32x4(_mm512_castsi128_si512(qr[4 * k]),
-                        qr[4 * k + 1], 1), qr[4 * k + 2], 2), qr[4 * k + 3], 3);
-        qt[k] = _mm512_permutexvar_epi8(perm, rows); qsum = _mm512_dpbusd_epi32(qsum, ones, qt[k]);
+    int8_t q[D];
+    for (int k = 0; k < D; k += 16) _mm_storeu_si128((__m128i *)(q + k), _mm512_cvtepi32_epi8(_mm512_cvtps_epi32(_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_loadu_si512(z + k)), vqs))));
+    __m512i qt[MK][MH], qsum[MH];
+    for (int h = 0; h < MH; h++) {
+        qsum[h] = _mm512_setzero_si512();
+        for (int k = 0; k < MK; k++) {                     // rows 4k..4k+3, lanes 16h..16h+15, as [b][j]
+            const int8_t *r0 = q + 4 * k * M + 16 * h;
+            __m512i rows = _mm512_inserti32x4(_mm512_inserti32x4(_mm512_inserti32x4(_mm512_castsi128_si512(_mm_loadu_si128((const __m128i *)r0)),
+                            _mm_loadu_si128((const __m128i *)(r0 + M)), 1), _mm_loadu_si128((const __m128i *)(r0 + 2 * M)), 2), _mm_loadu_si128((const __m128i *)(r0 + 3 * M)), 3);
+            qt[k][h] = _mm512_permutexvar_epi8(perm, rows); qsum[h] = _mm512_dpbusd_epi32(qsum[h], ones, qt[k][h]);
+        }
     }
     __m512 sc = _mm512_set1_ps(sm), ls = _mm512_set1_ps(m->ls);
-    for (int o = 0; o < M; o++) {
+    for (int o = 0; o < M; o++) for (int h = 0; h < MH; h++) {
         __m512i acc = _mm512_setzero_si512();
-        for (int k = 0; k < 4; k++) acc = _mm512_dpbusd_epi32(acc, _mm512_loadu_si512(im->l + (o * 4 + k) * 64), qt[k]);
-        _mm512_storeu_ps(y + o * M, _mm512_mul_ps(_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_sub_epi32(acc, qsum)), sc), ls));
+        for (int k = 0; k < MK; k++) acc = _mm512_dpbusd_epi32(acc, _mm512_loadu_si512(im->l + ((o * MK + k) * M + 16 * h) * 4), qt[k][h]);
+        _mm512_storeu_ps(y + o * M + 16 * h, _mm512_mul_ps(_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_sub_epi32(acc, qsum[h])), sc), ls));
     }
 }
 #define IMON(l, i, m, x, sx, y) imon_fwd(&imon[l][i], m, x, sx, y)
