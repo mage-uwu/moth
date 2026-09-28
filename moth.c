@@ -914,7 +914,8 @@ static uint8_t *data; static long ndata, ntrain;
 static float *ENT, theta;                     // ENT[i]: entropy (nats) of byte i given up to TB bytes before it
 static long pick(int val) {                   // window offset; >= 8 so every hash n-gram has real bytes
     long lo = val ? ntrain : 8, hi = (val ? ndata : ntrain) - TB - 2;
-    return lo + (long)(urand() * (hi - lo));
+    rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17;   // all 64 bits: urand's 24 would quantise offsets past 16 MB
+    return lo + (long)(rs % (uint64_t)(hi - lo));
 }
 static inline float fexp(float x) {           // e^x for x <= 0: 2^floor * a degree-5 polynomial for 2^frac; vectorises
     float t = MAXF(x, -87.f) * 1.44269504f, fl = floor_(t), f = t - fl;
@@ -1218,11 +1219,16 @@ static float blt_val(void) {
 }
 
 int main(int argc, char **argv) {
-    FILE *f = fopen(argc > 1 ? argv[1] : "input.txt", "rb");
+    int in = argc > 1 && !strcmp(argv[1], "-");         // "-": read the corpus from a pipe, e.g. a download
+    FILE *f = in ? stdin : fopen(argc > 1 ? argv[1] : "input.txt", "rb");
     if (!f) f = fopen(__FILE__, "rb");                  // no data? learn to write moth.c
     if (!f) { fprintf(stderr, "no input\n"); return 1; }
-    fseek(f, 0, SEEK_END); ndata = ftell(f); rewind(f);
-    data = malloc(ndata); if (fread(data, 1, ndata, f) != (size_t)ndata) return 1; fclose(f);
+    for (long cap = 0, r; ; ndata += r) {
+        if (ndata == cap) data = realloc(data, cap = cap ? 2 * cap : 1 << 24);
+        if ((r = fread(data + ndata, 1, cap - ndata, f)) == 0) break;
+    }
+    if (!in) fclose(f);
+    if (ndata < 16 * TB) { fprintf(stderr, "input too small\n"); return 1; }   // val (last 10%) must hold a window
     ntrain = ndata * 9 / 10;
     NT = omp_get_max_threads(); if (NT > 64) NT = 64;
     int NMAX = B * TB;
