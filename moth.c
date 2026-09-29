@@ -1266,13 +1266,15 @@ int main(int argc, char **argv) {
     // moth [data | -] [-o ckpt] [-r ckpt]       train; "-" reads the corpus from a pipe. -o: save a checkpoint
     //                                             every CKEVERY steps and at the end. -r: resume from one
     // moth -g ckpt [-p prompt] [-n bytes]        no training: load a checkpoint and generate, e.g. after a prompt
-    const char *path = "input.txt", *out = NULL, *res = NULL, *gen = NULL, *prompt = "\n"; int ngen = 4000;
+    // moth -g ckpt -q prompts.txt               answer each line (\n escaped as a backslash-n) greedily, up to a
+    //                                            newline: one answer per line, for scoring against known answers
+    const char *path = "input.txt", *out = NULL, *res = NULL, *gen = NULL, *prompt = "\n", *qs = NULL; int ngen = 4000;
     for (int a = 1; a < argc; a++) {
-        if (argv[a][0] == '-' && argv[a][1] && !argv[a][2] && strchr("orgpn", argv[a][1])) {
+        if (argv[a][0] == '-' && argv[a][1] && !argv[a][2] && strchr("orgpnq", argv[a][1])) {
             if (a + 1 == argc) { fprintf(stderr, "%s needs a value\n", argv[a]); return 1; }
             const char *v = argv[++a];
             switch (argv[a - 1][1]) { case 'o': out = v; break; case 'r': res = v; break; case 'g': gen = v; break;
-                                      case 'p': prompt = v; break; case 'n': ngen = atoi(v); break; }
+                                      case 'p': prompt = v; break; case 'n': ngen = atoi(v); break; case 'q': qs = v; break; }
         } else path = argv[a];
     }
     if (!*prompt || ngen < 1) { fprintf(stderr, "empty prompt or no bytes to generate\n"); return 1; }
@@ -1356,6 +1358,24 @@ int main(int argc, char **argv) {
     blt_reset(win[0] - 8);                                             // same window, patching online
     for (int t = 0; t < TB; t++) { int np0 = bs.npatch; blt_step(win[0][t], -1, lg); agree += (bs.npatch > np0) == sb[0][t + 1]; }
     printf("engine vs training forward: max |dlogit| %.1e (logits up to %.1f); online patch boundaries agree on %d/%d bytes\n", err, mag, agree, TB);
+    }
+    if (gen && qs) {                                                   // batch of questions, greedy answers
+        FILE *qf = fopen(qs, "rb"); if (!qf) { fprintf(stderr, "no prompts %s\n", qs); return 1; }
+        static char ln[1 << 16]; int nq = 0; t0 = now(); long nb = 0;
+        while (fgets(ln, sizeof ln, qf)) {
+            int n = 0; for (int i = 0; ln[i] && ln[i] != '\n'; i++) ln[n++] = ln[i] == '\\' && ln[i + 1] == 'n' ? (i++, '\n') : ln[i];
+            if (!n) continue;
+            blt_reset(NULL); blt_step('\n', -1, lg);                    // documents in training follow a blank line
+            for (int k = 0; k < n; k++) blt_step((uint8_t)ln[k], -1, lg);
+            for (int k = 0; k < 120; k++) {
+                int b = 0; for (int j = 1; j < V; j++) if (lg[j] > lg[b]) b = j;
+                if (b == '\n') break;
+                putchar(b); blt_step(b, -1, lg); nb++;
+            }
+            putchar('\n'); nq++; nb += n;
+        }
+        fclose(qf); fprintf(stderr, "answered %d prompts in %.2f s (%.0f bytes/s)\n", nq, now() - t0, nb / (now() - t0));
+        return 0;
     }
     char *o = malloc(ngen + 1); int np_ = (int)strlen(prompt), c = (uint8_t)prompt[np_ - 1];
     blt_reset(NULL);
