@@ -64,7 +64,7 @@
 #define D (M * M)       // model width
 #define W3 (M * M * M)  // weights per monarch factor
 #ifndef TB
-#define TB 128          // bytes per window: the byte stacks' conv length (power of 2, <= 256)
+#define TB 128          // bytes per window: the byte stacks' conv length (power of 2)
 #endif
 #define TG (TB / 2)     // patch slots per window: the global stack's conv length
 #ifndef LE
@@ -79,7 +79,9 @@
 #ifndef LH
 #define LH 1            // entropy model layers
 #endif
-#define B 16            // windows per batch
+#ifndef B
+#define B 16            // windows per batch (B * TB bytes a step)
+#endif
 #define V 256           // bytes
 #define NG 6            // hash n-gram embeddings, n = 3 .. 8
 #ifndef HV
@@ -1044,7 +1046,11 @@ static void adam(int step, int k0, int k1, int steps) {   // params [k0, k1)
 // the long conv is a direct causal sum over the ternary kernel, skipping all-zero kernel rows. No FFT, no
 // window recompute. Per byte: encoder, entropy model and decoder step once; the global stack steps once per
 // patch. Embeddings and heads stay fp32.
+#if TB <= 256
 typedef int16_t cacc;                         // |sum of T trit * int8| <= 127 T fits int16 for T <= 256
+#else
+typedef int32_t cacc;
+#endif
 static void stack_prep(Stack *S) {            // freeze the trits once
     for (int l = 0; l < S->L; l++) {
         Layer *y = &S->ly[l]; Conv *c = &y->cv;
@@ -1211,6 +1217,24 @@ static void blt_step(int byte, int force, float *logits) {
 }
 
 static double now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec * 1e-9; }
+static void loss_by_position(int nbatch) {   // validation CE by byte position in the window: does context help?
+    static const int edge[] = {0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096};
+    double sum[9] = {0}; long cnt[9] = {0}; const uint8_t *win[B], *tgt[B]; long off[B];
+    for (int k = 0; k < nbatch; k++) {
+        for (int b = 0; b < B; b++) { off[b] = pick(1); win[b] = data + off[b]; tgt[b] = win[b] + 1; }
+        blt_fwd(win, off, B, 0);
+        for (int t = 0; t < B * TB; t++) {
+            const float *z = LOGIT + (size_t)t * V; float mx = z[0], s = 0; int pos = t % TB, i = 0;
+            for (int c = 1; c < V; c++) mx = MAXF(mx, z[c]);
+            for (int c = 0; c < V; c++) s += expf(z[c] - mx);
+            while (pos >= edge[i + 1]) i++;
+            sum[i] += logf(s) + mx - z[tgt[t / TB][pos]]; cnt[i]++;
+        }
+    }
+    printf("val loss by position (nats/byte):");
+    for (int i = 0; i < 9 && edge[i] < TB; i++) printf(" %d-%d %.3f |", edge[i], edge[i + 1] - 1, sum[i] / cnt[i]);
+    printf("\n");
+}
 static float blt_val(void) {
     float vl = 0; const uint8_t *win[B], *tgt[B]; long off[B];
     for (int k = 0; k < 8; k++) {
@@ -1343,6 +1367,8 @@ int main(int argc, char **argv) {
         if (out && step > 0 && (step % CKEVERY == 0 || step == STEPS)) { ck_save(out, step); printf("saved %s at step %d\n", out, step); fflush(stdout); t0 = now(); }
     }
     }
+
+    if (!gen) loss_by_position(32);
 
     // 3. inference ------------------------------------------------------------------------------------------
     stack_prep(&SH); stack_prep(&SE); stack_prep(&SG); stack_prep(&SD); ihead_prep(&ih_ent, Eh->w); ihead_prep(&ih_out, Wo->w);
