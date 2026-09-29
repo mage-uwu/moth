@@ -55,7 +55,9 @@
 #ifndef LH
 #define LH 1            // entropy model layers
 #endif
+#ifndef B
 #define B 16            // windows per batch
+#endif
 #define V 256           // bytes
 #define NG 6            // hash n-gram embeddings, n = 3 .. 8
 #ifndef HV

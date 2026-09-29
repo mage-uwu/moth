@@ -81,7 +81,7 @@ int flow_check(void) {
     memset(buf, '\n', sizeof buf); memcpy(buf + 8, txt, strlen(txt) < TB ? strlen(txt) : TB);
     const uint8_t *w[1] = {buf + 8};
     float *base = fa((size_t)TB * V); blt_fwd(w, 1, 0); memcpy(base, LOGIT, (size_t)TB * V * 4);
-    int at = 64; buf[8 + at] ^= 0x20;                           // flip the case of the byte at 64
+    int at = TB / 2; buf[8 + at] ^= 0x20;                           // flip the case of the byte at 64
     blt_fwd(w, 1, 0);
     double left = 0, right = 0;
     for (int t = 0; t < TB; t++) for (int c = 0; c < V; c++) {
