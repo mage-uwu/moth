@@ -1,3 +1,4 @@
 input.txt
 moth
 *.o
+__pycache__/
