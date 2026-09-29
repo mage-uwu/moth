@@ -1429,13 +1429,15 @@ int main(int argc, char **argv) {
     // moth -g ckpt [-p prompt] [-n bytes]        no training: load a checkpoint and generate, e.g. after a prompt
     // moth -g ckpt -q prompts.txt               answer each line (\n escaped as a backslash-n) greedily, up to a
     //                                            newline: one answer per line, for scoring against known answers
-    const char *path = "input.txt", *out = NULL, *res = NULL, *gen = NULL, *prompt = "\n", *qs = NULL; int ngen = 4000;
+    // moth -g ckpt -e text                      streaming evaluation on one thread: bits per byte over the file's
+    //                                            last 5 MB (enwik8's test split) or all of it if shorter, and speed
+    const char *path = "input.txt", *out = NULL, *res = NULL, *gen = NULL, *prompt = "\n", *qs = NULL, *evp = NULL; int ngen = 4000;
     for (int a = 1; a < argc; a++) {
-        if (argv[a][0] == '-' && argv[a][1] && !argv[a][2] && strchr("orgpnq", argv[a][1])) {
+        if (argv[a][0] == '-' && argv[a][1] && !argv[a][2] && strchr("orgpnqe", argv[a][1])) {
             if (a + 1 == argc) { fprintf(stderr, "%s needs a value\n", argv[a]); return 1; }
             const char *v = argv[++a];
             switch (argv[a - 1][1]) { case 'o': out = v; break; case 'r': res = v; break; case 'g': gen = v; break;
-                                      case 'p': prompt = v; break; case 'n': ngen = atoi(v); break; case 'q': qs = v; break; }
+                                      case 'p': prompt = v; break; case 'n': ngen = atoi(v); break; case 'q': qs = v; break; case 'e': evp = v; break; }
         } else path = argv[a];
     }
     if (!*prompt || ngen < 1) { fprintf(stderr, "empty prompt or no bytes to generate\n"); return 1; }
@@ -1524,6 +1526,30 @@ int main(int argc, char **argv) {
     blt_reset(win[0] - 8);                                             // same window, patching online
     for (int t = 0; t < LCTX; t++) { int np0 = bs.npatch; blt_step(win[0][t], -1, lg); agree += (bs.npatch > np0) == sb[0][t + 1]; }
     printf("engine vs training forward: max |dlogit| %.1e (logits up to %.1f); online patch boundaries agree on %d/%d bytes\n", err, mag, agree, LCTX);
+    }
+    if (gen && evp) {                                                  // streaming evaluation: bits per byte, bytes/s
+        FILE *ef = fopen(evp, "rb"); if (!ef) { fprintf(stderr, "no text %s\n", evp); return 1; }
+        fseek(ef, 0, SEEK_END); long ne = ftell(ef), n = ne < 5000000 ? ne : 5000000, o = ne - n, c0 = o < 8 ? o : 8;
+        uint8_t *tx = malloc(n + 8); memset(tx, '\n', 8); fseek(ef, o - c0, SEEK_SET);
+        if (fread(tx + 8 - c0, 1, n + c0, ef) != (size_t)(n + c0)) { fprintf(stderr, "short read %s\n", evp); return 1; }
+        fclose(ef);
+        blt_reset(tx); long p0 = bs.npatch; double nll = 0; t0 = now();
+        for (long t = 0; t + 1 < n; t++) {     // online patching, as in generation; each byte scores the next
+            blt_step(tx[8 + t], -1, lg);
+            float mx = lg[0]; for (int c = 1; c < V; c++) mx = MAXF(mx, lg[c]);
+            float s = 0; for (int c = 0; c < V; c++) s += expf(lg[c] - mx);
+            nll += logf(s) + mx - lg[tx[8 + t + 1]];
+        }
+        double dt = now() - t0;
+        printf("eval %s: last %ld bytes (from byte %ld): %.4f bits/byte (%.4f nats); %.0f bytes/s on %d thread(s) including scoring, %s; %.2f bytes a patch\n",
+               evp, n, o, nll / (n - 1) / log(2), nll / (n - 1), (n - 1) / dt, omp_get_max_threads(),
+#ifdef VNNI
+               "VNNI kernels",
+#else
+               "portable C",
+#endif
+               (double)(n - 1) / (bs.npatch - p0));
+        return 0;
     }
     if (gen && qs) {                                                   // batch of questions, greedy answers
         FILE *qf = fopen(qs, "rb"); if (!qf) { fprintf(stderr, "no prompts %s\n", qs); return 1; }
