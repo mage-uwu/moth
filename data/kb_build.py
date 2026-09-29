@@ -104,6 +104,8 @@ def main():
     sp = lambda n=1: SamplingParams(n=n, temperature=0.6, top_p=0.95, top_k=20, max_tokens=6000, seed=1)
     stats, t0 = {}, time.time()
     def log(msg): print(f"[{(time.time() - t0) / 60:5.1f} min] {msg}", flush=True)
+    def snap(stage, obj):                     # each stage's output as soon as it exists, for review mid-run
+        with open(f"{a.out}.{stage}.json", "w") as f: json.dump(obj, f, indent=1)
 
     # 1. concepts
     cats = list(CATEGORIES)
@@ -116,6 +118,7 @@ def main():
             n = line.strip().strip(".-*").strip().lower()
             if NAME.match(n) and n not in seen: seen.add(n); concepts.append({"name": n, "category": c})
     log(f"concepts: {len(concepts)} from {len(cats)} categories")
+    snap("concepts", concepts)
 
     # 2. property votes, in groups so each answer stays short
     groups = [PROPS[i:i + 13] for i in range(0, len(PROPS), 13)]
@@ -142,6 +145,7 @@ def main():
     known = sum(len(c["yes"]) + len(c["no"]) for c in concepts)
     stats["facts_unanimous"] = known; stats["facts_asked"] = len(concepts) * len(PROPS)
     log(f"properties: {known}/{len(concepts) * len(PROPS)} unanimous over {a.votes} votes")
+    snap("facts", [dict(c, votes={p: votes.get((ci, p)) for p, *_ in PROPS}) for ci, c in enumerate(concepts)])
 
     # 3. paraphrased frames, each judged for equivalence
     fr = list(FRAMES)
@@ -162,6 +166,7 @@ def main():
         if (after_think(o) or "").lower().startswith("yes"): templates[f].append(q)
     stats["templates"] = {f: len(v) for f, v in templates.items()}
     log(f"templates: {stats['templates']} (from {len(cands)} candidates)")
+    snap("templates", {"accepted": templates, "candidates": cands})
     del llm
 
     # 4. embedding check on CPU: drop facts that contradict agreeing nearest neighbours
