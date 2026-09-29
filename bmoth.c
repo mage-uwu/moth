@@ -446,7 +446,8 @@ typedef struct {
 #endif
 } Layer;
 // a stack of layers over sequences of length T (bytes or patches); X[0] is its input, X[L] its output
-typedef struct { int T, L, N, bi; Plan pl; Layer *ly; float **X; long ipos; const int *len; } Stack;   // len: valid steps per sequence, or NULL; bi: bidirectional
+typedef struct { int T, L, N, bi, fz; Plan pl; Layer *ly; float **X; long ipos; const int *len; } Stack;   // len: valid steps per sequence, or NULL; bi: bidirectional; fz: trits and kernels frozen
+static int infer;                             // weights fixed (no training): prepare trits and kernels once
 static float *VB, *DP;                        // shared scratch: conv input (grad), short conv out grads
 
 static inline float tanh_(float u) {           // tanh as a clamped [7/6] Pade
@@ -625,7 +626,7 @@ static void filter_bwd(Stack *S, Conv *c) {           // dh -> filter FFN grads
 static void mixer_fwd(Stack *S, Layer *y, int nb, int train) {
     int T = S->T, N = S->N, NF = S->pl.NF;
     Conv *c = &y->cv; int n = nb * T, np2 = (nb + 1) / 2; float m0 = 0, m1 = 0, m2 = 0, m3 = 0;
-    filter_fwd(S, c); conv_prep(c);
+    if (!(infer && S->fz)) { filter_fwd(S, c); conv_prep(c); }   // at inference, once
     #pragma omp parallel for reduction(max:m0, m1, m2)
     for (int t = 0; t < n; t++) {           // q, k, v to int8 codes on a static scale: they're mixed across tokens
         m0 = fmaxf(m0, sq8(y->pre + (size_t)t * D, D, c->as[0]));
@@ -768,9 +769,9 @@ static void stack_fwd(Stack *S, int nb, int train) {    // S->X[0] -> S->X[L], n
     for (int l = 0; l < S->L; l++) {
         Layer *y = &S->ly[l]; Conv *c = &y->cv;
         Mon *ms[] = {&y->q, &y->k, &y->v, &y->o, &y->g, &y->u, &y->d};
-        for (int i = 0; i < 7; i++) mon_prep(ms[i]);
+        if (!(infer && S->fz)) for (int i = 0; i < 7; i++) mon_prep(ms[i]);
 #ifdef VNNI
-        for (int i = 0; i < 7; i++) imon_prep(&y->im[i], ms[i]);
+        if (!(infer && S->fz)) for (int i = 0; i < 7; i++) imon_prep(&y->im[i], ms[i]);
 #endif
         #pragma omp parallel for
         for (int t = 0; t < n; t++) {           // phase 1 (per token): rms+quant, Mon_q, Mon_k, Mon_v
@@ -803,6 +804,7 @@ static void stack_fwd(Stack *S, int nb, int train) {    // S->X[0] -> S->X[L], n
             for (int i = 0; i < D; i++) X[l + 1][t * D + i] = x1[i] + o[i];
         }
     }
+    S->fz = infer;
 }
 
 static void stack_bwd(Stack *S, float *DX, int nb) {    // DX: grad wrt X[L] in, grad wrt X[0] out
@@ -1174,18 +1176,20 @@ int main(int argc, char **argv) {
     // bmoth [data | -] [-o ckpt] [-r ckpt]      train; "-" reads the corpus from a pipe. -o: save a checkpoint
     //                                             every CKEVERY steps and at the end. -r: resume from one
     // bmoth -g ckpt -p "the c_t" [-m _]          no training: fill each mask character (default '_') in the prompt
+    // bmoth -g ckpt -b 200                       inference speed: the whole forward pass on 128-byte windows,
+    //                                             one at a time and B at a time (OMP_NUM_THREADS=1 for one core)
     // bmoth -g ckpt -q prompts.txt [-m _]        the same per line (\n escaped as a backslash-n); prints only
     //                                             the filled bytes, one line per prompt
-    const char *path = "input.txt", *out = NULL, *res = NULL, *gen = NULL, *prompt = NULL, *qs = NULL; char mch = '_';
+    const char *path = "input.txt", *out = NULL, *res = NULL, *gen = NULL, *prompt = NULL, *qs = NULL; char mch = '_'; int nbench = 0;
     for (int a = 1; a < argc; a++) {
-        if (argv[a][0] == '-' && argv[a][1] && !argv[a][2] && strchr("orgpqm", argv[a][1])) {
+        if (argv[a][0] == '-' && argv[a][1] && !argv[a][2] && strchr("orgpqmb", argv[a][1])) {
             if (a + 1 == argc) { fprintf(stderr, "%s needs a value\n", argv[a]); return 1; }
             const char *v = argv[++a];
             switch (argv[a - 1][1]) { case 'o': out = v; break; case 'r': res = v; break; case 'g': gen = v; break;
-                                      case 'p': prompt = v; break; case 'q': qs = v; break; case 'm': mch = v[0]; break; }
+                                      case 'p': prompt = v; break; case 'q': qs = v; break; case 'm': mch = v[0]; break; case 'b': nbench = atoi(v); break; }
         } else path = argv[a];
     }
-    if (gen && !prompt && !qs) { fprintf(stderr, "-g needs -p or -q\n"); return 1; }
+    if (gen && !prompt && !qs && nbench <= 0) { fprintf(stderr, "-g needs -p, -q or -b\n"); return 1; }
     const char *ck = gen ? gen : res;
     if (!gen) {
         int in = !strcmp(path, "-");            // "-": read the corpus from a pipe, e.g. a download
@@ -1233,6 +1237,7 @@ int main(int argc, char **argv) {
     printf("BLT, bidirectional (masked bytes): encoder %d, global %d, decoder %d layers, d %d; %.2fM params to train (%.2fM embeddings, of which %.2fM hash n-grams); inference on %.2fM trits\n",
            LE, LG, LD, D, nall / 1e6, nemb / 1e6, NG * HV * D / 1e6, trits / 1e6);
     int step0 = -1;
+    infer = gen != NULL;
     if (ck) { step0 = ck_load(ck) + 1; printf("loaded %s: step %d of %d, threshold %.3f nats\n", ck, step0 - 1, STEPS, theta); }
     if (!gen) {
     t0 = now();
@@ -1265,6 +1270,20 @@ int main(int argc, char **argv) {
     }
 
     // 3. fill-mask ----------------------------------------------------------------------------------------
+    if (gen && nbench > 0) {                                           // inference speed on fixed text
+        const char *txt = "The river rose in the night, and by morning the old stone bridge was gone. Villagers gathered on the bank to "
+                          "argue about who would build the new one, and how, and with whose money. ";
+        int tl = (int)strlen(txt);
+        for (int b = 0; b < B; b++) { memset(mbuf[b], '\n', 8); for (int t = 0; t < TB; t++) mbuf[b][8 + t] = txt[(t + 37 * b) % tl]; win[b] = mbuf[b] + 8; }
+        blt_fwd(win, 1, 0);                                            // warm up
+        t0 = now(); for (int i = 0; i < nbench; i++) window_entropies(win, 1); double te = (now() - t0) / nbench;
+        t0 = now(); for (int i = 0; i < nbench; i++) blt_fwd(win, 1, 0); double t1 = (now() - t0) / nbench;
+        int nb = nbench / B + 1; t0 = now(); for (int i = 0; i < nb; i++) blt_fwd(win, B, 0); double tb = (now() - t0) / nb / B;
+        printf("%d thread(s), %d-byte windows, whole forward (entropy model, patching, encoder, global, decoder, head):\n"
+               "  one window at a time: %.2f ms a window, %.0f bytes/s (entropy model alone %.2f ms)\n"
+               "  %d windows at a time: %.2f ms a window, %.0f bytes/s\n", NT, TB, t1 * 1e3, TB / t1, te * 1e3, B, tb * 1e3, TB / tb);
+        return 0;
+    }
     if (gen && qs) {                                                   // one prompt per line
         FILE *qf = fopen(qs, "rb"); if (!qf) { fprintf(stderr, "no prompts %s\n", qs); return 1; }
         static char ln[1 << 16], fo[TB]; int nq = 0; t0 = now();
