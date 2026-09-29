@@ -11,7 +11,7 @@ int flow_check(void);
 static double rnd(void) { return urand() * 2 - 1; }
 static int check(int bi, int padded) {
     np = 0;                                     // each check builds afresh in the fixed parameter table
-    Stack S; stack_build(&S, TB, 1, 77 + bi, bi); Layer *y = &S.ly[0]; Conv *c = &y->cv;
+    Stack S; stack_build(&S, TB, 1, 77 + bi, bi, B); Layer *y = &S.ly[0]; Conv *c = &y->cv;
     int T = TB, N = S.N, nb = B, n = nb * T, lens[B], bad = 0;
     for (int b = 0; b < B; b++) lens[b] = padded ? 1 + (b * 37) % T : T;
     S.len = padded ? lens : NULL;
@@ -70,12 +70,13 @@ int main(void) {
 // Whole-model information flow: with the full BLT built as bmoth's main builds it (fresh weights), change one
 // input byte and see which output positions' logits move. Bidirectional: positions on both sides must move.
 int flow_check(void) {
-    np = 0; Eh = param(V * D, 0.02f); stack_build(&SH, TB, LH, 1000, 0);
+    np = 0; Eh = param(V * D, 0.02f); stack_build(&SH, TB, LH, 1000, 0, B);
     Eb = param(V * D, 0.02f); for (int k = 0; k < NG; k++) Hs[k] = param(HV * D, 0.02f); Wo = param(V * D, 0.02f);
-    stack_build(&SE, TB, LE, 2000, 1); stack_build(&SG, TG, LG, 3000, 1); stack_build(&SD, TB, LD, 4000, 1);
+    stack_build(&SE, TB, LE, 2000, 1, B); stack_build(&SG, TG, LG, 3000, 1, B); stack_build(&SD, TB, LD, 4000, 1, B);
     HN = fa((size_t)B * TB * D); RF = fa(B * TB); LOGIT = fa((size_t)B * TB * V); S1 = fa((size_t)B * TB * D);
     G1 = fa((size_t)B * TB * D); WD = fa((size_t)V * D); WT = fa((size_t)V * D); G2 = fa((size_t)B * TG * D);
     arg = calloc((size_t)B * TG * D, 2); cpb = calloc(B * TB, sizeof(int)); for (int k = 0; k < NG; k++) hidx[k] = calloc(B * TB, sizeof(int));
+    HO = fa((size_t)B * TB * D); GH = fa((size_t)B * TB * D); chunk_maps();
     theta = 5.5f;                                               // untrained entropy model: some finite patch length
     uint8_t buf[8 + TB]; const char *txt = "The quick brown fox jumps over the lazy dog, and the dog, being lazy, does not mind at all. Then the fox runs home to its den.";
     memset(buf, '\n', sizeof buf); memcpy(buf + 8, txt, strlen(txt) < TB ? strlen(txt) : TB);

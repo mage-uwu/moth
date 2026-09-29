@@ -15,10 +15,16 @@
 //   inference   fill-mask instead of generation: -g ckpt -p "the c_t sat" fills each '_' (-m sets the mask
 //               character), most confident byte first, rerunning the model after each. It runs the training
 //               forward (fake-quantised, so the same trits); moth.c's streaming integer engine is causal-only.
+//   long context  -DLCTX=4096 (as moth.c): the encoder, decoder and entropy stacks run on TB-byte chunks of a
+//               4096-byte sequence, the global stack over all of its patches, both directions, so every byte
+//               sees the whole sequence through it. Chunks overlap: each owns CS = TB - 2 OV bytes and reads OV
+//               (-DOV, default TB / 4) warm-up bytes past both ends, so no byte sits at a chunk's hard edge
+//               bar the sequence's own ends; a byte's encoder and decoder state come from the chunk that owns it.
 //
 // cc -O3 -march=native -fopenmp bmoth.c -o bmoth -lm && ./bmoth input.txt
 //   ./bmoth input.txt -o run.ck          train, checkpointing every CKEVERY steps (resume with -r run.ck)
 //   ./bmoth -g run.ck -p "text with ___" fill the blanks; -q prompts.txt fills one prompt per line
+//   cc ... -DLCTX=4096 -DB=1 bmoth.c     long context: 4096-byte sequences, 128-byte chunks 64 bytes apart
 // (on AVX-512 add -mprefer-vector-width=512)
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,7 +48,19 @@
 #ifndef TB
 #define TB 128          // bytes per window: the byte stacks' conv length (power of 2, <= 256)
 #endif
-#define TG (TB / 2)     // patch slots per window: the global stack's conv length
+#ifndef LCTX
+#define LCTX TB         // bytes per training sequence. LCTX > TB is BLT's long global context: the byte stacks run
+#endif                  //   on TB-byte chunks, the global stack over the whole sequence's patches (both directions)
+#ifndef OV
+#if LCTX > TB
+#define OV (TB / 4)     // warm-up bytes on each side of a chunk: chunks overlap, and each byte is read from the
+#else                   //   chunk where it sits at least OV bytes from both edges (bar the sequence's own ends)
+#define OV 0
+#endif
+#endif
+#define CS (TB - 2 * OV)                  // chunk stride: the bytes each chunk owns
+#define NCK ((LCTX + CS - 1) / CS)        // byte-stack chunks per sequence
+#define TG (LCTX / 2)   // patch slots per sequence: the global stack's conv length
 #ifndef LE
 #define LE 1            // local encoder layers
 #endif
@@ -56,7 +74,11 @@
 #define LH 1            // entropy model layers
 #endif
 #ifndef B
-#define B 16            // windows per batch
+#define B 16            // sequences per batch (B * LCTX bytes a step)
+#endif
+#define NW (B * NCK)    // byte-stack sequences (chunks) per batch
+#if LCTX < TB || (LCTX & (LCTX - 1)) || OV < 0 || 2 * OV >= TB || LCTX > 32768
+#error "LCTX: a power of 2, TB..32768; OV: 0 <= OV < TB / 2"
 #endif
 #define V 256           // bytes
 #define NG 6            // hash n-gram embeddings, n = 3 .. 8
@@ -120,7 +142,11 @@ static float q8t(const float *x, int8_t *q, float mul) {              // per-tok
 static inline float floor_(float x) { float t = (float)(int32_t)x; return t > x ? t - 1 : t; }   // |x| < 2^31; unlike floorf, vectorises
 static int8_t sr8(float v, uint32_t idx) {                            // stochastic round + saturate
     v = v > 130.f ? 130.f : v < -130.f ? -130.f : v;                   // (saturates to the same codes; keeps floor_ in range)
+#ifdef SRNEAREST                                                       // tests only: round to nearest, so a gradient code
+    float r = floor_(v + 0.5f); (void)idx;                             //   doesn't depend on its token's row index
+#else
     float r = floor_(v + (hash(idx ^ seed) >> 8) * 0x1p-24f);
+#endif
     return r > 127 ? 127 : r < -127 ? -127 : (int8_t)r;
 }
 typedef struct { float prev, cur[64][16]; } Amax;                      // delayed gradient scale (a cache line per thread)
@@ -463,8 +489,8 @@ static float gelu(float x, float *d) {        // tanh GELU and its derivative
     return 0.5f * x * (1 + th);
 }
 
-static void stack_build(Stack *S, int T, int nl, uint32_t salt, int bi) {
-    int N = B * T, NF = 2 * T;
+static void stack_build(Stack *S, int T, int nl, uint32_t salt, int bi, int nseq) {   // nseq sequences of T steps
+    int N = nseq * T, NF = 2 * T;
     S->bi = bi; S->T = T; S->L = nl; S->N = N; plan_init(&S->pl, T);
     S->ly = calloc(nl, sizeof(Layer)); S->X = malloc((nl + 1) * sizeof(float *));
     for (int l = 0; l <= nl; l++) S->X[l] = fa((size_t)N * D);
@@ -477,7 +503,7 @@ static void stack_build(Stack *S, int T, int nl, uint32_t salt, int bi) {
         c->bias = param(D, 1); c->sw = param(3 * 3 * D, 1 / 3.f); c->sb = param(3 * D, 1 / 3.f);
         if (bi) {
             c->w3b = param(D * FO, 1 / sqrtf(FO)); c->hb = fa(T * D); c->dhb = fa(T * D); c->heb = fa(T * D);
-            c->Kbr = fa(NF * D); c->Kbi = fa(NF * D); c->Zbr = fa((size_t)(B + 1) / 2 * NF * D); c->Zbi = fa((size_t)(B + 1) / 2 * NF * D);
+            c->Kbr = fa(NF * D); c->Kbi = fa(NF * D); c->Zbr = fa((size_t)(nseq + 1) / 2 * NF * D); c->Zbi = fa((size_t)(nseq + 1) / 2 * NF * D);
         }
         c->pz = fa(T * FE); c->mod = fa(T * D);
         for (int t = 0; t < T; t++) {
@@ -492,7 +518,7 @@ static void stack_build(Stack *S, int T, int nl, uint32_t salt, int bi) {
             }
         }
         c->p1 = fa(T * FO); c->a1 = fa(T * FO); c->p2 = fa(T * FO); c->a2 = fa(T * FO); c->h = fa(T * D); c->dh = fa(T * D);
-        c->hq = ia((size_t)T * D); c->he = fa((size_t)T * D); c->Kr = fa(NF * D); c->Ki = fa(NF * D); c->Zr = fa((size_t)(B + 1) / 2 * NF * D); c->Zi = fa((size_t)(B + 1) / 2 * NF * D);
+        c->hq = ia((size_t)T * D); c->he = fa((size_t)T * D); c->Kr = fa(NF * D); c->Ki = fa(NF * D); c->Zr = fa((size_t)(nseq + 1) / 2 * NF * D); c->Zi = fa((size_t)(nseq + 1) / 2 * NF * D);
         int8_t **q[] = {&y->q1, &y->qo, &y->q2, &y->qd};
         for (int i = 0; i < 4; i++) *q[i] = ia(N * D);
         float **sc[] = {&y->s1, &y->so, &y->s2, &y->sd, &y->r1, &y->r2};
@@ -929,14 +955,14 @@ static float xent(const uint8_t *const *tgt, int n, int grad) {   // mean CE (na
 }
 #define MASK 0xFF                             // the mask byte: never occurs in valid UTF-8
 #define MRATE 0.15f                           // share of bytes masked, in spans of 1..8
-static uint8_t mbuf[B][8 + TB], msk[B][TB];   // masked windows (8 bytes of hash context first); which bytes are masked
-static float xent_masked(const uint8_t *const *tgt, int n, int grad) {   // mean CE over masked bytes only
+static uint8_t mbuf[B][8 + LCTX], msk[B][LCTX];   // masked sequences (8 bytes of hash context first); which bytes are masked
+static float xent_masked(const uint8_t *const *tgt, int n, int grad) {   // mean CE over masked bytes only; tgt[b][t]
     double loss = 0; int nm = 0;
-    for (int t = 0; t < n; t++) nm += msk[t / TB][t % TB];
+    for (int t = 0; t < n; t++) nm += msk[t / LCTX][t % LCTX];
     #pragma omp parallel for reduction(+:loss)
     for (int t = 0; t < n; t++) {
-        float *z = LOGIT + (size_t)t * V, mx = z[0], s = 0; int y = tgt[t / TB][t % TB];
-        if (!msk[t / TB][t % TB]) { if (grad) memset(z, 0, V * sizeof(float)); continue; }
+        float *z = LOGIT + (size_t)t * V, mx = z[0], s = 0; int y = tgt[t / LCTX][t % LCTX];
+        if (!msk[t / LCTX][t % LCTX]) { if (grad) memset(z, 0, V * sizeof(float)); continue; }
         for (int c = 1; c < V; c++) mx = MAXF(mx, z[c]);
         for (int c = 0; c < V; c++) s += expf(z[c] - mx);
         loss += logf(s) + mx - z[y];
@@ -962,8 +988,8 @@ static void hm_bwd(const uint8_t *const *win, int nb) {
 // ---- data and patching ------------------------------------------------------------------------------
 static uint8_t *data; static long ndata, ntrain;
 static float theta;                           // patch threshold on next-byte entropy (nats)
-static long pick(int val) {                   // window offset; >= 8 so every hash n-gram has real bytes
-    long lo = val ? ntrain : 8, hi = (val ? ndata : ntrain) - TB - 2;
+static long pick(int val) {                   // sequence offset; >= 8 so every hash n-gram has real bytes
+    long lo = val ? ntrain : 8, hi = (val ? ndata : ntrain) - LCTX - 2;
     rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17;   // all 64 bits: urand's 24 would quantise offsets past 16 MB
     return lo + (long)(rs % (uint64_t)(hi - lo));
 }
@@ -981,20 +1007,38 @@ static float entropy_of(const float *z) {     // H = log sum e^d - sum e^d d / s
     for (int c = 0; c < V; c++) { float d = z[c] - mx, e = fexp(d); s += e; sd += e * d; }
     return logf(s) - sd / s;
 }
-static float ENTW[B][TB + 1];                 // ENTW[b][t]: entropy of window b's byte t given the bytes before it
+// chunks: sequence b's chunk c is row b * NCK + c of the byte stacks, its bytes [ck0(c), ck0(c) + TB). Chunks
+// step by CS and reach OV bytes past both ends of the CS bytes they own (clamped inside the sequence); a byte is
+// read from the chunk that owns it, so it sits OV or more bytes from that chunk's edges, bar the sequence's ends.
+static int ck0(int c) { int s = c * CS - OV; if (s > LCTX - TB) s = LCTX - TB; return s < 0 ? 0 : s; }
+static int *rowpos, *ownrow;                  // byte-stack row -> batch byte (b * LCTX + t); batch byte -> its owner row
+static void chunk_maps(void) {
+    rowpos = malloc((size_t)NW * TB * sizeof(int)); ownrow = malloc((size_t)B * LCTX * sizeof(int));
+    for (int i = 0; i < B * LCTX; i++) ownrow[i] = -1;
+    for (int b = 0; b < B; b++) for (int c = 0; c < NCK; c++) for (int j = 0; j < TB; j++) {
+        int r = (b * NCK + c) * TB + j, t = ck0(c) + j; rowpos[r] = b * LCTX + t;
+        if (t / CS == c) ownrow[b * LCTX + t] = r;
+    }
+    for (int i = 0; i < B * LCTX; i++) if (ownrow[i] < 0) { fprintf(stderr, "chunk layout leaves byte %d unowned\n", i); exit(1); }
+}
+static void chunk_ptrs(const uint8_t *const *win, int nb, const uint8_t **cw) {
+    for (int b = 0; b < nb; b++) for (int c = 0; c < NCK; c++) cw[b * NCK + c] = win[b] + ck0(c);
+}
+static float ENTW[B][LCTX + 1];               // ENTW[b][t]: entropy of sequence b's byte t given the bytes before it
 static void window_entropies(const uint8_t *const *win, int nb) {   // the causal entropy model, on the input as given
-    hm_fwd(win, nb, 0);
+    const uint8_t *cw[NW]; chunk_ptrs(win, nb, cw);
+    hm_fwd(cw, nb * NCK, 0);
     #pragma omp parallel for collapse(2)
-    for (int b = 0; b < nb; b++) for (int t = 0; t < TB; t++) ENTW[b][t + 1] = entropy_of(LOGIT + (size_t)(b * TB + t) * V);
+    for (int b = 0; b < nb; b++) for (int t = 0; t < LCTX; t++) ENTW[b][t + 1] = entropy_of(LOGIT + (size_t)ownrow[b * LCTX + t] * V);
 }
 static int cmpf(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return (x > y) - (x < y); }
-// s[0..TB]: 1 where a patch starts (s[TB]: right after the window). Returns the window's patch count.
+// s[0..LCTX]: 1 where a patch starts (s[LCTX]: right after the sequence). Returns the sequence's patch count.
 static int patchify(const float *ent, uint8_t *s) {
     int np_ = 2, len = 1; s[0] = s[1] = 1;    // BLT: the first patch is a single byte
-    for (int t = 2; t <= TB; t++) {
+    for (int t = 2; t <= LCTX; t++) {
         int st = ent[t] > theta || len >= PMAX;
-        if (st && t < TB && np_ >= TG) st = 0; // at most TG patches in a window
-        s[t] = st; if (st) { np_ += t < TB; len = 1; } else len++;
+        if (st && t < LCTX && np_ >= TG) st = 0; // at most TG patches in a sequence
+        s[t] = st; if (st) { np_ += t < LCTX; len = 1; } else len++;
     }
     return np_;
 }
@@ -1002,9 +1046,10 @@ static int patchify(const float *ent, uint8_t *s) {
 // ---- BLT ------------------------------------------------------------------------------------------------
 static P *Eb, *Hs[NG], *Wo;                   // byte embedding, hash n-gram tables, output head
 static Stack SE, SG, SD;                      // local encoder, global, local decoder
-static int *hidx[NG], *cpb, npat[B];          // hash rows per byte, decoder's patch per byte, patches per window
-static int16_t *arg;                          // max-pool argmax per patch and channel
-static uint8_t sb[B][TB + 1];                 // patch starts per window
+static int *hidx[NG], *cpb, npat[B];          // hash rows per byte, decoder's patch per byte, patches per sequence
+static int16_t *arg;                          // max-pool argmax (byte in the sequence) per patch and channel
+static uint8_t sb[B][LCTX + 1];               // patch starts per sequence
+static float *HO, *GH;                        // decoder output of each byte's owner row (the head's input), its grad
 static const uint64_t primes[NG] = {1000000007ull, 5915587277ull, 1500450271ull, 3267000013ull, 5754853343ull, 4093082899ull};
 static int hrow(const uint8_t *p, int n, int k) {   // BLT's rolling polynomial hash of the n bytes ending at p
     uint64_t h = 0, pw = 1;
@@ -1014,39 +1059,41 @@ static int hrow(const uint8_t *p, int n, int k) {   // BLT's rolling polynomial 
 static void mask_windows(const long *off, int nb, const uint8_t **win) {   // BERT-style span masking into mbuf
     for (int b = 0; b < nb; b++) {
         uint8_t *m = mbuf[b], *k = msk[b]; int any = 0;
-        memcpy(m, data + off[b] - 8, 8 + TB); memset(k, 0, TB);
-        for (int t = 0; t < TB; t++) if (urand() < MRATE / 4.5f) { int L = 1 + (int)(urand() * 8); for (int j = t; j < t + L && j < TB; j++) k[j] = 1; }
-        for (int t = 0; t < TB; t++) any |= k[t];
-        if (!any) k[(int)(urand() * TB)] = 1;
-        for (int t = 0; t < TB; t++) if (k[t]) {
+        memcpy(m, data + off[b] - 8, 8 + LCTX); memset(k, 0, LCTX);
+        for (int t = 0; t < LCTX; t++) if (urand() < MRATE / 4.5f) { int L = 1 + (int)(urand() * 8); for (int j = t; j < t + L && j < LCTX; j++) k[j] = 1; }
+        for (int t = 0; t < LCTX; t++) any |= k[t];
+        if (!any) k[(int)(urand() * LCTX)] = 1;
+        for (int t = 0; t < LCTX; t++) if (k[t]) {
             float r = urand();
-            if (r < 0.8f) m[8 + t] = MASK; else if (r < 0.9f) m[8 + t] = data[off[b] + (int)(urand() * TB)];
+            if (r < 0.8f) m[8 + t] = MASK; else if (r < 0.9f) m[8 + t] = data[off[b] + (int)(urand() * LCTX)];
         }
         win[b] = m + 8;
     }
 }
-static void blt_fwd(const uint8_t *const *win, int nb, int train) {   // win: the (masked) input, 8 bytes of context before
-    int n = nb * TB;
+// win: nb (masked) sequences of LCTX bytes, 8 bytes of context before each. The encoder and decoder run on the
+// sequences' chunks (row r holds byte rowpos[r]); pooling, the global stack and the head see each byte once,
+// from its owner row
+static void blt_fwd(const uint8_t *const *win, int nb, int train) {
+    int n = nb * LCTX, nr = nb * NCK * TB;
     window_entropies(win, nb);
     for (int b = 0; b < nb; b++) npat[b] = patchify(ENTW[b], sb[b]);
     #pragma omp parallel for
-    for (int t = 0; t < n; t++) {             // embeddings: byte + hashed 3..8-grams
-        const uint8_t *p = win[t / TB] + t % TB; float *x = SE.X[0] + (size_t)t * D;
-        memcpy(x, Eb->w + *p * D, D * sizeof(float));
-        for (int k = 0; k < NG; k++) {
-            int r = hidx[k][t] = hrow(p, k + 3, k); const float *e = Hs[k]->w + (size_t)r * D;
-            for (int i = 0; i < D; i++) x[i] += e[i];
-        }
+    for (int t = 0; t < n; t++) { const uint8_t *p = win[t / LCTX] + t % LCTX; for (int k = 0; k < NG; k++) hidx[k][t] = hrow(p, k + 3, k); }
+    #pragma omp parallel for
+    for (int r = 0; r < nr; r++) {            // embeddings: byte + hashed 3..8-grams
+        int t = rowpos[r]; float *x = SE.X[0] + (size_t)r * D;
+        memcpy(x, Eb->w + win[t / LCTX][t % LCTX] * D, D * sizeof(float));
+        for (int k = 0; k < NG; k++) { const float *e = Hs[k]->w + (size_t)hidx[k][t] * D; for (int i = 0; i < D; i++) x[i] += e[i]; }
     }
-    stack_fwd(&SE, nb, train);
+    stack_fwd(&SE, nb * NCK, train);
     const float *e = SE.X[LE]; float *g = SG.X[0];
     #pragma omp parallel for
     for (int b = 0; b < nb; b++) {            // patch ids, the decoder's patch, max-pool per patch
         int pid = -1; memset(g + (size_t)b * TG * D, 0, TG * D * sizeof(float));
-        for (int t = 0; t < TB; t++) {
+        for (int t = 0; t < LCTX; t++) {
             pid += sb[b][t];
-            cpb[b * TB + t] = pid;                      // bidirectional: a byte reads its own patch
-            float *gk = g + ((size_t)b * TG + pid) * D; int16_t *ak = arg + ((size_t)b * TG + pid) * D; const float *et = e + ((size_t)b * TB + t) * D;
+            cpb[b * LCTX + t] = pid;                    // bidirectional: a byte reads its own patch
+            float *gk = g + ((size_t)b * TG + pid) * D; int16_t *ak = arg + ((size_t)b * TG + pid) * D; const float *et = e + (size_t)ownrow[b * LCTX + t] * D;
             if (sb[b][t]) { memcpy(gk, et, D * sizeof(float)); for (int i = 0; i < D; i++) ak[i] = t; }
             else for (int i = 0; i < D; i++) if (et[i] > gk[i]) { gk[i] = et[i]; ak[i] = t; }
         }
@@ -1054,29 +1101,37 @@ static void blt_fwd(const uint8_t *const *win, int nb, int train) {   // win: th
     SG.len = npat; stack_fwd(&SG, nb, train);
     const float *z = SG.X[LG]; float *d = SD.X[0];
     #pragma omp parallel for
-    for (int t = 0; t < n; t++) {             // decoder input: encoder state + the global state of its patch
-        const float *zt = z + ((size_t)(t / TB) * TG + cpb[t]) * D;
-        for (int i = 0; i < D; i++) d[(size_t)t * D + i] = e[(size_t)t * D + i] + zt[i];
+    for (int r = 0; r < nr; r++) {            // decoder input: encoder state + the global state of its byte's patch
+        const float *zt = z + ((size_t)(rowpos[r] / LCTX) * TG + cpb[rowpos[r]]) * D;
+        for (int i = 0; i < D; i++) d[(size_t)r * D + i] = e[(size_t)r * D + i] + zt[i];
     }
-    stack_fwd(&SD, nb, train);
-    head_fwd(SD.X[LD], n, Wo->w);
+    stack_fwd(&SD, nb * NCK, train);
+    #pragma omp parallel for
+    for (int t = 0; t < n; t++) memcpy(HO + (size_t)t * D, SD.X[LD] + (size_t)ownrow[t] * D, D * sizeof(float));
+    head_fwd(HO, n, Wo->w);
 }
 static void blt_bwd(const uint8_t *const *win, int nb) {
-    int n = nb * TB;
-    head_bwd(SD.X[LD], n, Wo->w, Wo->g, G1);
-    stack_bwd(&SD, G1, nb);                   // G1: grad wrt decoder input = grad wrt e (residual) and z
+    int n = nb * LCTX, nr = nb * NCK * TB;
+    head_bwd(HO, n, Wo->w, Wo->g, GH);
+    if (NCK > 1) memset(G1, 0, (size_t)nr * D * sizeof(float));   // warm-up rows: no loss of their own
+    #pragma omp parallel for
+    for (int t = 0; t < n; t++) memcpy(G1 + (size_t)ownrow[t] * D, GH + (size_t)t * D, D * sizeof(float));
+    stack_bwd(&SD, G1, nb * NCK);             // G1: grad wrt decoder input = grad wrt e (residual) and z
     #pragma omp parallel for
     for (int b = 0; b < nb; b++) {
         float *gz = G2 + (size_t)b * TG * D; memset(gz, 0, TG * D * sizeof(float));
-        for (int t = 0; t < TB; t++) { float *gt = gz + (size_t)cpb[b * TB + t] * D; const float *g = G1 + ((size_t)b * TB + t) * D; for (int i = 0; i < D; i++) gt[i] += g[i]; }
+        for (int r = b * NCK * TB; r < (b + 1) * NCK * TB; r++) {
+            float *gt = gz + (size_t)cpb[rowpos[r]] * D; const float *g = G1 + (size_t)r * D;
+            for (int i = 0; i < D; i++) gt[i] += g[i];
+        }
     }
     stack_bwd(&SG, G2, nb);                   // G2: grad wrt pooled patches
     #pragma omp parallel for
     for (int b = 0; b < nb; b++) for (int k = 0; k < npat[b]; k++) for (int i = 0; i < D; i++)
-        G1[((size_t)b * TB + arg[((size_t)b * TG + k) * D + i]) * D + i] += G2[((size_t)b * TG + k) * D + i];
-    stack_bwd(&SE, G1, nb);
-    for (int t = 0; t < n; t++) {
-        const float *g = G1 + (size_t)t * D; float *w = Eb->g + win[t / TB][t % TB] * D;
+        G1[(size_t)ownrow[b * LCTX + arg[((size_t)b * TG + k) * D + i]] * D + i] += G2[((size_t)b * TG + k) * D + i];
+    stack_bwd(&SE, G1, nb * NCK);
+    for (int r = 0; r < nr; r++) {
+        int t = rowpos[r]; const float *g = G1 + (size_t)r * D; float *w = Eb->g + win[t / LCTX][t % LCTX] * D;
         for (int i = 0; i < D; i++) w[i] += g[i];
         for (int k = 0; k < NG; k++) { float *h = Hs[k]->g + (size_t)hidx[k][t] * D; for (int i = 0; i < D; i++) h[i] += g[i]; }
     }
@@ -1102,9 +1157,37 @@ static float blt_val(void) {
     float vl = 0; const uint8_t *win[B], *tgt[B]; long off[B];
     for (int k = 0; k < 8; k++) {
         for (int b = 0; b < B; b++) { off[b] = pick(1); tgt[b] = data + off[b]; }
-        mask_windows(off, B, win); blt_fwd(win, B, 0); vl += xent_masked(tgt, B * TB, 0) / 8;
+        mask_windows(off, B, win); blt_fwd(win, B, 0); vl += xent_masked(tgt, B * LCTX, 0) / 8;
     }
     return vl;
+}
+
+// validation masked-byte loss by how much context a byte has: its distance to the sequence's nearer end and, in a
+// -DLCTX build, to the nearer edge of the chunk it is read from (what the warm-up bytes are for)
+static void loss_by_position(void) {
+    static const int edge[] = {0, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384}, cedge[] = {0, 4, 8, 16, 32, 64};
+    double sum[11] = {0}, csum[5] = {0}; long cnt[11] = {0}, ccnt[5] = {0}; const uint8_t *win[B], *tgt[B]; long off[B];
+    for (int k = 0; k < 256 * 1024 / (B * LCTX) + 1; k++) {
+        for (int b = 0; b < B; b++) { off[b] = pick(1); tgt[b] = data + off[b]; }
+        mask_windows(off, B, win); blt_fwd(win, B, 0);
+        for (int t = 0; t < B * LCTX; t++) if (msk[t / LCTX][t % LCTX]) {
+            const float *z = LOGIT + (size_t)t * V; float mx = z[0], s = 0; int pos = t % LCTX, i = 0, j = 0;
+            for (int c = 1; c < V; c++) mx = MAXF(mx, z[c]);
+            for (int c = 0; c < V; c++) s += expf(z[c] - mx);
+            float l = logf(s) + mx - z[tgt[t / LCTX][pos]];
+            int de = pos < LCTX - 1 - pos ? pos : LCTX - 1 - pos, cj = ownrow[t] % TB, dc = cj < TB - 1 - cj ? cj : TB - 1 - cj;
+            while (de >= edge[i + 1]) i++;
+            while (j < 4 && dc >= cedge[j + 1]) j++;
+            sum[i] += l; cnt[i]++; csum[j] += l; ccnt[j]++;
+        }
+    }
+    printf("val masked loss by distance to the sequence's nearer end (nats/byte):");
+    for (int i = 0; i < 11 && edge[i] < LCTX / 2; i++) printf(" %d-%d %.3f |", edge[i], edge[i + 1] - 1, sum[i] / cnt[i]);
+    printf("\n");
+    if (NCK == 1) return;
+    printf("val masked loss by distance to its chunk's nearer edge:");
+    for (int j = 0; j < 5; j++) if (ccnt[j]) { if (j < 4) printf(" %d-%d", cedge[j], cedge[j + 1] - 1); else printf(" %d+", cedge[j]); printf(" %.3f (%ld) |", csum[j] / ccnt[j], ccnt[j]); }
+    printf("\n");
 }
 
 // ---- checkpoints: the whole training state, so a run can resume bit-exactly or just generate ------------
@@ -1118,10 +1201,12 @@ static float blt_val(void) {
 static Stack *const STK[] = {&SH, &SE, &SG, &SD};
 static int ckio(FILE *f, int wr, int *step) {  // returns 0 if every field transferred and matched
     #define IO(p, n) do { if ((wr ? fwrite(p, sizeof *(p), n, f) : fread(p, sizeof *(p), n, f)) != (size_t)(n)) return 1; } while (0)
-    int32_t h[] = {CKMAGIC, 1, M, TB, LE, LG, LD, LH, HV, NG, V, PMAX, np}, g[13];
+    int32_t h[] = {CKMAGIC, LCTX == TB && !OV ? 1 : 2, M, TB, LE, LG, LD, LH, HV, NG, V, PMAX, np}, g[13];   // version 2: + LCTX, OV
     if (wr) IO(h, 13); else { IO(g, 13); for (int i = 0; i < 13; i++) if (g[i] != h[i]) {
-        const char *nm[] = {"magic", "version", "M", "TB", "LE", "LG", "LD", "LH", "HV", "NG", "V", "PMAX", "param count"};
+        const char *nm[] = {"magic", "version (2 = a -DLCTX build)", "M", "TB", "LE", "LG", "LD", "LH", "HV", "NG", "V", "PMAX", "param count"};
         fprintf(stderr, "checkpoint %s is %d, this build has %d: rebuild with the same -D flags\n", nm[i], g[i], h[i]); return 1; } }
+    if (h[1] == 2) { int32_t lc[2] = {LCTX, OV}, lg[2]; if (wr) IO(lc, 2); else { IO(lg, 2); if (lg[0] != lc[0] || lg[1] != lc[1]) {
+        fprintf(stderr, "checkpoint LCTX, OV are %d, %d, this build has %d, %d: rebuild with the same -D flags\n", lg[0], lg[1], lc[0], lc[1]); return 1; } } }
     int32_t st = *step; float ps_ = PSZ;
     IO(&st, 1); IO(&rs, 1); IO(&theta, 1); IO(&ps_, 1); *step = st;
     for (int k = 0; k < np; k++) {
@@ -1149,13 +1234,13 @@ static int ck_load(const char *path) {         // returns the step the checkpoin
     fclose(f); return step;
 }
 
-// fill the masked bytes of buf (8 bytes of context, then TB bytes; k[t] marks masked ones) in place, most
+// fill the masked bytes of buf (8 bytes of context, then LCTX bytes; k[t] marks masked ones) in place, most
 // confident first, rerunning the model after each. The mask byte itself is never an answer.
 static void fill(uint8_t *buf, uint8_t *k) {
     for (;;) {
         const uint8_t *w[1] = {buf + 8}; int bt = -1, bc = 0; float bp = -1;
         blt_fwd(w, 1, 0);
-        for (int t = 0; t < TB; t++) if (k[t]) {
+        for (int t = 0; t < LCTX; t++) if (k[t]) {
             const float *z = LOGIT + (size_t)t * V; float mx = -1e30f, s = 0; int c = 0;
             for (int j = 0; j < V; j++) if (j != MASK && z[j] > mx) { mx = z[j]; c = j; }
             for (int j = 0; j < V; j++) if (j != MASK) s += expf(z[j] - mx);
@@ -1166,8 +1251,9 @@ static void fill(uint8_t *buf, uint8_t *k) {
     }
 }
 static int fill_text(const char *in, int n, char mch, char *out) {  // returns the filled window's length, or -1
-    uint8_t buf[8 + TB], k[TB] = {0};
-    if (n > TB) return -1;
+    static uint8_t buf[8 + LCTX], k[LCTX];
+    if (n > LCTX) return -1;
+    memset(k, 0, sizeof k);
     memset(buf, '\n', sizeof buf);             // context and padding: blank lines, as between documents
     for (int t = 0; t < n; t++) { k[t] = in[t] == mch; buf[8 + t] = k[t] ? MASK : (uint8_t)in[t]; }
     fill(buf, k); memcpy(out, buf + 8, n);
@@ -1203,29 +1289,30 @@ int main(int argc, char **argv) {
             if ((r = fread(data + ndata, 1, cap - ndata, f)) == 0) break;
         }
         if (!in) fclose(f);
-        if (ndata < 16 * TB) { fprintf(stderr, "input too small\n"); return 1; }   // val (last 10%) must hold a window
+        if (ndata < 16 * LCTX) { fprintf(stderr, "input too small\n"); return 1; }   // val (last 10%) must hold a sequence
         ntrain = ndata * 9 / 10;
     }
     NT = omp_get_max_threads(); if (NT > 64) NT = 64;
-    int NMAX = B * TB;
-    SCR = fa((size_t)NT * SW * 2 * TB * CH); VB = fa((size_t)NMAX * D); DP = fa((size_t)3 * NMAX * D);
+    int NMAX = NW * TB;                        // byte-stack rows (>= B * LCTX bytes)
+    SCR = fa((size_t)NT * SW * 2 * (TB > TG ? TB : TG) * CH); VB = fa((size_t)NMAX * D); DP = fa((size_t)3 * NMAX * D);
     HN = fa((size_t)NMAX * D); RF = fa(NMAX); LOGIT = fa((size_t)NMAX * V); S1 = fa((size_t)NMAX * D);
     G1 = fa((size_t)NMAX * D); WD = fa((size_t)V * D); WT = fa((size_t)V * D); G2 = fa((size_t)B * TG * D); arg = calloc((size_t)B * TG * D, 2); cpb = calloc(NMAX, sizeof(int));
+    HO = fa((size_t)B * LCTX * D); GH = fa((size_t)B * LCTX * D); chunk_maps();
     for (int k = 0; k < NG; k++) hidx[k] = calloc(NMAX, sizeof(int));
-    const uint8_t *win[B], *tgt[B]; long off[B]; double t0;
+    const uint8_t *win[NW], *tgt[NW]; long off[NW]; double t0;
 
     // 1. entropy model -------------------------------------------------------------------------------
-    Eh = param(V * D, 0.02f); stack_build(&SH, TB, LH, 1000, 0); int h1 = np;
+    Eh = param(V * D, 0.02f); stack_build(&SH, TB, LH, 1000, 0, NW); int h1 = np;
     if (!ck) {
     printf("entropy model: %d layer(s), d %d, %d bytes of context, %d threads\n", LH, D, TB, NT);
     t0 = now();
     for (int step = -1; step <= HSTEPS; step++) {
         seed = hash(step + 2);
-        for (int b = 0; b < B; b++) { off[b] = pick(0); win[b] = data + off[b]; tgt[b] = win[b] + 1; }
-        hm_fwd(win, B, 1); float loss = xent(tgt, B * TB, 1); hm_bwd(win, B); adam(step, 0, h1, HSTEPS);
+        for (int b = 0; b < NW; b++) { off[b] = pick(0); win[b] = data + off[b]; tgt[b] = win[b] + 1; }
+        hm_fwd(win, NW, 1); float loss = xent(tgt, NW * TB, 1); hm_bwd(win, NW); adam(step, 0, h1, HSTEPS);
         if (step % 250 == 0 && step > 0) { printf("  step %4d | loss %.4f | %.0f ms/step\n", step, loss, (now() - t0) * 1e3 / 250); fflush(stdout); t0 = now(); }
     }
-    { float vl = 0; for (int k = 0; k < 8; k++) { for (int b = 0; b < B; b++) { off[b] = pick(1); win[b] = data + off[b]; tgt[b] = win[b] + 1; } hm_fwd(win, B, 0); vl += xent(tgt, B * TB, 0) / 8; }
+    { float vl = 0; for (int k = 0; k < 8; k++) { for (int b = 0; b < NW; b++) { off[b] = pick(1); win[b] = data + off[b]; tgt[b] = win[b] + 1; } hm_fwd(win, NW, 0); vl += xent(tgt, NW * TB, 0) / 8; }
       printf("  val loss %.4f nats/byte\n", vl); }
     }
 
@@ -1233,9 +1320,11 @@ int main(int argc, char **argv) {
     int b0 = np;
     Eb = param(V * D, 0.02f); for (int k = 0; k < NG; k++) Hs[k] = param(HV * D, 0.02f); Wo = param(V * D, 0.02f);
     int bt = np;
-    stack_build(&SE, TB, LE, 2000, 1); stack_build(&SG, TG, LG, 3000, 1); stack_build(&SD, TB, LD, 4000, 1);
+    stack_build(&SE, TB, LE, 2000, 1, NW); stack_build(&SG, TG, LG, 3000, 1, B); stack_build(&SD, TB, LD, 4000, 1, NW);
     long nemb = 0, nall = 0; for (int k = b0; k < bt; k++) nemb += ps[k].n; for (int k = b0; k < np; k++) nall += ps[k].n;
     long trits = (long)(LE + LG + LD) * (7 * 2 * W3 + 13 * D) + 2 * ((long)(LE + LD) * TB * D + (long)LG * TG * D);   // two long kernels a layer
+    if (NCK > 1) printf("long global context: %d-byte sequences; byte stacks in %d-byte chunks, %d apart (%d warm-up bytes each side, %.2fx the byte-level work); %d patch slots\n",
+                        LCTX, TB, CS, OV, (double)NCK * TB / LCTX, TG);
     printf("BLT, bidirectional (masked bytes): encoder %d, global %d, decoder %d layers, d %d; %.2fM params to train (%.2fM embeddings, of which %.2fM hash n-grams); inference on %.2fM trits\n",
            LE, LG, LD, D, nall / 1e6, nemb / 1e6, NG * HV * D / 1e6, trits / 1e6);
     int step0 = -1;
@@ -1244,11 +1333,11 @@ int main(int argc, char **argv) {
     if (!gen) {
     t0 = now();
     if (!res) {                                // threshold: the entropy quantile giving PSZ-byte patches on masked input
-        int nw = 32; long k = 0; float *tmp = malloc((size_t)nw * B * (TB - 1) * sizeof(float));
+        int nw = 32; long k = 0; float *tmp = malloc((size_t)nw * B * (LCTX - 1) * sizeof(float));
         for (int i = 0; i < nw; i++) {
             for (int b = 0; b < B; b++) off[b] = pick(0);
             mask_windows(off, B, win); window_entropies(win, B);
-            for (int b = 0; b < B; b++) for (int t = 2; t <= TB; t++) tmp[k++] = ENTW[b][t];
+            for (int b = 0; b < B; b++) for (int t = 2; t <= LCTX; t++) tmp[k++] = ENTW[b][t];
         }
         qsort(tmp, k, sizeof(float), cmpf); theta = tmp[(long)((1 - 1 / PSZ) * k)]; free(tmp);
     }
@@ -1256,7 +1345,7 @@ int main(int argc, char **argv) {
       for (int i = 0; i < 16; i++) {
           for (int b = 0; b < B; b++) off[b] = pick(0);
           mask_windows(off, B, win); window_entropies(win, B);
-          for (int b = 0; b < B; b++) { pat += patchify(ENTW[b], sb[b]); bytes += TB; }
+          for (int b = 0; b < B; b++) { pat += patchify(ENTW[b], sb[b]); bytes += LCTX; }
       }
       if (res) rs = r0;                        // a resumed run draws the same windows as an unbroken one
       printf("patch threshold %.3f nats -> mean patch %.2f bytes on masked input (%.1f s)\n", theta, bytes / pat, now() - t0); }
@@ -1264,7 +1353,7 @@ int main(int argc, char **argv) {
     for (int step = step0; step <= STEPS; step++) {
         seed = hash(step + 7);
         for (int b = 0; b < B; b++) { off[b] = pick(0); tgt[b] = data + off[b]; }
-        mask_windows(off, B, win); blt_fwd(win, B, 1); float loss = xent_masked(tgt, B * TB, 1); blt_bwd(win, B); adam(step, b0, np, STEPS);
+        mask_windows(off, B, win); blt_fwd(win, B, 1); float loss = xent_masked(tgt, B * LCTX, 1); blt_bwd(win, B); adam(step, b0, np, STEPS);
         if (step % 50 == 0 && step > 0) { printf("step %4d | masked loss %.4f | %.0f ms/step\n", step, loss, (now() - t0) * 1e3 / 50); fflush(stdout); t0 = now(); }
         if (step % 500 == 0 && step > 0) { float vl = blt_val(); printf("step %4d | val masked loss %.4f nats/byte (%.3f bits/byte)\n", step, vl, vl / logf(2)); t0 = now(); }
         if (out && step > 0 && (step % CKEVERY == 0 || step == STEPS)) { ck_save(out, step); printf("saved %s at step %d\n", out, step); fflush(stdout); t0 = now(); }
@@ -1276,23 +1365,23 @@ int main(int argc, char **argv) {
         const char *txt = "The river rose in the night, and by morning the old stone bridge was gone. Villagers gathered on the bank to "
                           "argue about who would build the new one, and how, and with whose money. ";
         int tl = (int)strlen(txt);
-        for (int b = 0; b < B; b++) { memset(mbuf[b], '\n', 8); for (int t = 0; t < TB; t++) mbuf[b][8 + t] = txt[(t + 37 * b) % tl]; win[b] = mbuf[b] + 8; }
+        for (int b = 0; b < B; b++) { memset(mbuf[b], '\n', 8); for (int t = 0; t < LCTX; t++) mbuf[b][8 + t] = txt[(t + 37 * b) % tl]; win[b] = mbuf[b] + 8; }
         blt_fwd(win, 1, 0);                                            // warm up
         t0 = now(); for (int i = 0; i < nbench; i++) window_entropies(win, 1); double te = (now() - t0) / nbench;
         t0 = now(); for (int i = 0; i < nbench; i++) blt_fwd(win, 1, 0); double t1 = (now() - t0) / nbench;
         int nb = nbench / B + 1; t0 = now(); for (int i = 0; i < nb; i++) blt_fwd(win, B, 0); double tb = (now() - t0) / nb / B;
         printf("%d thread(s), %d-byte windows, whole forward (entropy model, patching, encoder, global, decoder, head):\n"
                "  one window at a time: %.2f ms a window, %.0f bytes/s (entropy model alone %.2f ms)\n"
-               "  %d windows at a time: %.2f ms a window, %.0f bytes/s\n", NT, TB, t1 * 1e3, TB / t1, te * 1e3, B, tb * 1e3, TB / tb);
+               "  %d windows at a time: %.2f ms a window, %.0f bytes/s\n", NT, LCTX, t1 * 1e3, LCTX / t1, te * 1e3, B, tb * 1e3, LCTX / tb);
         return 0;
     }
     if (gen && qs) {                                                   // one prompt per line
         FILE *qf = fopen(qs, "rb"); if (!qf) { fprintf(stderr, "no prompts %s\n", qs); return 1; }
-        static char ln[1 << 16], fo[TB]; int nq = 0; t0 = now();
+        static char ln[1 << 16], fo[LCTX]; int nq = 0; t0 = now();
         while (fgets(ln, sizeof ln, qf)) {
             int n = 0; for (int i = 0; ln[i] && ln[i] != '\n'; i++) ln[n++] = ln[i] == '\\' && ln[i + 1] == 'n' ? (i++, '\n') : ln[i];
             if (!n) continue;
-            if (fill_text(ln, n, mch, fo) < 0) { putchar('\n'); fprintf(stderr, "prompt %d longer than %d bytes\n", nq + 1, TB); nq++; continue; }
+            if (fill_text(ln, n, mch, fo) < 0) { putchar('\n'); fprintf(stderr, "prompt %d longer than %d bytes\n", nq + 1, LCTX); nq++; continue; }
             for (int t = 0; t < n; t++) if (ln[t] == mch) putchar(fo[t]);
             putchar('\n'); nq++;
         }
@@ -1300,8 +1389,8 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (gen) {
-        char fo[TB]; int n = (int)strlen(prompt);
-        if (fill_text(prompt, n, mch, fo) < 0) { fprintf(stderr, "prompt longer than %d bytes\n", TB); return 1; }
+        static char fo[LCTX]; int n = (int)strlen(prompt);
+        if (fill_text(prompt, n, mch, fo) < 0) { fprintf(stderr, "prompt longer than %d bytes\n", LCTX); return 1; }
         fwrite(fo, 1, n, stdout); putchar('\n');
         return 0;
     }
@@ -1310,20 +1399,21 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 16; i++) {
             for (int b = 0; b < B; b++) { off[b] = pick(1); tgt[b] = data + off[b]; }
             mask_windows(off, B, win); blt_fwd(win, B, 0);
-            for (int t = 0; t < B * TB; t++) if (msk[t / TB][t % TB]) {
+            for (int t = 0; t < B * LCTX; t++) if (msk[t / LCTX][t % LCTX]) {
                 const float *z = LOGIT + (size_t)t * V; int c = 0;
                 for (int j = 1; j < V; j++) if (z[j] > z[c]) c = j;
-                hit += c == tgt[t / TB][t % TB]; tot++;
+                hit += c == tgt[t / LCTX][t % LCTX]; tot++;
             }
         }
         printf("masked-byte accuracy on validation: %.1f%% of %ld bytes (one pass, argmax)\n", 100.0 * hit / tot, tot);
-        off[0] = pick(1); uint8_t buf[8 + TB], k[TB] = {0};
-        memcpy(buf, data + off[0] - 8, 8 + TB);
-        for (int t = TB / 2 - 6; t < TB / 2 + 6; t++) { k[t] = 1; buf[8 + t] = MASK; }
+        loss_by_position();
+        off[0] = pick(1); static uint8_t buf[8 + LCTX], k[LCTX];       // 12 bytes mid-sequence; show the TB around them
+        memcpy(buf, data + off[0] - 8, 8 + LCTX); int a = LCTX / 2 - TB / 2; const uint8_t *o = data + off[0] + a;
+        for (int t = LCTX / 2 - 6; t < LCTX / 2 + 6; t++) { k[t] = 1; buf[8 + t] = MASK; }
         t0 = now(); fill(buf, k); t0 = now() - t0;
-        printf("fill 12 bytes in %.3f s (12 model passes)\n  original: %.*s\n  masked:   %.*s", t0, TB, data + off[0], TB / 2 - 6, data + off[0]);
+        printf("fill 12 bytes in %.3f s (12 model passes)\n  original: %.*s\n  masked:   %.*s", t0, TB, o, TB / 2 - 6, o);
         for (int t = 0; t < 12; t++) putchar('_');
-        printf("%.*s\n  filled:   %.*s\n", TB / 2 - 6, data + off[0] + TB / 2 + 6, TB, buf + 8);
+        printf("%.*s\n  filled:   %.*s\n", TB / 2 - 6, o + TB / 2 + 6, TB, buf + 8 + a);
     }
     return 0;
 }
