@@ -121,6 +121,9 @@
 #define HSTEPS 1000     // entropy model steps
 #endif
 #define LR 3e-3f
+#ifndef WDECAY
+#define WDECAY 0.1f     // AdamW weight decay (see main)
+#endif
 #if defined(__AVX512VNNI__) && defined(__AVX512VBMI__) && M % 16 == 0
 #define VNNI 1                                 // int8 dot-product kernels (vpdpbusd), else portable C
 #include <immintrin.h>
@@ -142,7 +145,7 @@ static int8_t *ia(size_t n) { return calloc(n, 1); }
 static int NT;          // threads
 static uint32_t seed;   // per-step stochastic rounding seed
 
-typedef struct { float *w, *g, *m, *v; int n; } P;   // master weight, grad, adam moments
+typedef struct { float *w, *g, *m, *v; int n; float wd; } P;   // master weight, grad, adam moments, weight decay
 static P ps[12 + NG + 23 * (LE + LG + LD + LH)]; static int np;
 static P *param(int n, float sd) {
     P *p = &ps[np++]; p->n = n; p->w = fa(n); p->g = fa(n); p->m = fa(n); p->v = fa(n);
@@ -1259,7 +1262,7 @@ static void adam(int step, int k0, int k1, int steps) {   // params [k0, k1)
             float g = p->g[i]; p->g[i] = 0;
             if (step <= 0) continue;
             p->m[i] = 0.9f * p->m[i] + 0.1f * g; p->v[i] = 0.95f * p->v[i] + 0.05f * g * g;
-            p->w[i] -= lr * (p->m[i] / c1) / (sqrtf(p->v[i] / c2) + 1e-8f);
+            p->w[i] -= lr * ((p->m[i] / c1) / (sqrtf(p->v[i] / c2) + 1e-8f) + p->wd * p->w[i]);   // AdamW
         }
     }
 }
@@ -1469,6 +1472,14 @@ int main(int argc, char **argv) {
     Eb = param(V * D, 0.02f); for (int k = 0; k < NG; k++) Hs[k] = param(HV * D, 0.02f); Wo = param(V * D, 0.02f);
     int bt = np;
     stack_build(&SE, TB, LE, 2000, 1, NW); stack_build(&SG, TG, LG, 3000, 1, B); stack_build(&SD, TB, LD, 4000, 1, NW);
+    // Decoupled weight decay (AdamW) on every weight whose scale reaches the output: a ternary Monarch's output is
+    // proportional to both factors' absmean scales, and the convs, filters and the int8 head keep their scales
+    // too, so without decay Adam's random walk grows the master weights, and the activations with them, until
+    // training diverges (a 488K-step run did, from ~200K steps: Monarch factors grew from rms 0.25 to up to 24,
+    // the last decoder layer's u to an int8 range of 8e5). Not on the byte and hash embeddings (summed and then
+    // rms-normalised, and a hash row only moves when its n-gram occurs) or the boundary predictor.
+    for (int k = bt; k < np; k++) ps[k].wd = WDECAY;
+    Wo->wd = WDECAY;
     Pw1 = param(PH * D, 1 / sqrtf(D)); Pb1 = param(PH, 0); Pw2 = param(PH, 1 / sqrtf(PH)); Pb2 = param(1, 0); Pb2->w[0] = 1.5f;
     long nemb = 0, nall = 0; for (int k = b0; k < bt; k++) nemb += ps[k].n; for (int k = b0; k < np; k++) nall += ps[k].n;
     long trits = (long)(LE + LG + LD) * (7 * 2 * W3 + 13 * D) + 2 * ((long)(LE + LD) * TB * D + (long)LG * TG * D);   // two long kernels a layer
@@ -1507,6 +1518,19 @@ int main(int argc, char **argv) {
         if (step % 50 == 0 && step > 0) { int pt = 0; for (int b = 0; b < B; b++) pt += npat[b];
             printf("step %4d | masked loss %.4f | boundary mse %.3f, patch %.2f bytes | %.0f ms/step\n", step, loss, ploss, (double)B * LCTX / pt, (now() - t0) * 1e3 / 50); fflush(stdout); t0 = now(); }
         if (step % 500 == 0 && step > 0) { float vl = blt_val(); printf("step %4d | val masked loss %.4f nats/byte (%.3f bits/byte)\n", step, vl, vl / logf(2)); t0 = now(); }
+        if (step % 5000 == 0 && step > 0) {   // scale drift: Monarch master weights' rms, the head's, the largest static int8 range
+            double r = 0, rm = 0, am = 0; long nm = 0; Stack *ss[] = {&SE, &SG, &SD};
+            for (int s = 0; s < 3; s++) for (int l = 0; l < ss[s]->L; l++) {
+                Layer *y = &ss[s]->ly[l]; Mon *ms[] = {&y->q, &y->k, &y->v, &y->o, &y->g, &y->u, &y->d};
+                for (int i = 0; i < 7; i++) for (int f = 0; f < 2; f++) {
+                    const float *w = (f ? ms[i]->l : ms[i]->r)->w; double q = 0; for (int j = 0; j < W3; j++) q += w[j] * w[j];
+                    r += q; nm += W3; rm = fmax(rm, sqrt(q / W3));
+                }
+                for (int i = 0; i < 4; i++) am = fmax(am, y->cv.amax[i]);
+            }
+            double h = 0; for (int j = 0; j < V * D; j++) h += Wo->w[j] * Wo->w[j];
+            printf("step %4d | drift: Monarch weights rms %.3f (largest factor %.3f), head rms %.3f, largest int8 range %.1f\n", step, sqrt(r / nm), rm, sqrt(h / (V * D)), am);
+        }
         if (out && step > 0 && (step % CKEVERY == 0 || step == STEPS)) { ck_save(out, step); printf("saved %s at step %d\n", out, step); fflush(stdout); t0 = now(); }
     }
     }
