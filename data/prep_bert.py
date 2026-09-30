@@ -5,15 +5,20 @@
 # Nothing touches disk. Articles and books are cut into ~8 KB pieces at paragraph breaks, book paragraphs are
 # reflowed (Gutenberg wraps lines at ~70 columns), and pieces are shuffled with a fixed seed, so the last 10%
 # (the validation split) samples both sources.
-import argparse, concurrent.futures, io, random, sys, urllib.request
+import argparse, concurrent.futures, io, random, sys, time, urllib.request
 import pyarrow.parquet as pq
 
 WIKI = "https://huggingface.co/datasets/wikimedia/wikipedia/resolve/main/20231101.en/train-{:05d}-of-00041.parquet"
 PG_LIST = "https://huggingface.co/datasets/deepmind/pg19/resolve/main/data/train_files.txt"
 PG = "https://storage.googleapis.com/deepmind-gutenberg/"
 
-def get(url):
-    with urllib.request.urlopen(url, timeout=120) as r: return r.read()
+def get(url, tries=6):                        # with retries: a stream that loses a download is silently short
+    for i in range(tries):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r: return r.read()
+        except Exception as e:
+            if i == tries - 1: raise
+            print(f"retrying {url} after {e}", file=sys.stderr); time.sleep(10 * (i + 1))
 
 def pieces(paras, size=8000):                 # group paragraphs into ~size-byte pieces
     out, cur, n = [], [], 0

@@ -440,6 +440,7 @@ def train(a):
     cfg = Cfg(M=a.M, LE=a.LE, LG=a.LG, LD=a.LD, LH=a.LH, HV=a.HV, WDECAY=a.wd)
     raw = sys.stdin.buffer.read() if a.data == "-" else open(a.data, "rb").read()
     data = np.frombuffer(raw, np.uint8); ndata = len(data); ntrain = ndata * 9 // 10
+    if ndata < 16 * 128 * 64: raise SystemExit(f"input too small ({ndata} bytes)")
     print(f"data: {ndata / 1e6:.1f} MB ({ntrain / 1e6:.1f} MB train); device {dev}"
           + (f" ({torch.cuda.get_device_name(dev)})" if dev.type == "cuda" else ""), flush=True)
     rng = np.random.default_rng(a.seed); torch.manual_seed(a.seed)
