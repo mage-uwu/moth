@@ -1,3 +1,27 @@
+// sbmoth.c: sparse / event-driven Moth-BERT, a fork of bmoth.c with smoth.c's lessons. It leaves bmoth.c untouched.
+//
+// What changes from bmoth.c:
+//   patch events  bmoth places patch boundaries by running a second model, the causal entropy model, over the
+//                 masked input: ~20% of its inference. sbmoth decides them from the encoder state it computes
+//                 anyway: a small MLP on the encoder output at byte t predicts the entropy model's entropy of byte
+//                 t + 1, and a patch starts where that crosses thetap. Training patches come from the same
+//                 predictor; the entropy model is kept only as its teacher (regression on its entropies of each
+//                 training batch, the encoder detached) and inference never runs it. thetap tracks the teacher's
+//                 boundary rate, so patches keep its size.
+//   depth         the same prediction says how hard a byte is. Bytes predicted easiest skip the decoder's last
+//                 layer (the SK1 easiest fraction after the SK2 easiest, which skip the last two). A skipped layer
+//                 passes its input through and adds nothing to the convs (zero q, k, v codes, u = 0), in training
+//                 and at inference alike.
+//   outputs       only the bytes something reads get logits: the masked ones (the loss in training, the blanks
+//                 in fill-mask), not all of them. So the head, and the decoder's last per-byte half (gate, Mon_o,
+//                 GLU), run on ~15% of the bytes; the rest of that layer still runs everywhere, since its convs
+//                 carry every byte to the masked ones. Exact: the masked bytes' logits are the ones a full pass
+//                 gives (-b checks it). LOGIT row i is batch byte oidx[i].
+//   -e file       masked-byte loss on a file's last 5 MB, masked from a fixed seed, and the forward's speed.
+// Checkpoints are "SBMT", not interchangeable with bmoth's.
+//
+// What follows is bmoth.c's description, which still holds for everything else.
+//
 // bmoth.c: Moth-BERT, the bidirectional twin of moth.c. Same tiny ternary Monarch Mixer over byte patches (BLT),
 // trained as a masked byte model (BERT's objective on raw bytes) instead of a next-byte model. No tokenizer.
 //
@@ -21,10 +45,10 @@
 //               (-DOV, default TB / 4) warm-up bytes past both ends, so no byte sits at a chunk's hard edge
 //               bar the sequence's own ends; a byte's encoder and decoder state come from the chunk that owns it.
 //
+// cc -O3 -march=native -fopenmp sbmoth.c -o sbmoth -lm && ./sbmoth input.txt   (flags and options as bmoth, plus -e)
 // cc -O3 -march=native -fopenmp bmoth.c -o bmoth -lm && ./bmoth input.txt
 //   ./bmoth input.txt -o run.ck          train, checkpointing every CKEVERY steps (resume with -r run.ck)
 //   ./bmoth -g run.ck -p "text with ___" fill the blanks; -q prompts.txt fills one prompt per line
-//   ./bmoth -g run.ck -e text.txt        masked-byte loss on the last 5 MB of text.txt (fixed-seed masks), and speed
 //   cc ... -DLCTX=4096 -DB=1 bmoth.c     long context: 4096-byte sequences, 128-byte chunks 64 bytes apart
 // (on AVX-512 add -mprefer-vector-width=512)
 #include <stdio.h>
@@ -119,7 +143,7 @@ static int NT;          // threads
 static uint32_t seed;   // per-step stochastic rounding seed
 
 typedef struct { float *w, *g, *m, *v; int n; } P;   // master weight, grad, adam moments
-static P ps[8 + NG + 23 * (LE + LG + LD + LH)]; static int np;
+static P ps[12 + NG + 23 * (LE + LG + LD + LH)]; static int np;
 static P *param(int n, float sd) {
     P *p = &ps[np++]; p->n = n; p->w = fa(n); p->g = fa(n); p->m = fa(n); p->v = fa(n);
     for (int i = 0; i < n; i++) p->w[i] = sd * randn();
@@ -475,7 +499,13 @@ typedef struct {
 #endif
 } Layer;
 // a stack of layers over sequences of length T (bytes or patches); X[0] is its input, X[L] its output
-typedef struct { int T, L, N, bi, fz; Plan pl; Layer *ly; float **X; long ipos; const int *len; } Stack;   // len: valid steps per sequence, or NULL; bi: bidirectional; fz: trits and kernels frozen
+typedef struct { int T, L, N, bi, fz; Plan pl; Layer *ly; float **X; long ipos; const int *len; const uint8_t *sk, *need; } Stack;   // len: valid
+// steps per sequence, or NULL; bi: bidirectional; fz: trits and kernels frozen. sk: per step, how many of the last
+// layers it skips (NULL: none); a skipped layer passes its input through and adds nothing to the convs (its q, k, v
+// codes and u count as zero). need: per step, whether anything reads its output (NULL: all); the last layer's
+// per-step half (gate, Mon_o, GLU) runs only where it is read, since X[L] of the rest goes nowhere
+#define SKIP(S, l, t) ((S)->sk && (l) >= (S)->L - (S)->sk[t])
+#define UNREAD(S, l, t) ((S)->need && (l) == (S)->L - 1 && !(S)->need[t])
 static int infer;                             // weights fixed (no training): prepare trits and kernels once
 static float *VB, *DP;                        // shared scratch: conv input (grad), short conv out grads
 
@@ -677,7 +707,8 @@ static void mixer_fwd(Stack *S, Layer *y, int nb, int train) {
         const float *k = y->post + ((size_t)N + t) * D, *v = y->post + ((size_t)2 * N + t) * D;
         for (int ch = 0; ch < D; ch++) VB[t * D + ch] = k[ch] * v[ch];
         if (S->bi && S->len && tt >= S->len[t / T]) memset(VB + (size_t)t * D, 0, D * sizeof(float));   // padding: no u, or
-        m3 = fmaxf(m3, sq8(VB + t * D, D, c->as[3]));                                                 // it leaks backwards
+        if (SKIP(S, (int)(y - S->ly), t)) memset(VB + (size_t)t * D, 0, D * sizeof(float));             // it leaks backwards;
+        m3 = fmaxf(m3, sq8(VB + t * D, D, c->as[3]));                                                 // skipped: no u either
     }
     if (train) {                            // EMA of amax, updated after use so the scale stays causal
         float m[4] = {m0, m1, m2, m3};
@@ -740,7 +771,7 @@ static void mixer_bwd(Stack *S, Layer *y, int nb) {
     filter_bwd(S, c);
     #pragma omp parallel for
     for (int t = 0; t < n; t++) {                   // du (+ skip) -> dk, dv
-        if (S->bi && S->len && t % T >= S->len[t / T]) {   // padding had no u
+        if ((S->bi && S->len && t % T >= S->len[t / T]) || SKIP(S, (int)(y - S->ly), t)) {   // padding (or a skipped step) had no u
             memset(DP + ((size_t)N + t) * D, 0, D * sizeof(float)); memset(DP + ((size_t)2 * N + t) * D, 0, D * sizeof(float)); continue;
         }
         float *cc = y->cc + t * D, *k = y->post + ((size_t)N + t) * D, *v = k + (size_t)N * D;
@@ -804,9 +835,9 @@ static void stack_fwd(Stack *S, int nb, int train) {    // S->X[0] -> S->X[L], n
 #endif
         #pragma omp parallel for
         for (int t = 0; t < n; t++) {           // phase 1 (per token): rms+quant, Mon_q, Mon_k, Mon_v
-            if (S->len && t % T >= S->len[t / T]) {   // padding: zeros keep the FFT finite, and causality keeps
-                for (int w = 0; w < 3; w++) memset(y->pre + ((size_t)w * N + t) * D, 0, D * sizeof(float));   // it out of valid steps
-                continue;
+            if ((S->len && t % T >= S->len[t / T]) || SKIP(S, l, t)) {   // padding (zeros keep the FFT finite, and causality
+                for (int w = 0; w < 3; w++) memset(y->pre + ((size_t)w * N + t) * D, 0, D * sizeof(float));   // keeps it out of
+                continue;                                                                                     // valid steps), or skipped
             }
             const float *x = X[l] + t * D; int8_t *q = y->q1 + t * D;
             y->r1[t] = rinv(x); y->s1[t] = q8t(x, q, y->r1[t]);
@@ -815,7 +846,8 @@ static void stack_fwd(Stack *S, int nb, int train) {    // S->X[0] -> S->X[L], n
         mixer_fwd(S, y, nb, train);
         #pragma omp parallel for
         for (int t = 0; t < n; t++) {           // phase 2 (per token): gate, Mon_o, +res, rms, GLU, +res
-            if (S->len && t % T >= S->len[t / T]) { memset(X[l + 1] + (size_t)t * D, 0, D * sizeof(float)); continue; }
+            if ((S->len && t % T >= S->len[t / T]) || UNREAD(S, l, t)) { memset(X[l + 1] + (size_t)t * D, 0, D * sizeof(float)); continue; }
+            if (SKIP(S, l, t)) { memcpy(X[l + 1] + (size_t)t * D, X[l] + (size_t)t * D, D * sizeof(float)); continue; }
             float g[D], o[D], dd;
             float *cc = y->cc + t * D, *q = y->post + (size_t)t * D, *u = VB + t * D, *x = X[l] + t * D, *x1 = y->x1 + t * D;
             float *ga = y->ga + t * D, *ub = y->ub + t * D;
@@ -845,8 +877,8 @@ static void stack_bwd(Stack *S, float *DX, int nb) {    // DX: grad wrt X[L] in,
             int tid = TID; int8_t gc[4][2][4][D];       // grad codes [Mon d, u, g, o][L side, R side][token]
             for (int j = 0; j < 4; j++) {
                 int t = t0 + j;
-                if (S->len && t % T >= S->len[t / T]) {
-                    memset(DP + (size_t)t * D, 0, D * sizeof(float)); memset(y->cc + (size_t)t * D, 0, D * sizeof(float));
+                if ((S->len && t % T >= S->len[t / T]) || SKIP(S, l, t) || UNREAD(S, l, t)) {   // skipped: DX passes through;
+                    memset(DP + (size_t)t * D, 0, D * sizeof(float)); memset(y->cc + (size_t)t * D, 0, D * sizeof(float));   // unread: it is 0
                     for (int w = 0; w < 4; w++) memset(gc[w][0][j], 0, D), memset(gc[w][1][j], 0, D);
                     continue;
                 }
@@ -876,7 +908,7 @@ static void stack_bwd(Stack *S, float *DX, int nb) {    // DX: grad wrt X[L] in,
             Mon *ms[] = {&y->q, &y->k, &y->v};
             for (int j = 0; j < 4; j++) {
                 int t = t0 + j;
-                if (S->len && t % T >= S->len[t / T]) { for (int w = 0; w < 3; w++) memset(gc[w][0][j], 0, D), memset(gc[w][1][j], 0, D); continue; }
+                if ((S->len && t % T >= S->len[t / T]) || SKIP(S, l, t)) { for (int w = 0; w < 3; w++) memset(gc[w][0][j], 0, D), memset(gc[w][1][j], 0, D); continue; }
                 float b[D], sum[D] = {0};
                 for (int w = 0; w < 3; w++) {
                     BWDX(y, w, ms[w], y->s1[t], y->pre + ((size_t)w * N + t) * D, b, t, tid, gc[w][0][j], gc[w][1][j]);
@@ -957,12 +989,13 @@ static float xent(const uint8_t *const *tgt, int n, int grad) {   // mean CE (na
 #define MASK 0xFF                             // the mask byte: never occurs in valid UTF-8
 #define MRATE 0.15f                           // share of bytes masked, in spans of 1..8
 static uint8_t mbuf[B][8 + LCTX], msk[B][LCTX];   // masked sequences (8 bytes of hash context first); which bytes are masked
+static int nout, *oidx;                       // the bytes blt_fwd computed logits for: LOGIT row i is batch byte oidx[i]
 static float xent_masked(const uint8_t *const *tgt, int n, int grad) {   // mean CE over masked bytes only; tgt[b][t]
-    double loss = 0; int nm = 0;
-    for (int t = 0; t < n; t++) nm += msk[t / LCTX][t % LCTX];
+    double loss = 0; int nm = 0; (void)n;
+    for (int i = 0; i < nout; i++) nm += msk[oidx[i] / LCTX][oidx[i] % LCTX];
     #pragma omp parallel for reduction(+:loss)
-    for (int t = 0; t < n; t++) {
-        float *z = LOGIT + (size_t)t * V, mx = z[0], s = 0; int y = tgt[t / LCTX][t % LCTX];
+    for (int i = 0; i < nout; i++) {
+        int t = oidx[i]; float *z = LOGIT + (size_t)i * V, mx = z[0], s = 0; int y = tgt[t / LCTX][t % LCTX];
         if (!msk[t / LCTX][t % LCTX]) { if (grad) memset(z, 0, V * sizeof(float)); continue; }
         for (int c = 1; c < V; c++) mx = MAXF(mx, z[c]);
         for (int c = 0; c < V; c++) s += expf(z[c] - mx);
@@ -1034,14 +1067,74 @@ static void window_entropies(const uint8_t *const *win, int nb) {   // the causa
 }
 static int cmpf(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return (x > y) - (x < y); }
 // s[0..LCTX]: 1 where a patch starts (s[LCTX]: right after the sequence). Returns the sequence's patch count.
-static int patchify(const float *ent, uint8_t *s) {
+static int patchify(const float *ent, float th, uint8_t *s) {   // ent[t]: (predicted) entropy of byte t
     int np_ = 2, len = 1; s[0] = s[1] = 1;    // BLT: the first patch is a single byte
     for (int t = 2; t <= LCTX; t++) {
-        int st = ent[t] > theta || len >= PMAX;
+        int st = ent[t] > th || len >= PMAX;
         if (st && t < LCTX && np_ >= TG) st = 0; // at most TG patches in a sequence
         s[t] = st; if (st) { np_ += t < LCTX; len = 1; } else len++;
     }
     return np_;
+}
+
+// ---- boundary predictor: the patch event, decided from the encoder state the model computes anyway (smoth.c) ------
+// A small MLP reads the rms-normalised encoder output at byte t and predicts the entropy model's entropy of byte
+// t + 1 (on the masked input, as the entropy model sees it); a patch starts where the prediction crosses thetap.
+// Training patches come from it too, so training and inference patch alike; the entropy model is only its teacher
+// (regression on its entropies of each training batch, the encoder detached) and never runs at inference.
+// The encoder is bidirectional, so the prediction may read the byte it is about; the target does not depend on
+// that byte, so there is nothing to gain from it, and nothing hidden leaks: the encoder only sees the masked input.
+#ifndef PH
+#define PH 32                                 // predictor hidden width
+#endif
+static P *Pw1, *Pb1, *Pw2, *Pb2;
+static float PE[B][LCTX + 1], ploss;          // PE[b][t]: predicted entropy of sequence b's byte t; ploss: batch MSE
+// Depth (smoth.c): bytes the predictor finds easiest skip decoder layers, SK1 of them the last layer and SK2 the
+// last two, where their predicted entropy is below thsk[0] or thsk[1] (EMAs of those quantiles of its predictions).
+// Here the decoder at byte t outputs byte t itself, so the depth follows byte t's own predicted entropy.
+#ifndef SK1
+#define SK1 0.3
+#endif
+#ifndef SK2
+#define SK2 0.2
+#endif
+static float thsk[2] = {-1e30f, -1e30f};
+static uint8_t *skd, *needr;                  // per decoder row: layers skipped; whether its output is read
+static float thetap;                          // the predictor's threshold: an EMA of the quantile of its predictions
+                                              //   that matches the teacher's boundary rate on each batch, so patches
+                                              //   keep the teacher's mean size (predictions are smoother than entropies)
+static void predict_boundaries(const float *e, int nb, int train) {   // e: encoder output rows; targets in ENTW
+    int n = nb * LCTX, NG_ = PH * D + 2 * PH + 1; double l = 0;
+    static float *gw; if (!gw) gw = fa((size_t)NT * NG_);
+    if (train) memset(gw, 0, (size_t)NT * NG_ * sizeof(float));
+    #pragma omp parallel for reduction(+:l)
+    for (int t = 0; t < n; t++) {
+        int b = t / LCTX, tt = t % LCTX; const float *x = e + (size_t)ownrow[t] * D; float r = rinv(x), a[PH], o = Pb2->w[0];
+        for (int j = 0; j < PH; j++) {
+            const float *w = Pw1->w + j * D; float s = 0;
+            for (int i = 0; i < D; i++) s += w[i] * x[i];
+            a[j] = s * r + Pb1->w[j]; o += Pw2->w[j] * (a[j] > 0 ? a[j] : 0);
+        }
+        PE[b][tt + 1] = o;
+        if (tt == 0) PE[b][0] = 1e30f;        // byte 0: no prediction (it starts a patch, and never skips)
+        if (!train) continue;
+        float d = o - ENTW[b][tt + 1]; l += d * d; d *= 2.f / n;
+        float *g = gw + (size_t)TID * NG_, *gw1 = g, *gb1 = g + PH * D, *gw2 = gb1 + PH;
+        g[NG_ - 1] += d;
+        for (int j = 0; j < PH; j++) {
+            if (a[j] <= 0) continue;
+            float da = d * Pw2->w[j]; gw2[j] += d * a[j]; gb1[j] += da; da *= r;
+            float *gj = gw1 + j * D; for (int i = 0; i < D; i++) gj[i] += da * x[i];
+        }
+    }
+    if (!train) return;
+    ploss = l / n;
+    #pragma omp parallel for
+    for (int k = 0; k < NG_; k++) {
+        float s = 0; for (int th = 0; th < NT; th++) s += gw[(size_t)th * NG_ + k];
+        if (k < PH * D) Pw1->g[k] += s; else if (k < PH * D + PH) Pb1->g[k - PH * D] += s;
+        else if (k < PH * D + 2 * PH) Pw2->g[k - PH * D - PH] += s; else Pb2->g[0] += s;
+    }
 }
 
 // ---- BLT ------------------------------------------------------------------------------------------------
@@ -1073,11 +1166,12 @@ static void mask_windows(const long *off, int nb, const uint8_t **win) {   // BE
 }
 // win: nb (masked) sequences of LCTX bytes, 8 bytes of context before each. The encoder and decoder run on the
 // sequences' chunks (row r holds byte rowpos[r]); pooling, the global stack and the head see each byte once,
-// from its owner row
+// from its owner row. Logits come out only for the bytes something reads: the masked ones (msk), or every byte
+// with allout set; LOGIT row i is batch byte oidx[i]
+static int allout;
 static void blt_fwd(const uint8_t *const *win, int nb, int train) {
     int n = nb * LCTX, nr = nb * NCK * TB;
-    window_entropies(win, nb);
-    for (int b = 0; b < nb; b++) npat[b] = patchify(ENTW[b], sb[b]);
+    if (train) window_entropies(win, nb);    // the teacher's entropies: the predictor's targets (inference never runs it)
     #pragma omp parallel for
     for (int t = 0; t < n; t++) { const uint8_t *p = win[t / LCTX] + t % LCTX; for (int k = 0; k < NG; k++) hidx[k][t] = hrow(p, k + 3, k); }
     #pragma omp parallel for
@@ -1088,6 +1182,23 @@ static void blt_fwd(const uint8_t *const *win, int nb, int train) {
     }
     stack_fwd(&SE, nb * NCK, train);
     const float *e = SE.X[LE]; float *g = SG.X[0];
+    predict_boundaries(e, nb, train);         // the patches, from the encoder
+    if (train) {
+        static float tmp[B * LCTX]; int k = 0, hi = 0;   // the teacher's boundary rate on this batch, matched
+        for (int b = 0; b < nb; b++) for (int t = 2; t <= LCTX; t++) { tmp[k++] = PE[b][t]; hi += ENTW[b][t] > theta; }
+        qsort(tmp, k, sizeof(float), cmpf); int qi = k - 1 - hi; float q = tmp[qi < 0 ? 0 : qi];
+        thetap = thetap ? 0.95f * thetap + 0.05f * q : q;
+        float q1 = tmp[(int)((SK1 + SK2) * (k - 1))], q2 = tmp[(int)(SK2 * (k - 1))];
+        thsk[0] = thsk[0] > -1e29f ? 0.95f * thsk[0] + 0.05f * q1 : q1; thsk[1] = thsk[1] > -1e29f ? 0.95f * thsk[1] + 0.05f * q2 : q2;
+        if (!(SK1 + SK2 > 0)) thsk[0] = thsk[1] = -1e30f;
+        if (!(SK2 > 0)) thsk[1] = -1e30f;
+    }
+    for (int b = 0; b < nb; b++) npat[b] = patchify(PE[b], thetap, sb[b]);
+    nout = 0;
+    for (int t = 0; t < n; t++) if (allout || msk[t / LCTX][t % LCTX]) oidx[nout++] = t;
+    memset(needr, 0, nr); for (int i = 0; i < nout; i++) needr[ownrow[oidx[i]]] = 1;
+    for (int r = 0; r < nr; r++) { float pe = PE[rowpos[r] / LCTX][rowpos[r] % LCTX]; int k_ = pe < thsk[1] ? 2 : pe < thsk[0]; skd[r] = k_ > LD ? LD : k_; }
+    SD.sk = skd; SD.need = needr;
     #pragma omp parallel for
     for (int b = 0; b < nb; b++) {            // patch ids, the decoder's patch, max-pool per patch
         int pid = -1; memset(g + (size_t)b * TG * D, 0, TG * D * sizeof(float));
@@ -1108,15 +1219,15 @@ static void blt_fwd(const uint8_t *const *win, int nb, int train) {
     }
     stack_fwd(&SD, nb * NCK, train);
     #pragma omp parallel for
-    for (int t = 0; t < n; t++) memcpy(HO + (size_t)t * D, SD.X[LD] + (size_t)ownrow[t] * D, D * sizeof(float));
-    head_fwd(HO, n, Wo->w);
+    for (int i = 0; i < nout; i++) memcpy(HO + (size_t)i * D, SD.X[LD] + (size_t)ownrow[oidx[i]] * D, D * sizeof(float));
+    head_fwd(HO, nout, Wo->w);
 }
 static void blt_bwd(const uint8_t *const *win, int nb) {
-    int n = nb * LCTX, nr = nb * NCK * TB;
-    head_bwd(HO, n, Wo->w, Wo->g, GH);
-    if (NCK > 1) memset(G1, 0, (size_t)nr * D * sizeof(float));   // warm-up rows: no loss of their own
+    int nr = nb * NCK * TB;
+    head_bwd(HO, nout, Wo->w, Wo->g, GH);
+    memset(G1, 0, (size_t)nr * D * sizeof(float));   // rows without an output (warm-up, unmasked): no loss of their own
     #pragma omp parallel for
-    for (int t = 0; t < n; t++) memcpy(G1 + (size_t)ownrow[t] * D, GH + (size_t)t * D, D * sizeof(float));
+    for (int i = 0; i < nout; i++) memcpy(G1 + (size_t)ownrow[oidx[i]] * D, GH + (size_t)i * D, D * sizeof(float));
     stack_bwd(&SD, G1, nb * NCK);             // G1: grad wrt decoder input = grad wrt e (residual) and z
     #pragma omp parallel for
     for (int b = 0; b < nb; b++) {
@@ -1171,8 +1282,8 @@ static void loss_by_position(void) {
     for (int k = 0; k < 256 * 1024 / (B * LCTX) + 1; k++) {
         for (int b = 0; b < B; b++) { off[b] = pick(1); tgt[b] = data + off[b]; }
         mask_windows(off, B, win); blt_fwd(win, B, 0);
-        for (int t = 0; t < B * LCTX; t++) if (msk[t / LCTX][t % LCTX]) {
-            const float *z = LOGIT + (size_t)t * V; float mx = z[0], s = 0; int pos = t % LCTX, i = 0, j = 0;
+        for (int o = 0; o < nout; o++) if (msk[oidx[o] / LCTX][oidx[o] % LCTX]) {
+            int t = oidx[o]; const float *z = LOGIT + (size_t)o * V; float mx = z[0], s = 0; int pos = t % LCTX, i = 0, j = 0;
             for (int c = 1; c < V; c++) mx = MAXF(mx, z[c]);
             for (int c = 0; c < V; c++) s += expf(z[c] - mx);
             float l = logf(s) + mx - z[tgt[t / LCTX][pos]];
@@ -1195,7 +1306,7 @@ static void loss_by_position(void) {
 // Layout: header (magic, version, the architecture's compile-time sizes), then the step, RNG and entropy
 // threshold, then every parameter in build order (weights, Adam m, Adam v), then the per-layer static int8
 // scales (EMA amax, which inference also uses) and the Monarchs' delayed gradient scales.
-#define CKMAGIC 0x42544F4Du                   // "MOTB": a bidirectional checkpoint
+#define CKMAGIC 0x544D4253u                   // "SBMT": a bidirectional checkpoint with the boundary predictor
 #ifndef CKEVERY
 #define CKEVERY 5000                          // training steps between checkpoints
 #endif
@@ -1209,7 +1320,7 @@ static int ckio(FILE *f, int wr, int *step) {  // returns 0 if every field trans
     if (h[1] == 2) { int32_t lc[2] = {LCTX, OV}, lg[2]; if (wr) IO(lc, 2); else { IO(lg, 2); if (lg[0] != lc[0] || lg[1] != lc[1]) {
         fprintf(stderr, "checkpoint LCTX, OV are %d, %d, this build has %d, %d: rebuild with the same -D flags\n", lg[0], lg[1], lc[0], lc[1]); return 1; } } }
     int32_t st = *step; float ps_ = PSZ;
-    IO(&st, 1); IO(&rs, 1); IO(&theta, 1); IO(&ps_, 1); *step = st;
+    IO(&st, 1); IO(&rs, 1); IO(&theta, 1); IO(&thetap, 1); IO(thsk, 2); IO(&ps_, 1); *step = st;
     for (int k = 0; k < np; k++) {
         int32_t n = ps[k].n; IO(&n, 1);
         if (n != ps[k].n) { fprintf(stderr, "checkpoint param %d has %d values, expected %d\n", k, n, ps[k].n); return 1; }
@@ -1237,12 +1348,12 @@ static int ck_load(const char *path) {         // returns the step the checkpoin
 
 // fill the masked bytes of buf (8 bytes of context, then LCTX bytes; k[t] marks masked ones) in place, most
 // confident first, rerunning the model after each. The mask byte itself is never an answer.
-static void fill(uint8_t *buf, uint8_t *k) {
+static void fill(uint8_t *buf, uint8_t *k) {  // (logits come out for the masked bytes only)
     for (;;) {
         const uint8_t *w[1] = {buf + 8}; int bt = -1, bc = 0; float bp = -1;
-        blt_fwd(w, 1, 0);
-        for (int t = 0; t < LCTX; t++) if (k[t]) {
-            const float *z = LOGIT + (size_t)t * V; float mx = -1e30f, s = 0; int c = 0;
+        memcpy(msk[0], k, LCTX); allout = 0; blt_fwd(w, 1, 0);
+        for (int o = 0; o < nout; o++) {
+            int t = oidx[o]; const float *z = LOGIT + (size_t)o * V; float mx = -1e30f, s = 0; int c = 0;
             for (int j = 0; j < V; j++) if (j != MASK && z[j] > mx) { mx = z[j]; c = j; }
             for (int j = 0; j < V; j++) if (j != MASK) s += expf(z[j] - mx);
             if (1 / s > bp) { bp = 1 / s; bt = t; bc = c; }
@@ -1262,8 +1373,8 @@ static int fill_text(const char *in, int n, char mch, char *out) {  // returns t
 }
 
 // -e file: masked-byte loss on the file's last 5 MB (at most), in LCTX-byte sequences B at a time, each masked as in
-// training from a fixed seed, so builds that share LCTX (bmoth, sbmoth) mask the same bytes; and the whole
-// forward's speed (the masking and scoring included)
+// training from a fixed seed, so builds that share LCTX mask the same bytes; and the whole forward's speed (the
+// masking and scoring included)
 static void eval_file(const char *path) {
     FILE *f = fopen(path, "rb"); if (!f) { fprintf(stderr, "no %s\n", path); exit(1); }
     fseek(f, 0, SEEK_END); long nf = ftell(f), n0 = nf > 5000000 + 8 ? nf - 5000000 : 8;
@@ -1271,13 +1382,13 @@ static void eval_file(const char *path) {
     if (fread(data, 1, ndata, f) != (size_t)ndata) { fprintf(stderr, "short read %s\n", path); exit(1); }
     fclose(f);
     long nw = (ndata - 8) / LCTX, nm = 0; double nll = 0; const uint8_t *win[B], *tgt[B]; long off[B];
-    rs = 0x5EED5EED5EEDull; double t0 = now();
+    rs = 0x5EED5EED5EEDull; allout = 0; double t0 = now();
     for (long w = 0; w < nw; w += B) {
         int nb = nw - w < B ? (int)(nw - w) : B;
         for (int b = 0; b < nb; b++) { off[b] = 8 + (w + b) * LCTX; tgt[b] = data + off[b]; }
         mask_windows(off, nb, win); blt_fwd(win, nb, 0);
-        for (int t = 0; t < nb * LCTX; t++) {
-            const float *z = LOGIT + (size_t)t * V; float mx = z[0]; double s = 0;
+        for (int o = 0; o < nout; o++) {
+            int t = oidx[o]; const float *z = LOGIT + (size_t)o * V; float mx = z[0]; double s = 0;
             if (!msk[t / LCTX][t % LCTX]) continue;
             for (int c = 1; c < V; c++) mx = MAXF(mx, z[c]);
             for (int c = 0; c < V; c++) s += exp(z[c] - mx);
@@ -1303,7 +1414,7 @@ int main(int argc, char **argv) {
     //                                             one at a time and B at a time (OMP_NUM_THREADS=1 for one core)
     // bmoth -g ckpt -q prompts.txt [-m _]        the same per line (\n escaped as a backslash-n); prints only
     //                                             the filled bytes, one line per prompt
-    // bmoth -g ckpt -e file                      masked-byte loss on the file's last 5 MB, and the forward's speed
+    // sbmoth -g ckpt -e file                     masked-byte loss on the file's last 5 MB, and the forward's speed
     const char *path = "input.txt", *out = NULL, *res = NULL, *gen = NULL, *prompt = NULL, *qs = NULL, *evalf = NULL; char mch = '_'; int nbench = 0;
     for (int a = 1; a < argc; a++) {
         if (argv[a][0] == '-' && argv[a][1] && !argv[a][2] && strchr("orgpqmbe", argv[a][1])) {
@@ -1334,6 +1445,7 @@ int main(int argc, char **argv) {
     HN = fa((size_t)NMAX * D); RF = fa(NMAX); LOGIT = fa((size_t)NMAX * V); S1 = fa((size_t)NMAX * D);
     G1 = fa((size_t)NMAX * D); WD = fa((size_t)V * D); WT = fa((size_t)V * D); G2 = fa((size_t)B * TG * D); arg = calloc((size_t)B * TG * D, 2); cpb = calloc(NMAX, sizeof(int));
     HO = fa((size_t)B * LCTX * D); GH = fa((size_t)B * LCTX * D); chunk_maps();
+    skd = calloc(NMAX, 1); needr = calloc(NMAX, 1); oidx = malloc((size_t)B * LCTX * sizeof(int));
     for (int k = 0; k < NG; k++) hidx[k] = calloc(NMAX, sizeof(int));
     const uint8_t *win[NW], *tgt[NW]; long off[NW]; double t0;
 
@@ -1357,6 +1469,7 @@ int main(int argc, char **argv) {
     Eb = param(V * D, 0.02f); for (int k = 0; k < NG; k++) Hs[k] = param(HV * D, 0.02f); Wo = param(V * D, 0.02f);
     int bt = np;
     stack_build(&SE, TB, LE, 2000, 1, NW); stack_build(&SG, TG, LG, 3000, 1, B); stack_build(&SD, TB, LD, 4000, 1, NW);
+    Pw1 = param(PH * D, 1 / sqrtf(D)); Pb1 = param(PH, 0); Pw2 = param(PH, 1 / sqrtf(PH)); Pb2 = param(1, 0); Pb2->w[0] = 1.5f;
     long nemb = 0, nall = 0; for (int k = b0; k < bt; k++) nemb += ps[k].n; for (int k = b0; k < np; k++) nall += ps[k].n;
     long trits = (long)(LE + LG + LD) * (7 * 2 * W3 + 13 * D) + 2 * ((long)(LE + LD) * TB * D + (long)LG * TG * D);   // two long kernels a layer
     if (NCK > 1) printf("long global context: %d-byte sequences; byte stacks in %d-byte chunks, %d apart (%d warm-up bytes each side, %.2fx the byte-level work); %d patch slots\n",
@@ -1365,7 +1478,7 @@ int main(int argc, char **argv) {
            LE, LG, LD, D, nall / 1e6, nemb / 1e6, NG * HV * D / 1e6, trits / 1e6);
     int step0 = -1;
     infer = gen != NULL;
-    if (ck) { step0 = ck_load(ck) + 1; printf("loaded %s: step %d of %d, threshold %.3f nats\n", ck, step0 - 1, STEPS, theta); }
+    if (ck) { step0 = ck_load(ck) + 1; printf("loaded %s: step %d of %d, thresholds %.3f nats (entropy model), %.3f (predictor)\n", ck, step0 - 1, STEPS, theta, thetap); }
     if (gen && evalf) { eval_file(evalf); return 0; }
     if (!gen) {
     t0 = now();
@@ -1382,7 +1495,7 @@ int main(int argc, char **argv) {
       for (int i = 0; i < 16; i++) {
           for (int b = 0; b < B; b++) off[b] = pick(0);
           mask_windows(off, B, win); window_entropies(win, B);
-          for (int b = 0; b < B; b++) { pat += patchify(ENTW[b], sb[b]); bytes += LCTX; }
+          for (int b = 0; b < B; b++) { pat += patchify(ENTW[b], theta, sb[b]); bytes += LCTX; }
       }
       if (res) rs = r0;                        // a resumed run draws the same windows as an unbroken one
       printf("patch threshold %.3f nats -> mean patch %.2f bytes on masked input (%.1f s)\n", theta, bytes / pat, now() - t0); }
@@ -1391,7 +1504,8 @@ int main(int argc, char **argv) {
         seed = hash(step + 7);
         for (int b = 0; b < B; b++) { off[b] = pick(0); tgt[b] = data + off[b]; }
         mask_windows(off, B, win); blt_fwd(win, B, 1); float loss = xent_masked(tgt, B * LCTX, 1); blt_bwd(win, B); adam(step, b0, np, STEPS);
-        if (step % 50 == 0 && step > 0) { printf("step %4d | masked loss %.4f | %.0f ms/step\n", step, loss, (now() - t0) * 1e3 / 50); fflush(stdout); t0 = now(); }
+        if (step % 50 == 0 && step > 0) { int pt = 0; for (int b = 0; b < B; b++) pt += npat[b];
+            printf("step %4d | masked loss %.4f | boundary mse %.3f, patch %.2f bytes | %.0f ms/step\n", step, loss, ploss, (double)B * LCTX / pt, (now() - t0) * 1e3 / 50); fflush(stdout); t0 = now(); }
         if (step % 500 == 0 && step > 0) { float vl = blt_val(); printf("step %4d | val masked loss %.4f nats/byte (%.3f bits/byte)\n", step, vl, vl / logf(2)); t0 = now(); }
         if (out && step > 0 && (step % CKEVERY == 0 || step == STEPS)) { ck_save(out, step); printf("saved %s at step %d\n", out, step); fflush(stdout); t0 = now(); }
     }
@@ -1403,13 +1517,21 @@ int main(int argc, char **argv) {
                           "argue about who would build the new one, and how, and with whose money. ";
         int tl = (int)strlen(txt);
         for (int b = 0; b < B; b++) { memset(mbuf[b], '\n', 8); for (int t = 0; t < LCTX; t++) mbuf[b][8 + t] = txt[(t + 37 * b) % tl]; win[b] = mbuf[b] + 8; }
-        blt_fwd(win, 1, 0);                                            // warm up
-        t0 = now(); for (int i = 0; i < nbench; i++) window_entropies(win, 1); double te = (now() - t0) / nbench;
+        for (int b = 0; b < B; b++) for (int t = 0; t < LCTX; t++) msk[b][t] = hash(b * LCTX + t) % 100 < 15;   // a fill-mask pass
+        allout = 1; blt_fwd(win, 1, 0);                                // warm up
         t0 = now(); for (int i = 0; i < nbench; i++) blt_fwd(win, 1, 0); double t1 = (now() - t0) / nbench;
+        static float ref[LCTX * V]; int nr_ = 0;                       // the masked bytes' logits with every output computed
+        for (int o = 0; o < nout; o++) if (msk[0][oidx[o]]) memcpy(ref + (size_t)nr_++ * V, LOGIT + (size_t)o * V, V * sizeof(float));
+        allout = 0; blt_fwd(win, 1, 0);
+        double dl = 0; for (int o = 0; o < nout; o++) for (int c = 0; c < V; c++) dl = fmax(dl, fabs(LOGIT[(size_t)o * V + c] - ref[(size_t)o * V + c]));
+        t0 = now(); for (int i = 0; i < nbench; i++) blt_fwd(win, 1, 0); double tm = (now() - t0) / nbench;
         int nb = nbench / B + 1; t0 = now(); for (int i = 0; i < nb; i++) blt_fwd(win, B, 0); double tb = (now() - t0) / nb / B;
-        printf("%d thread(s), %d-byte windows, whole forward (entropy model, patching, encoder, global, decoder, head):\n"
-               "  one window at a time: %.2f ms a window, %.0f bytes/s (entropy model alone %.2f ms)\n"
-               "  %d windows at a time: %.2f ms a window, %.0f bytes/s\n", NT, LCTX, t1 * 1e3, LCTX / t1, te * 1e3, B, tb * 1e3, LCTX / tb);
+        double sk = 0; for (int r = 0; r < TB; r++) sk += skd[r];
+        printf("%d thread(s), %d-byte windows, whole forward (predicted patching, encoder, global, decoder, head; decoder %.2f of %d layers a byte):\n"
+               "  one window, every byte's logits: %.2f ms a window, %.0f bytes/s\n"
+               "  one window, logits for its %d masked bytes (15%%): %.2f ms a window, %.0f bytes/s (same logits as with every output: max |d| %.1e)\n"
+               "  %d windows at a time, masked bytes' logits: %.2f ms a window, %.0f bytes/s\n",
+               NT, LCTX, LD - sk / TB, LD, t1 * 1e3, LCTX / t1, nr_, tm * 1e3, LCTX / tm, dl, B, tb * 1e3, LCTX / tb);
         return 0;
     }
     if (gen && qs) {                                                   // one prompt per line
@@ -1436,8 +1558,8 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 16; i++) {
             for (int b = 0; b < B; b++) { off[b] = pick(1); tgt[b] = data + off[b]; }
             mask_windows(off, B, win); blt_fwd(win, B, 0);
-            for (int t = 0; t < B * LCTX; t++) if (msk[t / LCTX][t % LCTX]) {
-                const float *z = LOGIT + (size_t)t * V; int c = 0;
+            for (int o = 0; o < nout; o++) if (msk[oidx[o] / LCTX][oidx[o] % LCTX]) {
+                int t = oidx[o]; const float *z = LOGIT + (size_t)o * V; int c = 0;
                 for (int j = 1; j < V; j++) if (z[j] > z[c]) c = j;
                 hit += c == tgt[t / LCTX][t % LCTX]; tot++;
             }
