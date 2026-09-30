@@ -121,46 +121,6 @@ class Stack(torch.nn.Module):
         rate = torch.abs(lo + (hi - lo) * torch.arange(D, dtype=torch.float64) / (D - 1))
         self.register_buffer("mod", torch.exp(-tl[:, None] * rate[None, :]).float())                   # [T][D]
 
-    def mon(self, ly, nm, codes, sx):
-        """Monarch on int8 codes with scale sx: R (row blocks), int16 -> int8 requantisation, L (column blocks)."""
-        M = self.c.M; N = codes.shape[0]
-        Rt, rs = tern(ly[nm + "r"]); Lt, ls = tern(ly[nm + "l"])
-        z = torch.einsum("nbi,bio->nbo", codes.view(N, M, M), Rt.view(M, M, M))
-        mx = z.detach().abs().amax((1, 2)).clamp_min(1)
-        qs = 127 / mx
-        q = ste(z * qs[:, None, None], torch.round(z.detach() * qs[:, None, None]))
-        acc = torch.einsum("nib,oib->nob", q, Lt.view(M, M, M))
-        sm = sx * rs * mx / 127
-        return (acc * sm[:, None, None] * ls).reshape(N, M * M)
-
-    def filt(self, ly, w3):
-        """The implicit long-conv kernel: sine FFN on positional features, decayed, ternarised per channel."""
-        D, T = self.c.D, self.T
-        a1 = torch.sin(self.pz @ ly["w1"].view(FO, FE).T + ly["b1"])
-        a2 = torch.sin(a1 @ ly["w2"].view(FO, FO).T + ly["b2"])
-        h = (a2 @ w3.view(D, FO).T) * self.mod
-        hs = (h.detach().abs().sum(0) + 1e-8) / T
-        t = (h.detach() >= 0.5 * hs).float() - (h.detach() <= -0.5 * hs).float()
-        return ste(h, t * hs)
-
-    def conv_params(self, ly):
-        D = self.c.D
-        sw = ly["sw"].view(3, 3, D)                              # [tap j][stream w][ch]
-        s = (sw.detach().abs().sum((0, 2)) + 1e-8) / (3 * D)
-        t = (sw.detach() >= 0.5 * s[None, :, None]).float() - (sw.detach() <= -0.5 * s[None, :, None]).float()
-        swe = ste(sw, t * s[None, :, None])
-        sb = ly["sb"].view(3, D)
-        s = (sb.detach().abs().sum(1) + 1e-8) / D
-        t = (sb.detach() >= 0.5 * s[:, None]).float() - (sb.detach() <= -0.5 * s[:, None]).float()
-        sbe = ste(sb, t * s[:, None])
-        bt, bs = tern(ly["bias"])
-        return swe, sbe, bt * bs
-
-    def lconv(self, u, h):                                       # causal: y[t] = sum_j h[j] u[t - j], via FFT
-        T = self.T
-        U = torch.fft.rfft(u, n=2 * T, dim=1); H = torch.fft.rfft(h, n=2 * T, dim=0)
-        return torch.fft.irfft(U * H[None], n=2 * T, dim=1)[:, :T]
-
     def forward(self, X, lens=None, skip=None, train=False):
         """X [N][T][D] -> [N][T][D]. lens [N]: valid steps (the rest padding); skip [N][T]: last layers skipped."""
         N, T, D = X.shape
@@ -169,46 +129,102 @@ class Stack(torch.nn.Module):
         x = X
         for l, ly in enumerate(self.layers):
             sk = (skip >= self.L - l) if skip is not None else torch.zeros_like(pad)
-            off = pad | sk                                       # no q, k, v: padding, or a skipped layer
+            x, m = LAYER(ly, x, pad, sk, self.amax[l], self.pz, self.mod, self.c.M, self.bi)
+            if train:
+                with torch.no_grad():                            # EMA of amax, updated after use (as sbmoth.c)
+                    a = self.amax[l]; self.amax[l] = torch.where(a > 0, 0.99 * a + 0.01 * m, m)
+        return x
+
+
+def _mon(ly, nm, codes, sx, M):
+    """Monarch on int8 codes with scale sx: R (row blocks), int16 -> int8 requantisation, L (column blocks)."""
+    N = codes.shape[0]
+    Rt, rs = tern(ly[nm + "r"]); Lt, ls = tern(ly[nm + "l"])
+    z = torch.einsum("nbi,bio->nbo", codes.view(N, M, M), Rt.view(M, M, M))
+    mx = z.detach().abs().amax((1, 2)).clamp_min(1)
+    qs = 127 / mx
+    q = ste(z * qs[:, None, None], torch.round(z.detach() * qs[:, None, None]))
+    acc = torch.einsum("nib,oib->nob", q, Lt.view(M, M, M))
+    sm = sx * rs * mx / 127
+    return (acc * sm[:, None, None] * ls).reshape(N, M * M)
+
+
+def _filt(ly, w3, pz, mod):
+    """The implicit long-conv kernel: sine FFN on positional features, decayed, ternarised per channel."""
+    T, D = mod.shape
+    a1 = torch.sin(pz @ ly["w1"].view(FO, FE).T + ly["b1"])
+    a2 = torch.sin(a1 @ ly["w2"].view(FO, FO).T + ly["b2"])
+    h = (a2 @ w3.view(D, FO).T) * mod
+    hs = (h.detach().abs().sum(0) + 1e-8) / T
+    t = (h.detach() >= 0.5 * hs).float() - (h.detach() <= -0.5 * hs).float()
+    return ste(h, t * hs)
+
+
+def _lconv(u, h):                                                # causal: y[t] = sum_j h[j] u[t - j], via FFT
+    T = u.shape[1]
+    U = torch.fft.rfft(u, n=2 * T, dim=1); H = torch.fft.rfft(h, n=2 * T, dim=0)
+    return torch.fft.irfft(U * H[None], n=2 * T, dim=1)[:, :T]
+
+
+def _conv_params(ly, D):
+    sw = ly["sw"].view(3, 3, D)                                  # [tap j][stream w][ch]
+    s = (sw.detach().abs().sum((0, 2)) + 1e-8) / (3 * D)
+    t = (sw.detach() >= 0.5 * s[None, :, None]).float() - (sw.detach() <= -0.5 * s[None, :, None]).float()
+    swe = ste(sw, t * s[None, :, None])
+    sb = ly["sb"].view(3, D)
+    s = (sb.detach().abs().sum(1) + 1e-8) / D
+    t = (sb.detach() >= 0.5 * s[:, None]).float() - (sb.detach() <= -0.5 * s[:, None]).float()
+    sbe = ste(sb, t * s[:, None])
+    bt, bs = tern(ly["bias"])
+    return swe, sbe, bt * bs
+
+
+def _layer(ly, x, pad, sk, amax, pz, mod, M, bi):
+    """One Monarch Mixer layer, as sbmoth.c's stack_fwd: returns its output and the batch amax of q, k, v, u."""
+    N, T, D = x.shape
+    off = pad | sk                                               # no q, k, v: padding, or a skipped layer
+    if True:
             xf = x.reshape(N * T, D)
             codes, s1 = q8t(xf, rinv(xf))
-            pre = [self.mon(ly, nm, codes, s1).view(N, T, D).masked_fill(off[..., None], 0) for nm in "qkv"]
+            pre = [_mon(ly, nm, codes, s1, M).view(N, T, D).masked_fill(off[..., None], 0) for nm in "qkv"]
             # mixer: static int8 q, k, v; ternary short convs; u = k * v, static int8; long conv, both directions
-            amax = self.amax[l]; sc = torch.where(amax > 0, amax, torch.ones_like(amax)) / 127
-            swe, sbe, be = self.conv_params(ly)
+            sc = torch.where(amax > 0, amax, torch.ones_like(amax)) / 127
+            swe, sbe, be = _conv_params(ly, D)
             mw = [p.detach().abs().amax() for p in pre]
             pre = [sq8(pre[w], sc[w]) for w in range(3)]
             post = []
             for w in range(3):
                 o = sbe[w].expand(N, T, D)
                 for j in range(3):                               # tap j reads step t - j + bi
-                    sh = j - self.bi
+                    sh = j - bi
                     if sh > 0: p = torch.nn.functional.pad(pre[w][:, :T - sh], (0, 0, sh, 0))
                     elif sh < 0: p = torch.nn.functional.pad(pre[w][:, -sh:], (0, 0, 0, -sh))
                     else: p = pre[w]
                     o = o + swe[j, w] * p
                 post.append(o)
             vb = post[1] * post[2]
-            vb = vb.masked_fill(((pad if self.bi else torch.zeros_like(pad)) | sk)[..., None], 0)
+            vb = vb.masked_fill(((pad if bi else torch.zeros_like(pad)) | sk)[..., None], 0)
             m3 = vb.detach().abs().amax()
             u = sq8(vb, sc[3])
-            cc = self.lconv(u, self.filt(ly, ly["w3"]))
-            if self.bi:
-                cc = cc + self.lconv(u.flip(1), self.filt(ly, ly["w3b"])).flip(1)
-            if train:
-                with torch.no_grad():
-                    m = torch.stack(mw + [m3])
-                    self.amax[l] = torch.where(amax > 0, 0.99 * amax + 0.01 * m, m)
+            cc = _lconv(u, _filt(ly, ly["w3"], pz, mod))
+            if bi:
+                cc = cc + _lconv(u.flip(1), _filt(ly, ly["w3b"], pz, mod)).flip(1)
             g = (post[0] * (cc + be * u)).reshape(N * T, D)
             # channel mixer: gate -> Mon_o, residual, rms -> Mon_g, Mon_u, GELU GLU -> Mon_d, residual
             cg, sg = q8t(g, 1)
-            x1 = xf + self.mon(ly, "o", cg, sg)
+            x1 = xf + _mon(ly, "o", cg, sg, M)
             c2, s2 = q8t(x1, rinv(x1))
-            gg = gelu(self.mon(ly, "g", c2, s2)) * self.mon(ly, "u", c2, s2)
+            gg = gelu(_mon(ly, "g", c2, s2, M)) * _mon(ly, "u", c2, s2, M)
             c3, s3 = q8t(gg, 1)
-            xo = (x1 + self.mon(ly, "d", c3, s3)).view(N, T, D)
+            xo = (x1 + _mon(ly, "d", c3, s3, M)).view(N, T, D)
             x = torch.where(sk[..., None], x, xo).masked_fill(pad[..., None], 0)
-        return x
+    return x, torch.stack(mw + [m3]).detach()
+
+
+LAYER = _layer                                                   # compile() swaps in the fused version
+def compile_layers():
+    global LAYER
+    LAYER = torch.compile(_layer, dynamic=False)
 
 
 def head(X, W):
@@ -437,8 +453,9 @@ def xent_masked(logits, oi, tgt, msk):
 
 def train(a):
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if a.compile if a.compile is not None else dev.type == "cuda": compile_layers(); print("layers compiled (torch.compile)", flush=True)
     cfg = Cfg(M=a.M, LE=a.LE, LG=a.LG, LD=a.LD, LH=a.LH, HV=a.HV, WDECAY=a.wd)
-    raw = sys.stdin.buffer.read() if a.data == "-" else open(a.data, "rb").read()
+    raw = sys.stdin.buffer.read() if a.data == "-" else b"".join(open(p, "rb").read() for p in a.data.split(","))
     data = np.frombuffer(raw, np.uint8); ndata = len(data); ntrain = ndata * 9 // 10
     if ndata < 16 * 128 * 64: raise SystemExit(f"input too small ({ndata} bytes)")
     print(f"data: {ndata / 1e6:.1f} MB ({ntrain / 1e6:.1f} MB train); device {dev}"
@@ -550,6 +567,7 @@ if __name__ == "__main__":
     t.add_argument("--hsteps", type=int, default=3000); t.add_argument("--wd", type=float, default=0.1)
     t.add_argument("--val-every", type=int, default=500); t.add_argument("--ck-every", type=int, default=5000)
     t.add_argument("--seed", type=int, default=1)
+    t.add_argument("--compile", type=int, default=None, help="1/0: torch.compile the layers (default: on a GPU)")
     s = sub.choices["score"]
     s.add_argument("ckpt"); s.add_argument("text"); s.add_argument("mask"); s.add_argument("out")
     s.add_argument("--B", type=int, default=64); s.add_argument("--limit", type=int, default=0, help="first N windows only")
