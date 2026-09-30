@@ -497,7 +497,8 @@ def train(a):
             if dev.type == "cuda": torch.cuda.synchronize()
             dt = time.time() - t0
             print(f"step {step:6d} | masked loss {loss.item():.4f} | boundary mse {ploss.item():.3f}, patch {B * TB / model.last['npat'].sum():.2f} bytes, "
-                  f"decoder {cfg.LD - model.last['skd'].mean():.2f} layers | {dt * 1e3 / 100:.0f} ms/step, {nb / dt / 1e3:.0f}K bytes/s", flush=True)
+                  f"decoder {cfg.LD - model.last['skd'].mean():.2f} layers | {dt * 1e3 / 100:.0f} ms/step, {nb / dt / 1e3:.0f}K bytes/s"
+                  + (f", {torch.cuda.max_memory_allocated(dev) / 2**30:.1f} GB" if dev.type == "cuda" else ""), flush=True)
             t0 = time.time(); nb = 0
         if step % a.val_every == 0 and step > 0:
             vl = val(); print(f"step {step:6d} | val masked loss {vl:.4f} nats/byte ({vl / math.log(2):.3f} bits/byte)", flush=True); t0 = time.time()
