@@ -337,7 +337,7 @@ class Model(torch.nn.Module):
         d = e + z[torch.arange(N, device=dev)[:, None], torch.from_numpy(pid).to(dev)]
         y = self.SD(d, skip=torch.from_numpy(skd).to(dev), train=train)
         out = torch.ones_like(msk) if allout else msk
-        oi = torch.from_numpy(np.flatnonzero(out)).to(dev)
+        oi = torch.nonzero(out.reshape(-1))[:, 0]
         logits = head(y.reshape(N * T, D)[oi], self.Wo.view(V, D))
         self.last = dict(npat=npat, skd=skd)
         return logits, oi, ploss
