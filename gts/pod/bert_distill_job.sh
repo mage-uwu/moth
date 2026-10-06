@@ -1,7 +1,9 @@
 # Phase 3 of the ~110M BERT-style run, distilled from bert-base-uncased: resume from phase 2's final float checkpoint
 # (weights, AdamW state, step, sampler) on Wikipedia shards 20 to 39, which phases 1 and 2 never saw, with the loss
 # 0.75 * T^2 * KL(teacher || student, T = 2) + 0.25 * masked-LM cross-entropy at 25% masking (validation stays plain
-# masked-LM at 15%), re-warming to 5e-4 and decaying again, for the same training time as each earlier phase. The volume is nearly full, so this phase's
+# masked-LM at 15%), re-warming to 5e-4 and decaying again, for the same training time as each earlier phase.
+# Runs with or without the network volume: the phase 2 checkpoint is rebuilt from its parts in this repo if the
+# volume's copy is not there. The volume is nearly full, so this phase's
 # tokenised data lives on the pod's disk (and is redone if the pod restarts); checkpoints go to the volume. Logs and
 # outputs are linked into /workspace/out, served read-only on port 8888.
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 HF_HOME=/root/hf
@@ -15,9 +17,15 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 df -h /workspace /root | tail -2
 [ -f $D/meta.json ] || python3 scripts/bert_pretrain.py prep --out $D --shard-offset 20 --train-tokens 2900000000 --val-tokens 2000000 --tmp-dir /root/shards
 cat $D/meta.json
+CK=/workspace/bert110m_p2/checkpoint.pt
+if [ ! -f $CK ]; then
+  CK=/root/p2/checkpoint.pt; mkdir -p /root/p2
+  cat checkpoints/bert110m/phase2/checkpoint.pt.part* > $CK
+  (cd /root/p2 && grep " checkpoint.pt" /root/moth/gts/checkpoints/bert110m/phase2/SHA256SUMS | sha256sum -c) || exit 1
+fi
 LEFT=$(( (END - $(date +%s)) / 60 ))
 echo "minutes left for training: $LEFT"
-python3 scripts/bert_pretrain.py train --data $D --out $R --minutes $LEFT --resume /workspace/bert110m_p2/checkpoint.pt \
+python3 scripts/bert_pretrain.py train --data $D --out $R --minutes $LEFT --resume $CK \
   --lr 5e-4 --rewarm 1000 --eval-every 2000 --mask-prob 0.25 \
   --teacher google-bert/bert-base-uncased --distill-alpha 0.75 --distill-temp 2
 echo "=== ALL DONE $(date -u +%T) ==="
