@@ -19,15 +19,16 @@ from mamba_ssm.ops.gts_scan import gts_scan, gts_scan_reference  # noqa: E402
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+@pytest.mark.parametrize("parallel", [True, False])
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("b,l,h,p,n,chunk", [(2, 64, 2, 4, 16, 16), (2, 100, 3, 4, 16, 32), (1, 37, 2, 8, 16, 16), (1, 50, 2, 5, 20, 16)])
-def test_scan_matches_reference(b, l, h, p, n, chunk, reverse):
+def test_scan_matches_reference(b, l, h, p, n, chunk, reverse, parallel):
     torch.manual_seed(0)
     C, B = (torch.randn(b, l, n, device=DEV, requires_grad=True) for _ in range(2))
     X = torch.randn(b, l, h, p, device=DEV, requires_grad=True)
     a = (-torch.rand(b, l, h, device=DEV) * 0.3).requires_grad_()
     cs = torch.cumsum(a, 1)
-    ref, out = gts_scan_reference(C, B, X, cs, reverse), gts_scan(C, B, X, cs, reverse, chunk)
+    ref, out = gts_scan_reference(C, B, X, cs, reverse), gts_scan(C, B, X, cs, reverse, chunk, parallel=parallel)
     g = torch.randn_like(ref)
     for x, y in zip((out,) + torch.autograd.grad((out * g).sum(), (C, B, X, a)), (ref,) + torch.autograd.grad((ref * g).sum(), (C, B, X, a))):
         assert torch.allclose(x, y, rtol=1e-4, atol=1e-4 * y.abs().max().item())

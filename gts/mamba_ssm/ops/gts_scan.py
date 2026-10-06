@@ -112,6 +112,96 @@ if HAVE_TRITON:
             S = S * tl.exp(cs_end - cs_ref) + tl.dot(tl.trans(wk), v, input_precision=PREC)
             cs_ref = cs_end
 
+    @triton.jit
+    def _chunk_pos(c, i, L, CHUNK: tl.constexpr, REVERSE: tl.constexpr):
+        k_idx = c * CHUNK + i
+        return k_idx < L, (L - 1 - k_idx) if REVERSE else k_idx
+
+    @triton.jit
+    def _cs_end(CSp, c, L, s_cl, CHUNK: tl.constexpr, REVERSE: tl.constexpr):
+        """Clock at the last token of chunk c, in processing order (negated when reversed)."""
+        last = tl.minimum((c + 1) * CHUNK, L) - 1
+        v = tl.load(CSp + ((L - 1 - last) if REVERSE else last) * s_cl)
+        return -v if REVERSE else v
+
+    @triton.jit
+    def _state_kernel(
+        Kp, Vp, CSp, STp, L, H, n_chunks,
+        s_kb, s_kl, s_vb, s_vl, s_vh, s_cb, s_cl,
+        N: tl.constexpr, P: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_P: tl.constexpr, CHUNK: tl.constexpr,
+        REVERSE: tl.constexpr, PREC: tl.constexpr,
+    ):
+        """Pass 1, one program per (chunk, batch * head): the chunk's own writes, sum_s exp(cs_end - cs[s]) K[s] V[s]^T."""
+        c = tl.program_id(0)
+        bh = tl.program_id(1)
+        b = bh // H
+        h = bh % H
+        i = tl.arange(0, CHUNK)
+        n = tl.arange(0, BLOCK_N)
+        p = tl.arange(0, BLOCK_P)
+        ok, pos = _chunk_pos(c, i, L, CHUNK, REVERSE)
+        CSp += b * s_cb + h
+        cs = tl.load(CSp + pos * s_cl, mask=ok, other=0.0)
+        if REVERSE:
+            cs = -cs
+        cs_end = _cs_end(CSp, c, L, s_cl, CHUNK, REVERSE)
+        k = tl.load(Kp + b * s_kb + pos[:, None] * s_kl + n[None, :], mask=ok[:, None] & (n < N)[None, :], other=0.0)
+        v = tl.load(Vp + b * s_vb + h * s_vh + pos[:, None] * s_vl + p[None, :], mask=ok[:, None] & (p < P)[None, :], other=0.0)
+        wk = k * tl.where(ok, tl.exp(cs_end - cs), 0.0)[:, None]
+        S = tl.dot(tl.trans(wk), v, input_precision=PREC)
+        tl.store(STp + (bh * n_chunks + c) * BLOCK_N * BLOCK_P + n[:, None] * BLOCK_P + p[None, :], S)
+
+    @triton.jit
+    def _out_kernel(
+        Qp, Kp, Vp, Up, CSp, STp, O1p, O2p, L, H, n_chunks,
+        s_qb, s_ql, s_kb, s_kl, s_vb, s_vl, s_vh, s_ub, s_ul, s_uh, s_cb, s_cl,
+        s_o1b, s_o1l, s_o1h, s_o2b, s_o2l, s_o2h,
+        N: tl.constexpr, P: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_P: tl.constexpr, CHUNK: tl.constexpr,
+        HAS_O1: tl.constexpr, HAS_O2: tl.constexpr, REVERSE: tl.constexpr, PREC: tl.constexpr,
+    ):
+        """Pass 2, one program per (chunk, batch * head): the state entering the chunk as a decayed sum of the earlier
+        chunks' own states (16 x 16 tiles), then the chunk's outputs, intra-chunk plus carried."""
+        c = tl.program_id(0)
+        bh = tl.program_id(1)
+        b = bh // H
+        h = bh % H
+        i = tl.arange(0, CHUNK)
+        n = tl.arange(0, BLOCK_N)
+        p = tl.arange(0, BLOCK_P)
+        n_ok = n < N
+        p_ok = p < P
+        CSp += b * s_cb + h
+        ok, pos = _chunk_pos(c, i, L, CHUNK, REVERSE)
+        cs = tl.load(CSp + pos * s_cl, mask=ok, other=0.0)
+        if REVERSE:
+            cs = -cs
+        cs = tl.where(ok, cs, _cs_end(CSp, c, L, s_cl, CHUNK, REVERSE))
+        # carried state, referenced to the clock at the end of chunk c - 1
+        S = tl.zeros((BLOCK_N, BLOCK_P), dtype=tl.float32)
+        cs_ref = cs  # placeholder of the right type; set below when c > 0
+        if c > 0:
+            ref = _cs_end(CSp, c - 1, L, s_cl, CHUNK, REVERSE)
+            tile = STp + bh * n_chunks * BLOCK_N * BLOCK_P + n[:, None] * BLOCK_P + p[None, :]
+            for cp in range(0, c):
+                S += tl.exp(ref - _cs_end(CSp, cp, L, s_cl, CHUNK, REVERSE)) * tl.load(tile + cp * BLOCK_N * BLOCK_P)
+            dec = tl.exp(cs - ref)
+        else:
+            dec = tl.zeros((CHUNK,), dtype=tl.float32)
+        causal = i[:, None] > i[None, :]
+        D = tl.exp(tl.where(causal, cs[:, None] - cs[None, :], -float("inf")))
+        k = tl.load(Kp + b * s_kb + pos[:, None] * s_kl + n[None, :], mask=ok[:, None] & n_ok[None, :], other=0.0)
+        v = tl.load(Vp + b * s_vb + h * s_vh + pos[:, None] * s_vl + p[None, :], mask=ok[:, None] & p_ok[None, :], other=0.0)
+        if HAS_O1:
+            q = tl.load(Qp + b * s_qb + pos[:, None] * s_ql + n[None, :], mask=ok[:, None] & n_ok[None, :], other=0.0)
+            M = tl.dot(q, tl.trans(k), input_precision=PREC) * D
+            o1 = tl.dot(M, v, input_precision=PREC) + dec[:, None] * tl.dot(q, S, input_precision=PREC)
+            tl.store(O1p + b * s_o1b + h * s_o1h + pos[:, None] * s_o1l + p[None, :], o1, mask=ok[:, None] & p_ok[None, :])
+        if HAS_O2:
+            u = tl.load(Up + b * s_ub + h * s_uh + pos[:, None] * s_ul + p[None, :], mask=ok[:, None] & p_ok[None, :], other=0.0)
+            M2 = tl.dot(u, tl.trans(v), input_precision=PREC) * D
+            o2 = tl.dot(M2, k, input_precision=PREC) + dec[:, None] * tl.dot(u, tl.trans(S), input_precision=PREC)
+            tl.store(O2p + b * s_o2b + h * s_o2h + pos[:, None] * s_o2l + n[None, :], o2, mask=ok[:, None] & n_ok[None, :])
+
 
 def _launch(Q, K, V, U, cs, reverse, want_o1, want_o2, chunk=64, precision="ieee"):
     b, length, h, p = V.shape
@@ -134,33 +224,78 @@ def _launch(Q, K, V, U, cs, reverse, want_o1, want_o2, chunk=64, precision="ieee
     return (o1 if want_o1 else None), (o2 if want_o2 else None)
 
 
+def _states(K, V, cs, reverse, chunk, precision):
+    b, length, h, p = V.shape
+    n = K.shape[-1]
+    bn, bp = max(16, triton.next_power_of_2(n)), max(16, triton.next_power_of_2(p))
+    nc = triton.cdiv(length, chunk)
+    st = torch.empty(b * h, nc, bn, bp, device=V.device, dtype=torch.float32)
+    _state_kernel[(nc, b * h)](
+        K, V, cs, st, length, h, nc,
+        K.stride(0), K.stride(1), V.stride(0), V.stride(1), V.stride(2), cs.stride(0), cs.stride(1),
+        N=n, P=p, BLOCK_N=bn, BLOCK_P=bp, CHUNK=chunk, REVERSE=reverse, PREC=precision,
+    )
+    return st
+
+
+def _outputs(Q, K, V, U, cs, st, reverse, want_o1, want_o2, chunk, precision):
+    b, length, h, p = V.shape
+    n = K.shape[-1]
+    dev = V.device
+    nc = triton.cdiv(length, chunk)
+    o1 = torch.empty(b, length, h, p, device=dev, dtype=torch.float32) if want_o1 else torch.empty(1, 1, 1, 1, device=dev)
+    o2 = torch.empty(b, length, h, n, device=dev, dtype=torch.float32) if want_o2 else torch.empty(1, 1, 1, 1, device=dev)
+    Q = Q if want_o1 else K
+    U = U if want_o2 else V
+    _out_kernel[(nc, b * h)](
+        Q, K, V, U, cs, st, o1, o2, length, h, nc,
+        Q.stride(0), Q.stride(1), K.stride(0), K.stride(1), V.stride(0), V.stride(1), V.stride(2),
+        U.stride(0), U.stride(1), U.stride(2), cs.stride(0), cs.stride(1),
+        o1.stride(0), o1.stride(1), o1.stride(2), o2.stride(0), o2.stride(1), o2.stride(2),
+        N=n, P=p, BLOCK_N=max(16, triton.next_power_of_2(n)), BLOCK_P=max(16, triton.next_power_of_2(p)), CHUNK=chunk,
+        HAS_O1=want_o1, HAS_O2=want_o2, REVERSE=reverse, PREC=precision,
+    )
+    return (o1 if want_o1 else None), (o2 if want_o2 else None)
+
+
 class _GTSScan(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, C, B, X, cs, reverse, chunk, precision):
+    def forward(ctx, C, B, X, cs, reverse, chunk, precision, parallel):
         C, B, X, cs = (t.float().contiguous() for t in (C, B, X, cs))
-        Y, _ = _launch(C, B, X, None, cs, reverse, True, False, chunk, precision)
-        ctx.save_for_backward(C, B, X, cs, Y)
-        ctx.reverse, ctx.chunk, ctx.precision = reverse, chunk, precision
+        st = None
+        if parallel:
+            st = _states(B, X, cs, reverse, chunk, precision)
+            Y, _ = _outputs(C, B, X, None, cs, st, reverse, True, False, chunk, precision)
+        else:
+            Y, _ = _launch(C, B, X, None, cs, reverse, True, False, chunk, precision)
+        ctx.save_for_backward(C, B, X, cs, Y, *([st] if parallel else []))
+        ctx.reverse, ctx.chunk, ctx.precision, ctx.parallel = reverse, chunk, precision, parallel
         return Y
 
     @staticmethod
     def backward(ctx, dY):
-        C, B, X, cs, Y = ctx.saved_tensors
+        C, B, X, cs, Y, *st = ctx.saved_tensors
         r, chunk, prec = ctx.reverse, ctx.chunk, ctx.precision
         dY = dY.float().contiguous()
         # Opposite direction: dX[s] = sum_t w <B[s], C[t]> dY[t] and dB[s] = sum_t w <X[s], dY[t]> C[t], one pass.
-        dX, dB = _launch(B, C, dY, X, cs, not r, True, True, chunk, prec)
-        # Same direction: dC[t] = sum_s w <dY[t], X[s]> B[s].
-        _, dC = _launch(None, B, X, dY, cs, r, False, True, chunk, prec)
+        # Same direction: dC[t] = sum_s w <dY[t], X[s]> B[s], from the forward pass's chunk states.
+        if ctx.parallel:
+            dX, dB = _outputs(B, C, dY, X, cs, _states(C, dY, cs, not r, chunk, prec), not r, True, True, chunk, prec)
+            _, dC = _outputs(None, B, X, dY, cs, st[0], r, False, True, chunk, prec)
+        else:
+            dX, dB = _launch(B, C, dY, X, cs, not r, True, True, chunk, prec)
+            _, dC = _launch(None, B, X, dY, cs, r, False, True, chunk, prec)
         dcs = (dY * Y).sum(-1) - (X * dX).sum(-1)
         if r:
             dcs = -dcs
-        return dC.sum(2), dB.sum(2), dX, dcs, None, None, None
+        return dC.sum(2), dB.sum(2), dX, dcs, None, None, None, None
 
 
-def gts_scan(C, B, X, cs, reverse=False, chunk=64, precision="ieee"):
+def gts_scan(C, B, X, cs, reverse=False, chunk=64, precision="ieee", parallel=True):
     """C, B: (b, l, n); X: (b, l, h, p); cs: (b, l, h), non-increasing along l (a running sum of log-decays <= 0).
-    Returns (b, l, h, p) float32. ``precision="tf32"`` lets the chunk matmuls use TF32 on GPUs that have it."""
+    Returns (b, l, h, p) float32. ``precision="tf32"`` lets the chunk matmuls use TF32 on GPUs that have it.
+    ``parallel=True`` runs one program per chunk (two passes: chunk states, then outputs with the carried state as a
+    decayed sum of earlier chunks' states); ``False`` walks each (batch, head)'s chunks in one program."""
     if not HAVE_TRITON:
         raise RuntimeError("gts_scan needs triton; use gts_scan_reference")
-    return _GTSScan.apply(C, B, X, cs, reverse, chunk, precision)
+    return _GTSScan.apply(C, B, X, cs, reverse, chunk, precision, parallel)

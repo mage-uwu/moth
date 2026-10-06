@@ -45,7 +45,7 @@ def main():
     p.add_argument("--heads", type=int, default=8)
     p.add_argument("--state", type=int, default=16)
     p.add_argument("--width", type=int, default=1024)
-    p.add_argument("--lengths", type=int, nargs="+", default=[512, 2048, 8192])
+    p.add_argument("--lengths", type=int, nargs="+", default=[512, 2048, 8192, 32768])
     p.add_argument("--reps", type=int, default=20)
     p.add_argument("--layer", action="store_true", help="also time a whole bank GTS layer with and without the scan")
     a = p.parse_args()
@@ -75,15 +75,16 @@ def main():
             return go
 
         rows = []
-        if L <= 4096:
+        if L <= 2048:
             rows.append(("PyTorch quadratic (what GTS trains with)", run(lambda: gts_scan_reference(C, B, X, torch.cumsum(dt * A, 1)))))
-        for chunk in (32, 64, 128):
+        rows.append(("gts_scan sequential chunk  64 tf32", run(lambda: gts_scan(C, B, X, torch.cumsum(dt * A, 1), False, 64, "tf32", parallel=False))))
+        for chunk in (16, 32, 64, 128):
             for prec in ("ieee", "tf32"):
-                rows.append((f"gts_scan chunk {chunk:3d} {prec}", run(lambda c=chunk, q=prec: gts_scan(C, B, X, torch.cumsum(dt * A, 1), False, c, q))))
+                rows.append((f"gts_scan parallel chunk {chunk:3d} {prec}", run(lambda c=chunk, q=prec: gts_scan(C, B, X, torch.cumsum(dt * A, 1), False, c, q))))
         if mamba_chunk_scan_combined is not None:
             for chunk in (64, 128, 256):
                 rows.append((f"upstream mamba_chunk_scan_combined {chunk}", run(lambda c=chunk: mamba_chunk_scan_combined(X, dt, A, B.unsqueeze(2), C.unsqueeze(2), c))))
-        ref = gts_scan_reference(C, B, X, torch.cumsum(dt * A, 1)) if L <= 4096 else None
+        ref = gts_scan_reference(C, B, X, torch.cumsum(dt * A, 1)) if L <= 2048 else None
         if ref is not None:
             err = (gts_scan(C, B, X, torch.cumsum(dt * A, 1)) - ref).abs().max().item() / ref.abs().max().item()
             print(f"length {L}: gts_scan vs PyTorch, max relative error {err:.1e}")
@@ -98,7 +99,7 @@ def main():
         if a.layer:
             for causal in (True,):
                 for scan in (False, True):
-                    if not scan and L > 4096:
+                    if not scan and L > 2048:
                         continue
                     m = GTS(a.width, depth=0, n_trees=a.trees, n_heads=H, d_state=N, act="split", d_conv=3, causal=causal,
                             ternary=True, act_bits=8, scan_kernel=scan).to(dev)
