@@ -6,7 +6,8 @@
 #   cd moth/gts && git log --oneline -1 && bash pod/job.sh; sleep infinity
 # /workspace/out (served read-only on port 8888) holds the logs and outputs. A run whose model.bin exists is skipped,
 # so restarting the pod after a fix picks up the new commit and redoes only what is missing.
-export PYTHONUNBUFFERED=1
+export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8  # the container sees the host's cores; unbounded threads crawl
+nproc; python3 -c "import torch; print(\"torch threads\", torch.get_num_threads())"
 trap 'echo "=== JOB FAILED at line $LINENO $(date -u +%T) ==="' ERR
 set -ex -o pipefail
 O=/workspace/out D=/workspace/data/fineweb
