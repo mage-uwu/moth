@@ -432,6 +432,27 @@ The same step after the route kernels, 8 x 512 tokens on an A100, no gradient ch
 `lm_run.py --amp --compile --no-checkpoint` trains this way. The 0.5B results above were trained before all of this,
 in float32 with checkpointing.
 
+### Bidirectional (BERT-style) training
+
+The bidirectional mixed forest as a masked LM (`GTSForMaskedLM`, width 1024, 27 layers, deep trees of depth 10, ternary,
+8-bit activations, 15% of positions labelled), one A100, no checkpointing, `scripts/profile_step.py --arch bert`:
+
+| | 8 x 512 tokens | 2 x 2,048 tokens |
+|---|---|---|
+| Before this work (quadratic bank, walk-and-scatter trees, full head, float32) | 8,170 tokens/s | 4,378 tokens/s |
+| + scan for the bank | 12,041 | |
+| + route kernels (here without route_ste: plain FFF routing) | 16,676 | |
+| + head on the labelled positions only | 17,237 | |
+| + bf16, fused AdamW | 22,723 | |
+| + `torch.compile` | **37,838** | **37,633** |
+| the same with route_ste | 37,050 | |
+
+What made the bidirectional path different: `gts_scan_bi` runs the bank's forward and reverse context in the same
+launches (a direction grid axis, shared tensors at zero stride); the route kernels gained a mode without the
+routing gradient (the encoder's default), replacing the level-loop walk and dense scatter; and
+`GTSForMaskedLM(..., labelled_only=True)` scores the about 15% of positions that carry a label instead of all of them,
+for the same loss. 64 GPU tests pass.
+
 ## Departures from Mamba-2
 
 - **Bidirectional by default.** Forward and backward context share the key B and use separate queries.
