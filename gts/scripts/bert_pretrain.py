@@ -50,16 +50,39 @@ def _tokenizer():
     return tok
 
 
+def _encode(texts, tok, sep):
+    """One uint16 array for a list of documents, each followed by [SEP]."""
+    parts = []
+    for start in range(0, len(texts), 4096):
+        for enc in tok.encode_batch(texts[start : start + 4096], add_special_tokens=False):
+            parts.append(np.asarray(enc.ids, dtype=np.uint16))
+            parts.append(np.asarray([sep], dtype=np.uint16))
+    return np.concatenate(parts) if parts else np.zeros(0, np.uint16)
+
+
 def _write_stream(texts, tok, f, limit, written, sep):
-    for start in range(0, len(texts), 2048):
-        for enc in tok.encode_batch(texts[start : start + 2048], add_special_tokens=False):
-            ids = enc.ids + [sep]
-            take = min(len(ids), limit - written)
-            np.asarray(ids[:take], dtype=np.uint16).tofile(f)
-            written += take
-            if written >= limit:
-                return written
-    return written
+    ids = _encode(texts, tok, sep)[: limit - written]
+    ids.tofile(f)
+    return written + len(ids)
+
+
+def _shard_worker(job):
+    """Tokenise one Wikipedia parquet shard (up to ``limit`` tokens) into its own file. Runs in a worker process."""
+    name, path_out, limit = job
+    os.environ.setdefault("RAYON_NUM_THREADS", "4")
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download
+
+    tok = _tokenizer()
+    sep = tok.token_to_id("[SEP]")
+    pf = pq.ParquetFile(hf_hub_download("wikimedia/wikipedia", name, repo_type="dataset"))
+    n = 0
+    with open(path_out, "wb") as f:
+        for g in range(pf.num_row_groups):
+            n = _write_stream(pf.read_row_group(g, columns=["text"]).column("text").to_pylist(), tok, f, limit, n, sep)
+            if n >= limit:
+                break
+    return n
 
 
 def prep(a):
@@ -77,34 +100,35 @@ def prep(a):
             n_train = _write_stream(docs[cut:], tok, f, a.train_tokens, 0, sep)
         source = f"bert-base-uncased WordPiece of {a.text_file}"
     else:
-        import pyarrow.parquet as pq
-        from huggingface_hub import hf_hub_download, list_repo_files
+        import multiprocessing as mp
+        import shutil
+
+        from huggingface_hub import list_repo_files
 
         files = sorted(f for f in list_repo_files("wikimedia/wikipedia", repo_type="dataset") if f.startswith("20231101.en/"))
-        print(f"{len(files)} parquet shards", flush=True)
-
-        def texts_of(name):
-            path = hf_hub_download("wikimedia/wikipedia", name, repo_type="dataset")
-            pf = pq.ParquetFile(path)
-            for g in range(pf.num_row_groups):
-                yield pf.read_row_group(g, columns=["text"]).column("text").to_pylist()
-
-        with open(os.path.join(a.out, "val.bin"), "wb") as f:
-            n_val = 0
-            for texts in texts_of(files[-1]):
-                n_val = _write_stream(texts, tok, f, a.val_tokens, n_val, sep)
-                if n_val >= a.val_tokens:
-                    break
-        n_train = 0
-        with open(os.path.join(a.out, "train.bin"), "wb") as f:
-            for name in files[:-1]:
-                for texts in texts_of(name):
-                    n_train = _write_stream(texts, tok, f, a.train_tokens, n_train, sep)
-                    if n_train >= a.train_tokens:
-                        break
-                print(f"  {name}: {n_train:,} training tokens, {n_train / (time.time() - t0):,.0f} tokens/s", flush=True)
+        per_shard = min(160_000_000, a.train_tokens)  # an English shard holds about 150M word pieces
+        n_train_shards = min(len(files) - 1, -(-a.train_tokens // per_shard) + 1)
+        print(f"{len(files)} parquet shards; tokenising {n_train_shards} for training and the last for validation, "
+              f"{a.workers} at a time", flush=True)
+        tmp = os.path.join(a.out, "shards")
+        os.makedirs(tmp, exist_ok=True)
+        jobs = [(files[-1], os.path.join(tmp, "val.bin"), a.val_tokens)]
+        jobs += [(files[i], os.path.join(tmp, f"train{i:02d}.bin"), per_shard) for i in range(n_train_shards)]
+        with mp.get_context("spawn").Pool(a.workers) as pool:
+            counts = pool.map(_shard_worker, jobs, chunksize=1)
+        print(f"  tokenised {sum(counts):,} tokens in {time.time() - t0:.0f} s", flush=True)
+        shutil.move(jobs[0][1], os.path.join(a.out, "val.bin"))
+        n_val, n_train = counts[0], 0
+        with open(os.path.join(a.out, "train.bin"), "wb") as out:
+            for (_, path, _), n in zip(jobs[1:], counts[1:]):
+                take = min(n, a.train_tokens - n_train)
+                with open(path, "rb") as f:
+                    out.write(f.read(take * 2))
+                n_train += take
+                os.remove(path)
                 if n_train >= a.train_tokens:
                     break
+        shutil.rmtree(tmp, ignore_errors=True)
         source = "bert-base-uncased WordPiece of wikimedia/wikipedia 20231101.en"
     meta = {"vocab_size": tok.get_vocab_size(), "source": source, "train_tokens": n_train, "val_tokens": n_val,
             "special": {k: tok.token_to_id(k) for k in ("[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]")}}
@@ -299,6 +323,7 @@ def main():
     q.add_argument("--train-tokens", type=int, default=1_500_000_000)
     q.add_argument("--val-tokens", type=int, default=2_000_000)
     q.add_argument("--text-file")
+    q.add_argument("--workers", type=int, default=8, help="shards tokenised in parallel")
     t = sub.add_parser("train")
     t.add_argument("--data", required=True)
     t.add_argument("--out", required=True)
