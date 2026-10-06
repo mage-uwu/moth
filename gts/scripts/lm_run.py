@@ -59,10 +59,15 @@ def forward(model, ids, targets=None, use_checkpoint=False):
     x = model.embedding(ids)
     for layer in model.layers:
         x = checkpoint(layer, x, use_reentrant=False) if use_checkpoint else layer(x)
-    logits = F.linear(model.norm_f(x), model.embedding.weight, model.head_bias)
+    vocab = model.embedding.weight.shape[0]
+    pad = -vocab % 64  # 50,257 rows make the head GEMMs misaligned; pad, then slice the logits back
+    w, b = model.embedding.weight, model.head_bias
+    if pad and x.is_cuda:
+        w, b = F.pad(w, (0, 0, 0, pad)), F.pad(b, (0, pad))
+    logits = F.linear(model.norm_f(x), w, b)[..., :vocab]
     if targets is None:
         return logits
-    return logits, F.cross_entropy(logits.view(-1, logits.size(-1)).float(), targets.view(-1))
+    return logits, F.cross_entropy(logits.reshape(-1, vocab).float(), targets.view(-1))
 
 
 def get_batch(data, batch_size, seq_len, generator, device):
@@ -118,6 +123,7 @@ def main():
     p.add_argument("--amp", action="store_true", help="bfloat16 autocast. Untested with the ternary straight-through estimator")
     p.add_argument("--no-tf32", action="store_true", help="CUDA: train with full float32 matmuls instead of TF32")
     p.add_argument("--no-scan-kernel", action="store_true", help="depth-0 trees: the quadratic PyTorch context, not the Triton scan")
+    p.add_argument("--compile", action="store_true", help="torch.compile each block (fuses the elementwise work)")
     p.add_argument("--no-route-kernel", action="store_true", help="route_ste trees: the dense PyTorch form, not the Triton walk kernels")
     p.add_argument("--no-export", action="store_true")
     p.add_argument("--count-only", action="store_true")
@@ -137,6 +143,9 @@ def main():
     if args.count_only:
         return
     model.to(args.device)
+    if args.compile:
+        for i, layer in enumerate(model.layers):
+            model.layers[i] = torch.compile(layer)
     for m in model.modules():
         if args.no_scan_kernel and hasattr(m, "scan_kernel"):
             m.scan_kernel = False

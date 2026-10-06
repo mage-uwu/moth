@@ -227,10 +227,23 @@ class GTS(nn.Module):
     def _local_mix(self, u, mask):
         """Centred depthwise conv so that routing can depend on the neighbouring tokens."""
         u = u * mask.unsqueeze(-1)
-        x = u if self.d_conv == 0 else self.conv1d(u.transpose(1, 2))[..., : u.shape[1]].transpose(1, 2)
+        if self.d_conv == 0:
+            x = u
+        elif u.is_cuda:
+            x = self._conv_shifted(u)
+        else:
+            x = self.conv1d(u.transpose(1, 2))[..., : u.shape[1]].transpose(1, 2)
         if self.ternary and self.act_bits is not None:
             x = quantize_activations(x, self.act_bits, self.quant_lambda)
         return x
+
+    def _conv_shifted(self, u):
+        """The depthwise conv as shifted sums, (b, l, d) in and out. Same function as self.conv1d; used on CUDA,
+        where cuDNN's depthwise kernels are slow and torch.compile fuses these with the masking and quantisation."""
+        pad, length = self._conv_pad(), u.shape[1]
+        up = F.pad(u, (0, 0, pad, self.d_conv - 1 - pad))
+        w = self.conv1d.weight.squeeze(1)  # (d, taps)
+        return self.conv1d.bias + sum(up[:, j : j + length] * w[:, j] for j in range(self.d_conv))
 
     def _walk(self, x):
         """Walk every tree for every token.
@@ -422,17 +435,27 @@ class GTS(nn.Module):
         assert self.dense_walk and not self.read_state, "route_ste needs the dense training path and no state read"
         want = return_paths or self.capture_paths
         batch, length, _ = x.shape
-        all_logits = F.linear(x, self._w_in(), self.node_bias)  # (b, l, total nodes)
         nodes = None
         if self._use_route_kernel(x):
             from mamba_ssm.ops.gts_route import route_ste_out
 
-            out, nodes = route_ste_out(all_logits.reshape(batch * length, -1), self._w_out(), self.n_trees, self.depth,
-                                       self.act, self.route_ste_temp, want)
+            # Pad the node dimension to a multiple of 64 with zero rows the kernels never visit: 4 x 2,047 nodes
+            # makes every GEMM misaligned and cuBLAS falls back to slow kernels.
+            total = self.n_trees * self.n_nodes
+            pad = -total % 64
+            w_in, w_out, bias = self._w_in(), self._w_out(), self.node_bias
+            if pad:
+                w_in, w_out = F.pad(w_in, (0, 0, 0, pad)), F.pad(w_out, (0, 0, 0, pad))
+                bias = F.pad(bias, (0, pad)) if bias is not None else None
+            all_logits = F.linear(x, w_in, bias)  # (b, l, total nodes + pad)
+            out, nodes = route_ste_out(all_logits.reshape(batch * length, -1), w_out, self.n_trees, self.depth,
+                                       self.act, self.route_ste_temp, want, n_nodes=self.n_nodes)
             out = out.view(batch, length, -1).to(x.dtype)
+            all_logits = all_logits[..., :total]
             if want:
                 nodes = nodes.view(batch, length, -1).long()
         else:
+            all_logits = F.linear(x, self._w_in(), self.node_bias)  # (b, l, total nodes)
             out = self._forward_ste(x, mask, all_logits)
             if want:
                 nodes, _ = self._walk(x)

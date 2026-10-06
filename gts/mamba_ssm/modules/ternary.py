@@ -44,6 +44,9 @@ def _codes_and_scales(w, group_size, eps):
     return codes, scale
 
 
+_FUSED = True  # set False to use the PyTorch form on CUDA as well
+
+
 def absmean_ternary(w, group_size=None, lam=1.0, eps=1e-8):
     """Grouped absmean ternarisation with a straight-through estimator.
 
@@ -52,6 +55,11 @@ def absmean_ternary(w, group_size=None, lam=1.0, eps=1e-8):
     """
     if lam <= 0:
         return w
+    if lam >= 1 and w.is_cuda and _FUSED:
+        from mamba_ssm.ops.ternary_fused import HAVE_TRITON, absmean_ternary_fused
+
+        if HAVE_TRITON:  # one Triton kernel: one read, one write, same values (scales to the last bit or one ulp)
+            return absmean_ternary_fused(w, _group_size(w.shape[-1], group_size), eps)
     codes, scale = _codes_and_scales(w, group_size, eps)
     wq = (codes * scale).reshape(w.shape)
     if lam >= 1:

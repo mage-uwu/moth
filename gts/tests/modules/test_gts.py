@@ -1,6 +1,7 @@
 # Golden Tree Snake (GTS) fork, 2026.
 """CPU tests for the GTS mixer. Run with: pytest tests/modules/test_gts.py"""
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -217,3 +218,15 @@ def test_masked_lm_overfits_a_toy_batch():
         loss.backward()
         opt.step()
     assert torch.isfinite(loss) and loss.item() < 0.5 * first, (first, loss.item())
+
+
+@pytest.mark.parametrize("causal,d_conv", [(True, 3), (True, 4), (False, 3), (False, 5)])
+def test_conv_shifted_matches_conv1d(causal, d_conv):
+    torch.manual_seed(0)
+    m = GTS(16, depth=2, d_conv=d_conv, causal=causal)
+    with torch.no_grad():
+        m.conv1d.weight.normal_()
+        m.conv1d.bias.normal_()
+    u = torch.randn(2, 11, 16)
+    want = m.conv1d(u.transpose(1, 2))[..., : u.shape[1]].transpose(1, 2)
+    assert torch.allclose(m._conv_shifted(u), want, atol=1e-5)

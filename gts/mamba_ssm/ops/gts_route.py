@@ -108,9 +108,8 @@ def _grid(n_tok, n_trees, block):
 class _RouteSTE(torch.autograd.Function):
     @staticmethod
     @torch.amp.custom_fwd(device_type="cuda")
-    def forward(ctx, L, W, n_trees, depth, act, temp, want_nodes):
-        n_tok, total = L.shape
-        n_nodes = total // n_trees
+    def forward(ctx, L, W, n_trees, n_nodes, depth, act, temp, want_nodes):
+        n_tok = L.shape[0]
         L = L.contiguous()
         A = torch.zeros_like(L)
         nodes = torch.empty(n_tok, n_trees, depth + 1, device=L.device, dtype=torch.int32) if want_nodes else A
@@ -118,7 +117,7 @@ class _RouteSTE(torch.autograd.Function):
         _route_fwd[_grid(n_tok, n_trees, block)](L, A, nodes, n_tok, L.stride(0), A.stride(0), n_trees,
                                                  N_NODES=n_nodes, DEPTH=depth, ACT=act, BLOCK=block, STORE_NODES=want_nodes)
         ctx.save_for_backward(L, W)
-        ctx.cfg = n_trees, depth, act, temp
+        ctx.cfg = n_trees, n_nodes, depth, act, temp
         out = A @ W
         if want_nodes:
             ctx.mark_non_differentiable(nodes)
@@ -128,9 +127,8 @@ class _RouteSTE(torch.autograd.Function):
     @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, dout, _dnodes):
         L, W = ctx.saved_tensors
-        n_trees, depth, act, temp = ctx.cfg
-        n_tok, total = L.shape
-        n_nodes = total // n_trees
+        n_trees, n_nodes, depth, act, temp = ctx.cfg
+        n_tok = L.shape[0]
         dout = dout.contiguous()
         block = 128
         dW = None
@@ -145,10 +143,10 @@ class _RouteSTE(torch.autograd.Function):
             dL = torch.zeros_like(L)
             _route_bwd[_grid(n_tok, n_trees, block)](L, G, dL, n_tok, L.stride(0), G.stride(0), dL.stride(0), 1.0 / temp,
                                                      N_NODES=n_nodes, DEPTH=depth, ACT=act, BLOCK=block)
-        return dL, dW, None, None, None, None, None
+        return dL, dW, None, None, None, None, None, None
 
 
-def route_ste_out(L, W, n_trees, depth, act="gelu", temp=1.0, want_nodes=False):
+def route_ste_out(L, W, n_trees, depth, act="gelu", temp=1.0, want_nodes=False, n_nodes=None):
     """L: (tokens, trees * nodes) every node's logit, in any float dtype (the kernels work in float32; under bf16
     autocast the (tokens x nodes) buffers stay bf16 and the matmuls run in bf16); W: (trees * nodes, d) output rows. Returns (out, nodes): out is
     (tokens, d), the stateless trees' output with the straight-through routing gradient; nodes is (tokens, trees,
@@ -157,4 +155,5 @@ def route_ste_out(L, W, n_trees, depth, act="gelu", temp=1.0, want_nodes=False):
     if not HAVE_TRITON:
         raise RuntimeError("route_ste_out needs triton")
     code = {"gelu": 0, "split": 0, "linear": 1}[act]
-    return _RouteSTE.apply(L, W, n_trees, depth, code, float(temp), want_nodes)
+    n_nodes = n_nodes or L.shape[1] // n_trees  # L and W may carry padding columns/rows after the trees
+    return _RouteSTE.apply(L, W, n_trees, n_nodes, depth, code, float(temp), want_nodes)
