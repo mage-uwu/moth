@@ -8,7 +8,7 @@ set -x
 O=/workspace/out; R=/workspace/vl_run; D=/root/vl; W=/root/raw
 mkdir -p $O $R
 for f in result.json backbone.pt binarized.pt checkpoint.pt; do ln -sf $R/$f $O/vl_$f; done
-apt-get update -qq && apt-get install -y -qq p7zip-full >/dev/null
+apt-get update -qq && apt-get install -y -qq p7zip-full unzip >/dev/null
 python3 -m pip install -q einops packaging tokenizers huggingface_hub pyarrow pillow 2>&1 | tail -1
 for i in $(seq 1 12); do python3 -c "import torch, torchvision; print(torch.__version__, torchvision.__version__, torch.cuda.get_device_name(0))" && break; echo "CUDA not ready (try $i)"; sleep 10; done
 python3 -c "import torch; torch.zeros(1).cuda()" || { echo "NO CUDA: stopping"; exit 1; }

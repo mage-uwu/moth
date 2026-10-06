@@ -113,20 +113,23 @@ class Writer:
         self.f = open(os.path.join(out, "images.bin"), "wb")
         # spawned, not forked: a forked worker slowly copies the parent's memory (the caption JSON, ~10 GB of Python
         # objects) as reference counts touch it, and eight of them run out of memory
-        self.pool = mp.get_context("spawn").Pool(workers)
+        self.pool = mp.get_context("spawn").Pool(workers, maxtasksperchild=500)
         self.offsets, self.targets, self.seen, self.t0 = [0], [], 0, time.time()
 
-    def add(self, items):
-        """items: list of (source, caption text or label)."""
-        jobs = ((src, self.size, self.quality, self.short) for src, _ in items)
-        for (_, target), data in zip(items, self.pool.imap(_square_jpeg, jobs, chunksize=64)):
-            self.seen += 1
-            if data is not None:
-                self.f.write(data)
-                self.offsets.append(self.offsets[-1] + len(data))
-                self.targets.append(target)
-            if self.seen % 50000 == 0:
-                print(f"    {self.seen:,} images, {self.seen / (time.time() - self.t0):.0f}/s", flush=True)
+    def add(self, items, chunk=20000):
+        """items: list of (source, caption text or label). Processed ``chunk`` at a time, so at most one chunk of
+        results is ever held."""
+        for c in range(0, len(items), chunk):
+            part = items[c : c + chunk]
+            jobs = [(src, self.size, self.quality, self.short) for src, _ in part]
+            for (_, target), data in zip(part, self.pool.map(_square_jpeg, jobs, chunksize=32)):
+                self.seen += 1
+                if data is not None:
+                    self.f.write(data)
+                    self.offsets.append(self.offsets[-1] + len(data))
+                    self.targets.append(target)
+            if self.seen % 60000 < chunk:
+                print(f"    {self.seen:,} images, {self.seen / (time.time() - self.t0):.0f}/s; {_memory()}", flush=True)
 
     def close(self, cap_len=None, tok=None, extra=None):
         self.f.close()
@@ -141,6 +144,22 @@ class Writer:
         json.dump(meta, open(os.path.join(out, "meta.json"), "w"), indent=1)
         print(f"  {out}: {n:,} images ({self.seen - n} dropped), {self.offsets[-1] / 2**30:.1f} GB, "
               f"{time.time() - self.t0:.0f} s", flush=True)
+
+
+def _memory():
+    """The container's memory use (cgroup), this process's resident set and the system's available memory, in GB."""
+    out = []
+    for path in ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory/memory.usage_in_bytes"):
+        if os.path.exists(path):
+            out.append(f"cgroup {int(open(path).read()) / 2**30:.1f}")
+            break
+    for line in open("/proc/self/status"):
+        if line.startswith("VmRSS"):
+            out.append(f"rss {int(line.split()[1]) / 2**20:.1f}")
+    for line in open("/proc/meminfo"):
+        if line.startswith("MemAvailable"):
+            out.append(f"available {int(line.split()[1]) / 2**20:.0f}")
+    return "memory GB: " + ", ".join(out)
 
 
 def _write_set(out, items, size, workers, cap_len=None, tok=None, extra=None):
@@ -183,74 +202,98 @@ def _hf(repo, name, work):
     return hf_hub_download(repo, name, repo_type="dataset", local_dir=work)
 
 
+def _vgb_select(path, n):
+    """Run in a child process (the 3 GB JSON never enters the parent): {image: (kind, caption)} for n images."""
+    conv = json.load(open(path))
+    best, rank = {}, {"long": 0, "short": 1, "json": 2}
+    for e in conv:
+        c = _vgb_caption(e["conversations"])
+        if c and (e["image"] not in best or rank[c[0]] < rank[best[e["image"]][0]]):
+            best[e["image"]] = c
+    names = sorted(best)
+    random.Random(0).shuffle(names)
+    return len(best), {k: best[k] for k in names[:n]}
+
+
+def _sharegpt4v_select(path, n):
+    """Run in a child process: [(image path, caption)], all of COCO first, then LCS to n."""
+    data = json.load(open(path))
+    coco = [(e["image"], _clean(e["conversations"][1]["value"])) for e in data if e["image"].startswith("coco/")]
+    lcs = [(e["image"], _clean(e["conversations"][1]["value"])) for e in data if e["image"].startswith("llava/")]
+    random.Random(0).shuffle(lcs)
+    return len(coco), len(lcs), coco + lcs[: max(0, n - len(coco))]
+
+
+def _in_child(fn, *args):
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing as mp
+
+    with ProcessPoolExecutor(1, mp_context=mp.get_context("spawn")) as ex:
+        return ex.submit(fn, *args).result()
+
+
+def _find_images(root):
+    """{file name: path} for every image under root."""
+    out = {}
+    for d, _, files in os.walk(root):
+        for f in files:
+            if f.lower().endswith((".jpg", ".jpeg", ".png")):
+                out[f] = os.path.join(d, f)
+    return out
+
+
 def prep(a):
     from bert_pretrain import _tokenizer
 
-    tok, rng = _tokenizer(), random.Random(0)
+    tok = _tokenizer()
     os.makedirs(a.work, exist_ok=True)
     t0 = time.time()
+    print(_memory(), flush=True)
 
     # VideoGameBunny: one caption per image, preferring long captions, then short ones, then JSON descriptions
     out = os.path.join(a.out, "vgb")
     if a.vgb and not os.path.exists(os.path.join(out, "meta.json")):
-        conv = json.load(open(_hf("VideoGameBunny/Dataset", "conversations.json", a.work)))
-        best, rank = {}, {"long": 0, "short": 1, "json": 2}
-        for e in conv:
-            c = _vgb_caption(e["conversations"])
-            if c and (e["image"] not in best or rank[c[0]] < rank[best[e["image"]][0]]):
-                best[e["image"]] = c
-        del conv
-        gc.collect()
-        names = sorted(best)
-        rng.shuffle(names)
-        names = names[: a.vgb]
-        kinds = {k: sum(best[n][0] == k for n in names) for k in rank}
-        print(f"VideoGameBunny: {len(best):,} images with a caption; using {len(names):,} ({kinds})", flush=True)
+        n_all, best = _in_child(_vgb_select, _hf("VideoGameBunny/Dataset", "conversations.json", a.work), a.vgb)
+        kinds = {k: sum(v[0] == k for v in best.values()) for k in ("long", "short", "json")}
+        print(f"VideoGameBunny: {n_all:,} images with a caption; using {len(best):,} ({kinds}); {_memory()}", flush=True)
         parts = [_hf("VideoGameBunny/Dataset", f"images.z0{i}", a.work) for i in range(1, 6)]
         parts.append(_hf("VideoGameBunny/Dataset", "images.zip", a.work))
         dest = os.path.join(a.work, "vgb_images")
         subprocess.run(["7z", "x", "-y", "-bd", "-o" + dest, parts[-1]], check=True, stdout=subprocess.DEVNULL)
         for p in parts:
             os.remove(p)
-        items = [(("file", os.path.join(dest, n.lstrip("./")), None), best[n][1]) for n in names]
+        items = [(("file", os.path.join(dest, n.lstrip("./")), None), c[1]) for n, c in best.items()]
         _write_set(out, items, a.size, a.workers, cap_len=a.cap_len, tok=tok, extra={"source": "VideoGameBunny/Dataset", "kinds": kinds})
         subprocess.run(["rm", "-rf", dest])
 
-    # ShareGPT4V-PT: COCO train2017 (all of it) and LCS-558K (the rest), read straight from their zip files
+    # ShareGPT4V-PT: COCO train2017 (all of it) and LCS-558K (the rest), unzipped to disk first
     out = os.path.join(a.out, "sharegpt4v")
     if a.sharegpt4v and not os.path.exists(os.path.join(out, "meta.json")):
-        data = json.load(open(_hf("Lin-Chen/ShareGPT4V", "share-captioner_coco_lcs_sam_1246k_1107.json", a.work)))
-        coco = [e for e in data if e["image"].startswith("coco/")]
-        lcs = [e for e in data if e["image"].startswith("llava/")]
-        del data
-        rng.shuffle(lcs)
-        chosen = coco + lcs[: max(0, a.sharegpt4v - len(coco))]
-        print(f"ShareGPT4V-PT: {len(coco):,} COCO and {len(lcs):,} LCS captions; using {len(chosen):,}", flush=True)
+        n_coco, n_lcs, chosen = _in_child(_sharegpt4v_select, _hf("Lin-Chen/ShareGPT4V", "share-captioner_coco_lcs_sam_1246k_1107.json", a.work), a.sharegpt4v)
+        print(f"ShareGPT4V-PT: {n_coco:,} COCO and {n_lcs:,} LCS captions; using {len(chosen):,}; {_memory()}", flush=True)
         coco_zip = os.path.join(a.work, "train2017.zip")
         if not os.path.exists(coco_zip):
             subprocess.run(["curl", "-fsSL", "--retry", "5", "-o", coco_zip,
                             "http://images.cocodataset.org/zips/train2017.zip"], check=True)
         lcs_zip = _hf("liuhaotian/LLaVA-Pretrain", "images.zip", a.work)
-        where = {}
-        for z in (coco_zip, lcs_zip):
-            for m in zipfile.ZipFile(z).namelist():
-                if m.lower().endswith((".jpg", ".jpeg", ".png")):
-                    where[os.path.basename(m)] = (z, m)
+        dest = os.path.join(a.work, "s4v_images")
+        for z, sub in ((coco_zip, "coco"), (lcs_zip, "lcs")):
+            subprocess.run(["unzip", "-q", "-o", z, "-d", os.path.join(dest, sub)], check=True)
+            os.remove(z)
+        where = _find_images(dest)
         items, missing = [], 0
-        for e in chosen:
-            zm = where.get(os.path.basename(e["image"]))
-            if zm is None:
+        for image, caption in chosen:
+            path = where.get(os.path.basename(image))
+            if path is None:
                 missing += 1
                 continue
-            items.append((("zip", zm[0], zm[1]), _clean(e["conversations"][1]["value"])))
-        del chosen, coco, lcs, where
-        gc.collect()
-        print(f"  {missing} captions without their image", flush=True)
+            items.append((("file", path, None), caption))
+        del chosen, where
+        print(f"  {missing} captions without their image; {_memory()}", flush=True)
         _write_set(out, items, a.size, a.workers, cap_len=a.cap_len, tok=tok,
                    extra={"source": "Lin-Chen/ShareGPT4V share-captioner_coco_lcs_sam_1246k_1107 (COCO + LCS)",
-                          "coco": sum(it[0][1] == coco_zip for it in items)})
-        os.remove(coco_zip)
-        os.remove(lcs_zip)
+                          "coco": sum("/coco/" in it[0][1] for it in items)})
+        subprocess.run(["rm", "-rf", dest])
     print(f"prep done in {(time.time() - t0) / 60:.0f} min", flush=True)
 
 
