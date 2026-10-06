@@ -1,0 +1,284 @@
+{
+ "params": 112911522,
+ "config": {
+  "d_model": 768,
+  "n_layer": 14,
+  "vocab_size": 30522,
+  "mixer": "mixed",
+  "bank_trees": 32,
+  "bank_heads": 8,
+  "bank_state": 16,
+  "deep_trees": 4,
+  "deep_depth": 9,
+  "d_conv": 3,
+  "causal": false,
+  "ternary": true,
+  "ternary_group": 128,
+  "act_bits": 8,
+  "route_ste": true,
+  "pad_token_id": 0
+ },
+ "args": {
+  "cmd": "train",
+  "data": "/workspace/wiki",
+  "out": "/workspace/bert110m",
+  "minutes": 160.0,
+  "reserve_minutes": 4,
+  "width": 768,
+  "layers": 14,
+  "bank_trees": 32,
+  "bank_heads": 8,
+  "bank_state": 16,
+  "deep_trees": 4,
+  "deep_depth": 9,
+  "route_ste": true,
+  "batch_size": 64,
+  "seq_len": 512,
+  "mask_prob": 0.15,
+  "lr": 0.0015,
+  "warmup": 1000,
+  "weight_decay": 0.01,
+  "eval_every": 2000,
+  "eval_batches": 20,
+  "log_every": 100,
+  "ckpt_minutes": 30,
+  "rate_from": 100,
+  "rate_steps": 100,
+  "amp": true,
+  "compile": true,
+  "seed": 0,
+  "vocab": 30522
+ },
+ "data": {
+  "vocab_size": 30522,
+  "source": "bert-base-uncased WordPiece of wikimedia/wikipedia 20231101.en",
+  "train_tokens": 902415089,
+  "val_tokens": 2000000,
+  "special": {
+   "[PAD]": 0,
+   "[UNK]": 100,
+   "[CLS]": 101,
+   "[SEP]": 102,
+   "[MASK]": 103
+  }
+ },
+ "total_steps": 53753,
+ "curve": [
+  {
+   "step": 2000,
+   "tokens": 65536000,
+   "val_loss": 4.1700631387293114,
+   "val_masked_acc": 0.35753257787468395,
+   "train_loss": 4.956205224990844,
+   "minutes": 6.735347775618235
+  },
+  {
+   "step": 4000,
+   "tokens": 131072000,
+   "val_loss": 3.764202452871069,
+   "val_masked_acc": 0.3974756625618033,
+   "train_loss": 3.8450249075889587,
+   "minutes": 12.5281370083491
+  },
+  {
+   "step": 6000,
+   "tokens": 196608000,
+   "val_loss": 3.6021987495863232,
+   "val_masked_acc": 0.4133935243476748,
+   "train_loss": 3.576824724674225,
+   "minutes": 18.31100979646047
+  },
+  {
+   "step": 8000,
+   "tokens": 262144000,
+   "val_loss": 3.4748066322047575,
+   "val_masked_acc": 0.42732549212296167,
+   "train_loss": 3.4385517120361326,
+   "minutes": 24.097626388072968
+  },
+  {
+   "step": 10000,
+   "tokens": 327680000,
+   "val_loss": 3.3872266350516456,
+   "val_masked_acc": 0.437152596505236,
+   "train_loss": 3.3239578366279603,
+   "minutes": 29.89225689172745
+  },
+  {
+   "step": 12000,
+   "tokens": 393216000,
+   "val_loss": 3.315318043185666,
+   "val_masked_acc": 0.44486073150508243,
+   "train_loss": 3.2538178324699403,
+   "minutes": 35.719263434410095
+  },
+  {
+   "step": 14000,
+   "tokens": 458752000,
+   "val_loss": 3.26065855196891,
+   "val_masked_acc": 0.4532035336629508,
+   "train_loss": 3.147293949127197,
+   "minutes": 41.502517712116244
+  },
+  {
+   "step": 16000,
+   "tokens": 524288000,
+   "val_loss": 3.2083333363059694,
+   "val_masked_acc": 0.45834229032951507,
+   "train_loss": 3.1687415599823,
+   "minutes": 47.28596890767415
+  },
+  {
+   "step": 18000,
+   "tokens": 589824000,
+   "val_loss": 3.1745646452539855,
+   "val_masked_acc": 0.46137231418071634,
+   "train_loss": 3.1142335414886473,
+   "minutes": 53.073375789324444
+  },
+  {
+   "step": 20000,
+   "tokens": 655360000,
+   "val_loss": 3.147691734589634,
+   "val_masked_acc": 0.463593649233793,
+   "train_loss": 3.079927396774292,
+   "minutes": 58.86679447889328
+  },
+  {
+   "step": 22000,
+   "tokens": 720896000,
+   "val_loss": 3.107758570738061,
+   "val_masked_acc": 0.4699915036493362,
+   "train_loss": 3.014111864566803,
+   "minutes": 64.71010872125626
+  },
+  {
+   "step": 24000,
+   "tokens": 786432000,
+   "val_loss": 3.0812970866972864,
+   "val_masked_acc": 0.4724687528790345,
+   "train_loss": 2.995987868309021,
+   "minutes": 70.49943995078405
+  },
+  {
+   "step": 26000,
+   "tokens": 851968000,
+   "val_loss": 3.0517695559420903,
+   "val_masked_acc": 0.475089314047641,
+   "train_loss": 2.963411545753479,
+   "minutes": 76.28908916314442
+  },
+  {
+   "step": 28000,
+   "tokens": 917504000,
+   "val_loss": 3.029238623695314,
+   "val_masked_acc": 0.47721851999713377,
+   "train_loss": 2.9283900260925293,
+   "minutes": 82.0814066807429
+  },
+  {
+   "step": 30000,
+   "tokens": 983040000,
+   "val_loss": 3.004282070166121,
+   "val_masked_acc": 0.48176355577393565,
+   "train_loss": 2.9201998829841616,
+   "minutes": 87.87478537956873
+  },
+  {
+   "step": 32000,
+   "tokens": 1048576000,
+   "val_loss": 2.9829111072177046,
+   "val_masked_acc": 0.4839439445587528,
+   "train_loss": 2.891806972026825,
+   "minutes": 93.7168208082517
+  },
+  {
+   "step": 34000,
+   "tokens": 1114112000,
+   "val_loss": 2.9585667410269676,
+   "val_masked_acc": 0.48697396840995405,
+   "train_loss": 2.860758328437805,
+   "minutes": 99.52736630042394
+  },
+  {
+   "step": 36000,
+   "tokens": 1179648000,
+   "val_loss": 2.9332366672219834,
+   "val_masked_acc": 0.49061818628504744,
+   "train_loss": 2.871607446670532,
+   "minutes": 105.32305897076925
+  },
+  {
+   "step": 38000,
+   "tokens": 1245184000,
+   "val_loss": 2.912712450094045,
+   "val_masked_acc": 0.4930237795452917,
+   "train_loss": 2.7979761481285097,
+   "minutes": 111.11531072060266
+  },
+  {
+   "step": 40000,
+   "tokens": 1310720000,
+   "val_loss": 2.8944622782597573,
+   "val_masked_acc": 0.4935151347644054,
+   "train_loss": 2.8012412548065186,
+   "minutes": 116.90829310417175
+  },
+  {
+   "step": 42000,
+   "tokens": 1376256000,
+   "val_loss": 2.873652994031726,
+   "val_masked_acc": 0.4971900623406934,
+   "train_loss": 2.8189823627471924,
+   "minutes": 122.75348320007325
+  },
+  {
+   "step": 44000,
+   "tokens": 1441792000,
+   "val_loss": 2.8616130023614774,
+   "val_masked_acc": 0.49866412799803456,
+   "train_loss": 2.75850430727005,
+   "minutes": 128.54509741862614
+  },
+  {
+   "step": 46000,
+   "tokens": 1507328000,
+   "val_loss": 2.848632391806123,
+   "val_masked_acc": 0.500977592154695,
+   "train_loss": 2.752988588809967,
+   "minutes": 134.33362301190695
+  },
+  {
+   "step": 48000,
+   "tokens": 1572864000,
+   "val_loss": 2.8293419729404077,
+   "val_masked_acc": 0.5023185824401929,
+   "train_loss": 2.7801872730255126,
+   "minutes": 140.12204330364864
+  },
+  {
+   "step": 50000,
+   "tokens": 1638400000,
+   "val_loss": 2.823779053494218,
+   "val_masked_acc": 0.503874540634053,
+   "train_loss": 2.7291388154029845,
+   "minutes": 145.93436411221822
+  },
+  {
+   "step": 52000,
+   "tokens": 1703936000,
+   "val_loss": 2.8207063563513928,
+   "val_masked_acc": 0.504335186151972,
+   "train_loss": 2.7034655094146727,
+   "minutes": 151.77598648866018
+  },
+  {
+   "step": 53753,
+   "tokens": 1761378304,
+   "val_loss": 2.8150828965683616,
+   "val_masked_acc": 0.5050619824135778,
+   "train_loss": 2.748470053953283,
+   "minutes": 156.85615159273146
+  }
+ ]
+}
