@@ -1,0 +1,86 @@
+{
+ "arch": "mixed",
+ "params": 588785,
+ "mixer_params": 579760,
+ "steps": 3600,
+ "val_loss": 1.5880912780761718,
+ "val_bits_per_char": 2.2911314113595087,
+ "train_loss": 1.4043054938316346,
+ "ms_per_step": 545.2187245152802,
+ "zero_ratio": 0.32496880143880846,
+ "curve": [
+  [
+   0,
+   4.21922013759613,
+   NaN
+  ],
+  [
+   600,
+   1.8697725504636764,
+   2.0644912161429723
+  ],
+  [
+   1200,
+   1.7724474966526031,
+   1.6522001592318216
+  ],
+  [
+   1800,
+   1.7014894634485245,
+   1.5555975405375162
+  ],
+  [
+   2400,
+   1.6578466951847077,
+   1.4991762602329255
+  ],
+  [
+   3000,
+   1.6141150265932083,
+   1.4551046361525855
+  ],
+  [
+   3600,
+   1.5880912780761718,
+   1.4197494783004125
+  ]
+ ],
+ "tree_ops_per_token_per_layer": 15232,
+ "args": {
+  "data": "/home/claude/tinyshakespeare.txt",
+  "arch": "mixed",
+  "out": "/home/claude/ar_runs/gts_mixed_long",
+  "d_model": 128,
+  "gts_layers": 4,
+  "gts_depth": 6,
+  "gts_state": 16,
+  "gts_trees": 4,
+  "gts_heads": 1,
+  "gts_route_ste": true,
+  "gts_route_temp": 1.0,
+  "bank_trees": 32,
+  "bank_heads": 8,
+  "bank_state": 16,
+  "gts_act_bits": 8,
+  "gts_act": "gelu",
+  "gts_read": false,
+  "gts_write_key": false,
+  "trunk_inner": 64,
+  "trunk_state": 16,
+  "trunk_headdim": 16,
+  "m2_layers": 5,
+  "m2_act_bits": null,
+  "m2_state": 32,
+  "m2_headdim": 32,
+  "ternary_group": 128,
+  "steps": 3600,
+  "batch_size": 16,
+  "seq_len": 128,
+  "lr": 0.004,
+  "warmup": 100,
+  "weight_decay": 0.01,
+  "seed": 0,
+  "eval_every": 600,
+  "count_only": false
+ }
+}

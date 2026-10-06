@@ -1,0 +1,15 @@
+__version__ = "2.3.2.post1"
+
+# GTS fork: the Mamba blocks need the compiled CUDA/Triton kernels. Guard them so that the
+# pure-PyTorch GTS modules import on a CPU-only machine.
+try:
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
+    from mamba_ssm.modules.mamba_simple import Mamba
+    from mamba_ssm.modules.mamba2 import Mamba2
+    from mamba_ssm.modules.mamba3 import Mamba3
+    from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
+except Exception:  # pragma: no cover - ImportError without the kernels; other errors from a partial triton install
+    pass
+
+from mamba_ssm.modules.gts import GTS, GTSMixed
+from mamba_ssm.models.gts_encoder import GTSConfig, GTSEncoder, GTSForMaskedLM

@@ -1,0 +1,9 @@
+*__pycache__/
+*.egg-info/
+build/
+**.so
+*.hip
+*_hip.*
+kernel/gts_kernel
+kernel/ar_bench
+runs/

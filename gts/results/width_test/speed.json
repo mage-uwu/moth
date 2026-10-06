@@ -1,0 +1,41 @@
+[
+ {
+  "width": 128,
+  "mixed": {
+   "params": 588785,
+   "us_per_token": 7.7,
+   "top1_agree": 256
+  },
+  "mamba2": {
+   "params": 556153,
+   "us_per_token": 46.3,
+   "top1_agree": 256
+  }
+ },
+ {
+  "width": 256,
+  "mixed": {
+   "params": 2225905,
+   "us_per_token": 12.8,
+   "top1_agree": 256
+  },
+  "mamba2": {
+   "params": 2103921,
+   "us_per_token": 157.0,
+   "top1_agree": 256
+  }
+ },
+ {
+  "width": 512,
+  "mixed": {
+   "params": 8645873,
+   "us_per_token": 26.2,
+   "top1_agree": 256
+  },
+  "mamba2": {
+   "params": 8179297,
+   "us_per_token": 636.1,
+   "top1_agree": 256
+  }
+ }
+]

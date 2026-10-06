@@ -1,0 +1,51 @@
+{
+ "arch": "mamba2",
+ "width": 128,
+ "params": 581050,
+ "steps": 600,
+ "val_loss": 1.3989529373079372,
+ "masked_accuracy": 0.5911266120528834,
+ "ms_per_step": 798.9629516933318,
+ "curve": [
+  [
+   0,
+   5.556715854193349,
+   0.002189958634114689,
+   NaN
+  ],
+  [
+   300,
+   1.6645107924459586,
+   0.517235785546273,
+   2.2865762599309285
+  ],
+  [
+   600,
+   1.3989529373079372,
+   0.5911266120528834,
+   1.4244320408503215
+  ]
+ ],
+ "args": {
+  "mode": "train",
+  "arch": "mamba2",
+  "width": 128,
+  "widths": [
+   128,
+   256,
+   512
+  ],
+  "repeats": 3,
+  "data": "/home/claude/mamba-gts/data/tinyshakespeare.txt",
+  "out": "/home/claude/width_runs/w128_mamba2",
+  "steps": 600,
+  "eval_every": 300,
+  "batch_size": 16,
+  "seq_len": 128,
+  "mlm_prob": 0.15,
+  "lr": 0.004,
+  "warmup": 100,
+  "seed": 0,
+  "device": "cpu"
+ }
+}

@@ -1,0 +1,76 @@
+{
+ "arch": "gts",
+ "params": 557445,
+ "mixer_params": 548420,
+ "steps": 1200,
+ "val_loss": 1.9455252051353455,
+ "val_bits_per_char": 2.8067995653732463,
+ "train_loss": 1.8470845848321915,
+ "ms_per_step": 832.7263689258338,
+ "zero_ratio": 0.28263427317142487,
+ "curve": [
+  [
+   0,
+   4.191748249530792,
+   NaN
+  ],
+  [
+   300,
+   2.1975092113018038,
+   2.657074685096741
+  ],
+  [
+   600,
+   2.0538454324007036,
+   2.0615527244408924
+  ],
+  [
+   900,
+   1.9906736224889756,
+   1.9301685587565105
+  ],
+  [
+   1200,
+   1.9455252051353455,
+   1.8612426737944285
+  ]
+ ],
+ "tree_ops_per_token_per_layer": 8368,
+ "args": {
+  "data": "/home/claude/tinyshakespeare.txt",
+  "arch": "gts",
+  "out": "/home/claude/ar_runs/gts_ste",
+  "d_model": 128,
+  "gts_layers": 4,
+  "gts_depth": 8,
+  "gts_state": 16,
+  "gts_trees": 1,
+  "gts_heads": 1,
+  "gts_route_ste": true,
+  "gts_route_temp": 1.0,
+  "bank_trees": 32,
+  "bank_heads": 8,
+  "bank_state": 16,
+  "gts_act_bits": null,
+  "gts_act": "gelu",
+  "gts_read": false,
+  "gts_write_key": false,
+  "trunk_inner": 64,
+  "trunk_state": 16,
+  "trunk_headdim": 16,
+  "m2_layers": 5,
+  "m2_act_bits": null,
+  "m2_state": 32,
+  "m2_headdim": 32,
+  "ternary_group": 128,
+  "steps": 1200,
+  "batch_size": 16,
+  "seq_len": 128,
+  "lr": 0.002,
+  "warmup": 100,
+  "weight_decay": 0.01,
+  "seed": 0,
+  "eval_every": 300,
+  "count_only": false
+ }
+}

@@ -1,0 +1,7 @@
+# The GTS code needs only these. Upstream Mamba's GPU kernels are optional and not required.
+torch>=2.2
+numpy
+pytest
+# Only for scripts/prepare_fineweb.py:
+# datasets
+# tiktoken
