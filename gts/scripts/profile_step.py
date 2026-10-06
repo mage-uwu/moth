@@ -19,7 +19,10 @@ import lm_run  # noqa: E402
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--arch", choices=["mixed", "mamba2"], default="mixed")
+    p.add_argument("--arch", choices=["mixed", "mamba2", "bert"], default="mixed",
+                   help="bert: the bidirectional mixed forest as a masked LM (GTSForMaskedLM), 15%% of positions labelled")
+    p.add_argument("--route-ste", action="store_true", help="bert: routing gradient on the deep trees (the encoder's default is off)")
+    p.add_argument("--full-head", action="store_true", help="bert: score every position, not only the labelled ones")
     p.add_argument("--seq-len", type=int, default=512)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--no-scan-kernel", action="store_true")
@@ -36,7 +39,16 @@ def main():
     args = argparse.Namespace(arch=a.arch, **d)
     torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
     torch.manual_seed(0)
-    model = lm_run.build(args, 50257).cuda()
+    if a.arch == "bert":
+        from mamba_ssm.models.gts_encoder import GTSConfig, GTSForMaskedLM
+
+        model = GTSForMaskedLM(GTSConfig(d_model=1024, n_layer=27, vocab_size=30522, mixer="mixed", bank_trees=32, bank_heads=8,
+                                         bank_state=16, deep_trees=4, deep_depth=10, ternary=True, act_bits=8, causal=False,
+                                         route_ste=a.route_ste)).cuda()
+        model.layers = model.backbone.layers
+        print(f"bert: {sum(q.numel() for q in model.parameters()) / 1e6:.1f}M parameters")
+    else:
+        model = lm_run.build(args, 50257).cuda()
     for m in model.modules():
         if a.no_scan_kernel and hasattr(m, "scan_kernel"):
             m.scan_kernel = False
@@ -50,12 +62,16 @@ def main():
         import mamba_ssm.modules.ternary as T
 
         T._FUSED = False
-    x = torch.randint(0, 50257, (a.batch_size, a.seq_len), device="cuda")
+    x = torch.randint(1, 30522 if a.arch == "bert" else 50257, (a.batch_size, a.seq_len), device="cuda")
+    labels = torch.where(torch.rand(x.shape, device="cuda") < 0.15, x, torch.full_like(x, -100))
 
     def step():
         opt.zero_grad(set_to_none=True)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.amp):
-            loss = lm_run.forward(model, x, x, not a.no_checkpoint)[1]
+            if a.arch == "bert":
+                loss = model(x, labels=labels, labelled_only=not a.full_head).loss
+            else:
+                loss = lm_run.forward(model, x, x, not a.no_checkpoint)[1]
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
@@ -68,7 +84,7 @@ def main():
         step()
     torch.cuda.synchronize()
     dt = (time.perf_counter() - t) / 3
-    print(f"{a.arch}, {a.batch_size} x {a.seq_len} tokens, scan {not a.no_scan_kernel}, route kernel {not a.no_route_kernel}, "
+    print(f"{a.arch}{' route_ste' if a.route_ste else ''}{' full head' if a.full_head else ''}, {a.batch_size} x {a.seq_len} tokens, scan {not a.no_scan_kernel}, route kernel {not a.no_route_kernel}, "
           f"checkpoint {not a.no_checkpoint}, amp {a.amp}, fused adam {a.fused_adam}, compile {a.compile} {a.compile_mode or ''}, fused quant {not a.no_fused_quant}: {dt * 1e3:.0f} ms per step = {a.batch_size * a.seq_len / dt:,.0f} tokens/s, "
           f"peak memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GB")
     from torch.profiler import ProfilerActivity, profile

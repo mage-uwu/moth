@@ -65,3 +65,23 @@ def test_mixed_deep_trees_use_route_kernel():
     y = m(u)
     m.deep.route_kernel = False
     assert torch.allclose(y, m(u), atol=1e-5)
+
+
+@pytest.mark.parametrize("depth,n_trees,act", [(4, 2, "gelu"), (6, 3, "linear")])
+def test_route_kernel_without_ste_matches_plain_walk(depth, n_trees, act):
+    """route_ste=False: the kernels against the original walk-and-scatter path (FFF routing, no branch gradient)."""
+    torch.manual_seed(0)
+    kw = dict(depth=depth, n_trees=n_trees, act=act, use_context=False, dense_walk=True, d_conv=3, causal=False)
+    a, b = GTS(32, route_kernel=True, **kw).to(DEV), GTS(32, route_kernel=False, **kw).to(DEV)
+    b.load_state_dict(a.state_dict())
+    u, g = torch.randn(2, 30, 32, device=DEV), torch.randn(2, 30, 32, device=DEV)
+    mask = torch.ones(2, 30, device=DEV)
+    mask[0, 25:] = 0
+    ua, ub = u.clone().requires_grad_(), u.clone().requires_grad_()
+    ya, yb = a(ua, attention_mask=mask), b(ub, attention_mask=mask)
+    assert torch.allclose(ya, yb, atol=1e-5)
+    (ya * g).sum().backward()
+    (yb * g).sum().backward()
+    assert torch.allclose(ua.grad, ub.grad, atol=1e-5 * (1 + ub.grad.abs().max().item()))
+    for (name, pa), pb in zip(a.named_parameters(), b.parameters()):
+        assert torch.allclose(pa.grad, pb.grad, atol=1e-5 * (1 + pb.grad.abs().max().item())), name

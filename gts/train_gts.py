@@ -116,7 +116,7 @@ def train(model, corpus, args, teacher=None):
         inputs, labels = corpus.batch("train", args.batch_size, args.seq_len, args.mlm_prob, g)
         inputs, labels = inputs.to(args.device), labels.to(args.device)
         if teacher is None:
-            loss = model(inputs, labels=labels).loss
+            loss = model(inputs, labels=labels, labelled_only=True).loss
             info = {}
         else:
             info = qat_loss(model, teacher, inputs, labels, alpha=args.alpha, temperature=args.temperature, beta=args.beta)

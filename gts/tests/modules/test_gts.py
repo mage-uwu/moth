@@ -230,3 +230,14 @@ def test_conv_shifted_matches_conv1d(causal, d_conv):
     u = torch.randn(2, 11, 16)
     want = m.conv1d(u.transpose(1, 2))[..., : u.shape[1]].transpose(1, 2)
     assert torch.allclose(m._conv_shifted(u), want, atol=1e-5)
+
+
+def test_masked_lm_labelled_only_same_loss():
+    torch.manual_seed(0)
+    model = GTSForMaskedLM(GTSConfig(d_model=32, n_layer=2, vocab_size=50, depth=3, d_state=8))
+    ids = torch.randint(1, 50, (2, 20))
+    labels = torch.full_like(ids, -100)
+    labels[:, ::4] = ids[:, ::4]
+    full, part = model(ids, labels=labels), model(ids, labels=labels, labelled_only=True)
+    assert torch.allclose(full.loss, part.loss, atol=1e-6)
+    assert torch.allclose(full.logits[labels != -100], part.logits, atol=1e-6)

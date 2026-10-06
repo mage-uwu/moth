@@ -365,13 +365,14 @@ class GTS(nn.Module):
     def _context_scan(self, B, C_fwd, C_bwd, a, src):
         """Depth 0: slot = tree, and a head's trees are contiguous, so what the tokens write is (b, l, heads, trees per
         head) and each head is one SSD channel group on its own clock."""
-        from mamba_ssm.ops.gts_scan import gts_scan
+        from mamba_ssm.ops.gts_scan import gts_scan, gts_scan_bi
 
         batch, length, _ = src.shape
         X = src.reshape(batch, length, self.n_heads, self.n_trees // self.n_heads)
-        ctx = gts_scan(C_fwd, B, X, a)  # a: (b, l, heads), one clock per head
-        if not self.causal:
-            ctx = ctx + gts_scan(C_bwd, B, X, a, reverse=True)  # decay a[t] + ... + a[s-1] from s > t
+        if self.causal:
+            ctx = gts_scan(C_fwd, B, X, a)  # a: (b, l, heads), one clock per head
+        else:  # both directions in the same launches; the backward one decays a[t] + ... + a[s-1] from s > t
+            ctx = gts_scan_bi(C_fwd, C_bwd, B, X, a)
         return ctx.reshape(batch, length, self.n_trees).to(src.dtype)
 
     def _decay_weights(self, B, C_fwd, C_bwd, a):
@@ -430,8 +431,9 @@ class GTS(nn.Module):
         return HAVE_TRITON and (self.route_kernel or (self.route_kernel is None and x.is_cuda))
 
     def _forward_route_ste(self, x, mask, return_paths):
-        """route_ste: every node's logit from one matmul. The walk runs only if the paths are wanted; stateless trees
-        on CUDA use the Triton kernels, which never form the path weights."""
+        """Every node's logit from one matmul. The walk runs only if the paths are wanted; stateless trees on CUDA use
+        the Triton kernels, which never form the path weights. Also stateless trees without route_ste on CUDA: the
+        same kernels, with no gradient through the branch decisions."""
         assert self.dense_walk and not self.read_state, "route_ste needs the dense training path and no state read"
         want = return_paths or self.capture_paths
         batch, length, _ = x.shape
@@ -449,7 +451,7 @@ class GTS(nn.Module):
                 bias = F.pad(bias, (0, pad)) if bias is not None else None
             all_logits = F.linear(x, w_in, bias)  # (b, l, total nodes + pad)
             out, nodes = route_ste_out(all_logits.reshape(batch * length, -1), w_out, self.n_trees, self.depth,
-                                       self.act, self.route_ste_temp, want, n_nodes=self.n_nodes)
+                                       self.act, self.route_ste_temp, want, n_nodes=self.n_nodes, ste=self.route_ste)
             out = out.view(batch, length, -1).to(x.dtype)
             all_logits = all_logits[..., :total]
             if want:
@@ -487,7 +489,7 @@ class GTS(nn.Module):
             mask = attention_mask.to(dtype=u.dtype)
 
         x = self._local_mix(u, mask)
-        if self.route_ste:
+        if self.route_ste or (self.dense_walk and self._use_route_kernel(x)):
             return self._forward_route_ste(x, mask, return_paths)
         nodes, logits = self._walk(x)
         if self.capture_paths:

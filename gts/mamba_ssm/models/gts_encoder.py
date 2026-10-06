@@ -120,10 +120,25 @@ class GTSForMaskedLM(nn.Module):
             self.lm_head.weight = self.backbone.embedding.weight
         nn.init.zeros_(self.lm_head.bias)
 
-    def forward(self, input_ids, attention_mask=None, labels=None):
+    def forward(self, input_ids, attention_mask=None, labels=None, labelled_only=False):
+        """``labelled_only`` (with labels): score only the positions that carry a label (about 15% under masked-LM
+        training) and return their logits, (n_labelled, vocab), in row-major order of the batch. Same loss as the
+        full head, for a fraction of its work."""
         hidden = self.backbone(input_ids, attention_mask=attention_mask)
-        logits = self.lm_head(hidden)
+        if labelled_only and labels is not None:
+            sel = labels != -100
+            hidden, labels = hidden[sel], labels[sel]
+        logits = self._head(hidden)
         loss = None
         if labels is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
+            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)).float(), labels.reshape(-1), ignore_index=-100)
         return MaskedLMOutput(logits=logits, loss=loss)
+
+    def _head(self, hidden):
+        """lm_head, with the vocabulary padded to a multiple of 64 rows on a GPU (30,522 rows make the GEMM
+        misaligned) and the logits sliced back."""
+        w, b = self.lm_head.weight, self.lm_head.bias
+        vocab, pad = w.shape[0], -w.shape[0] % 64
+        if pad and hidden.is_cuda:
+            return F.linear(hidden, F.pad(w, (0, 0, 0, pad)), F.pad(b, (0, pad)))[..., :vocab]
+        return F.linear(hidden, w, b)

@@ -14,7 +14,7 @@ if not torch.cuda.is_available():
 triton = pytest.importorskip("triton")
 
 from mamba_ssm.modules.gts import GTS, GTSMixed  # noqa: E402
-from mamba_ssm.ops.gts_scan import gts_scan, gts_scan_reference  # noqa: E402
+from mamba_ssm.ops.gts_scan import gts_scan, gts_scan_bi, gts_scan_reference  # noqa: E402
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -30,6 +30,19 @@ def test_scan_matches_reference(b, l, h, p, n, chunk, reverse, excl):
     ref, out = gts_scan_reference(C, B, X, a, reverse, excl), gts_scan(C, B, X, a, reverse, excl, chunk, "ieee")
     g = torch.randn_like(ref)
     for x, y in zip((out,) + torch.autograd.grad((out * g).sum(), (C, B, X, a)), (ref,) + torch.autograd.grad((ref * g).sum(), (C, B, X, a))):
+        assert torch.allclose(x, y, rtol=1e-4, atol=1e-4 * y.abs().max().item())
+
+
+@pytest.mark.parametrize("l,chunk", [(64, 16), (77, 32), (20, 64)])
+def test_bidirectional_scan_matches_reference(l, chunk):
+    torch.manual_seed(0)
+    Cf, Cb, B = (torch.randn(2, l, 16, device=DEV, requires_grad=True) for _ in range(3))
+    X = torch.randn(2, l, 3, 4, device=DEV, requires_grad=True)
+    a = (-torch.rand(2, l, 3, device=DEV) * 0.5).requires_grad_()
+    ref = gts_scan_reference(Cf, B, X, a) + gts_scan_reference(Cb, B, X, a, reverse=True)
+    out = gts_scan_bi(Cf, Cb, B, X, a, chunk, "ieee")
+    g = torch.randn_like(ref)
+    for x, y in zip((out,) + torch.autograd.grad((out * g).sum(), (Cf, Cb, B, X, a)), (ref,) + torch.autograd.grad((ref * g).sum(), (Cf, Cb, B, X, a))):
         assert torch.allclose(x, y, rtol=1e-4, atol=1e-4 * y.abs().max().item())
 
 

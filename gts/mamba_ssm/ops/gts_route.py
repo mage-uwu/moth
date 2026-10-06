@@ -19,7 +19,8 @@ pi level by level with stack and cat and evaluates the activation, the sigmoid a
 
 Two Triton kernels walk the trees in registers, a block of tokens per program and one tree per program column:
 _route_fwd writes A (and the path, if asked for), _route_bwd writes dL. The matmuls are PyTorch's.
-Only stateless trees (no context) are covered; ``GTS`` falls back to the dense form otherwise.
+Only stateless trees (no context) are covered; ``GTS`` falls back to the dense form otherwise. Without route_ste
+the same kernels serve plain FFF routing: the forward pass is identical and the backward drops the chain sums.
 """
 
 import torch
@@ -66,7 +67,7 @@ if HAVE_TRITON:
 
     @triton.jit
     def _route_bwd(Lp, Gp, DLp, n_tok, s_l, s_g, s_d, inv_temp,
-                   N_NODES: tl.constexpr, DEPTH: tl.constexpr, ACT: tl.constexpr, BLOCK: tl.constexpr):
+                   N_NODES: tl.constexpr, DEPTH: tl.constexpr, ACT: tl.constexpr, BLOCK: tl.constexpr, STE: tl.constexpr):
         tok = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         tree = tl.program_id(1)
         ok = tok < n_tok
@@ -87,7 +88,7 @@ if HAVE_TRITON:
             done += _coef(lg, ACT) * gk
             d = _dcoef(lg, ACT) * gk
             right = lg > 0
-            if k < DEPTH:
+            if STE and k < DEPTH:  # without route_ste, hard branches get no gradient (FFF): only coef' * g
                 on = total - done  # the path below this node
                 s = 2 * cur + 2 - right.to(tl.int32)  # the other child
                 alt = tl.zeros((BLOCK,), dtype=tl.float32)
@@ -108,7 +109,7 @@ def _grid(n_tok, n_trees, block):
 class _RouteSTE(torch.autograd.Function):
     @staticmethod
     @torch.amp.custom_fwd(device_type="cuda")
-    def forward(ctx, L, W, n_trees, n_nodes, depth, act, temp, want_nodes):
+    def forward(ctx, L, W, n_trees, n_nodes, depth, act, temp, want_nodes, ste):
         n_tok = L.shape[0]
         L = L.contiguous()
         A = torch.zeros_like(L)
@@ -117,7 +118,7 @@ class _RouteSTE(torch.autograd.Function):
         _route_fwd[_grid(n_tok, n_trees, block)](L, A, nodes, n_tok, L.stride(0), A.stride(0), n_trees,
                                                  N_NODES=n_nodes, DEPTH=depth, ACT=act, BLOCK=block, STORE_NODES=want_nodes)
         ctx.save_for_backward(L, W)
-        ctx.cfg = n_trees, n_nodes, depth, act, temp
+        ctx.cfg = n_trees, n_nodes, depth, act, temp, ste
         out = A @ W
         if want_nodes:
             ctx.mark_non_differentiable(nodes)
@@ -127,7 +128,7 @@ class _RouteSTE(torch.autograd.Function):
     @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, dout, _dnodes):
         L, W = ctx.saved_tensors
-        n_trees, n_nodes, depth, act, temp = ctx.cfg
+        n_trees, n_nodes, depth, act, temp, ste = ctx.cfg
         n_tok = L.shape[0]
         dout = dout.contiguous()
         block = 128
@@ -142,18 +143,19 @@ class _RouteSTE(torch.autograd.Function):
             G = dout @ W.t()
             dL = torch.zeros_like(L)
             _route_bwd[_grid(n_tok, n_trees, block)](L, G, dL, n_tok, L.stride(0), G.stride(0), dL.stride(0), 1.0 / temp,
-                                                     N_NODES=n_nodes, DEPTH=depth, ACT=act, BLOCK=block)
-        return dL, dW, None, None, None, None, None, None
+                                                     N_NODES=n_nodes, DEPTH=depth, ACT=act, BLOCK=block, STE=ste)
+        return dL, dW, None, None, None, None, None, None, None
 
 
-def route_ste_out(L, W, n_trees, depth, act="gelu", temp=1.0, want_nodes=False, n_nodes=None):
+def route_ste_out(L, W, n_trees, depth, act="gelu", temp=1.0, want_nodes=False, n_nodes=None, ste=True):
     """L: (tokens, trees * nodes) every node's logit, in any float dtype (the kernels work in float32; under bf16
     autocast the (tokens x nodes) buffers stay bf16 and the matmuls run in bf16); W: (trees * nodes, d) output rows. Returns (out, nodes): out is
     (tokens, d), the stateless trees' output with the straight-through routing gradient; nodes is (tokens, trees,
     depth + 1) int32 global node ids along each path if ``want_nodes``, else None. ``act`` is "gelu", "split"
-    (the same with no context) or "linear"."""
+    (the same with no context) or "linear". ``ste=False`` is plain FFF routing: the same forward pass, and hard
+    branches get no gradient."""
     if not HAVE_TRITON:
         raise RuntimeError("route_ste_out needs triton")
     code = {"gelu": 0, "split": 0, "linear": 1}[act]
     n_nodes = n_nodes or L.shape[1] // n_trees  # L and W may carry padding columns/rows after the trees
-    return _RouteSTE.apply(L, W, n_trees, n_nodes, depth, code, float(temp), want_nodes)
+    return _RouteSTE.apply(L, W, n_trees, n_nodes, depth, code, float(temp), want_nodes, bool(ste))
