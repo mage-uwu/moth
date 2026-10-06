@@ -4,6 +4,7 @@ set -x
 O=/workspace/out; tag=$(git rev-parse --short HEAD)
 python3 -m pip install -q einops packaging 2>&1 | tail -1
 python3 -c "import torch, triton; print(torch.__version__, triton.__version__, torch.cuda.get_device_name(0))"
+python3 scripts/diag_scan.py 2>&1 | tee $O/diag_$tag.log
 python3 -m pytest tests/modules/test_gts_scan.py -q -rf --tb=line 2>&1 | tail -25 | tee $O/bench_$tag.log
 python3 scripts/bench_scan.py --layer --profile 2>&1 | tee -a $O/bench_$tag.log
 echo "=== BENCH DONE $(date -u +%T) ===" | tee -a $O/bench_$tag.log
