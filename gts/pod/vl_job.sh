@@ -10,7 +10,8 @@ mkdir -p $O $R
 for f in result.json backbone.pt binarized.pt checkpoint.pt; do ln -sf $R/$f $O/vl_$f; done
 apt-get update -qq && apt-get install -y -qq p7zip-full >/dev/null
 python3 -m pip install -q einops packaging tokenizers huggingface_hub pyarrow pillow 2>&1 | tail -1
-python3 -c "import torch, torchvision; print(torch.__version__, torchvision.__version__, torch.cuda.get_device_name(0))"
+for i in $(seq 1 12); do python3 -c "import torch, torchvision; print(torch.__version__, torchvision.__version__, torch.cuda.get_device_name(0))" && break; echo "CUDA not ready (try $i)"; sleep 10; done
+python3 -c "import torch; torch.zeros(1).cuda()" || { echo "NO CUDA: stopping"; exit 1; }
 nproc; free -g | head -2; df -h /root | tail -1
 LM=/root/lm/binarized.pt; mkdir -p /root/lm
 cat checkpoints/bert110m/phase2/binarized.pt.part* > $LM
