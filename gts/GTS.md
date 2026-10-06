@@ -497,3 +497,22 @@ rounding also produce from a 1e-7 nudge of the weights.
 - Wide trunk nodes. Every node carries a scalar value; `n_trees > 1` is the only way to widen.
 - A matched baseline for the 110M encoder (a BERT or Mamba-2 encoder trained on the same tokens), so its 2.713 has
   nothing to compare against yet.
+
+## GTS-Uni: depth recurrence (masked LM and autoregressive)
+
+The whole stack runs `loops` times with shared weights (Universal-Transformer style). Passes after the first add a
+learned per-pass embedding and add their update `gate * (stack(x + e) - (x + e))` through a per-channel gate that
+starts at zero, so a looped model built from one-pass weights computes exactly what they do (tested for both). Each
+training step samples the pass count (default 1/2/3 passes at 10/20/70%), so the same weights run at any depth: one
+pass at the one-pass model's speed, more for quality, chosen per query.
+
+- Masked LM (`GTSConfig(loops, latent_tokens)`, `scripts/bert_pretrain.py --loops`): from pass 2, `latent_tokens`
+  learned scratch vectors sit after `[CLS]`; the bidirectional scan lets each pass write a summary into them and the
+  next pass read it back. `kernel/enc_bench.c` format 8 runs the passes (4 threads, 512 tokens: 27K, 12.9K, 7.2K
+  tokens/s at 1, 2, 3 passes).
+- Autoregressive (`TinyLM(loops=...)`, `scripts/ar_pretrain.py --loops`): no latent tokens (in a causal model, tokens
+  at the start see only the start). `kernel/ar_bench.c` format 7 keeps one recurrent state per pass and layer, sharing
+  the weights; checked against PyTorch to 1e-5 on the logits.
+- Warm start: `--init-from` a one-pass checkpoint, with `--new-param-lr` for the pass embeddings, gates (and latents).
+  A first masked-LM try with one learning rate of 3e-4 for everything, from a fresh optimizer, knocked GTS3 off its
+  minimum (validation 2.615 -> 2.78); the run in progress uses 3e-5 for the shared weights and 1e-3 for the new ones.

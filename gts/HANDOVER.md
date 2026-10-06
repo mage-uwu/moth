@@ -166,6 +166,7 @@ so a given seed sees the same batches on any device.
 | `results/fineweb_0.5b/`, `results/scan_bench_a100.log` | The 0.5B results and the scan benchmark. |
 | `kernel/gts_kernel.c` | The first, bidirectional float kernel. Superseded by `ar_bench.c`; kept for the width-768 timing in `GTS.md`. |
 | `checkpoints/bert110m/`, `scripts/bert_pretrain.py`, `kernel/enc_bench.c` | The 110M BERT-style GTS masked LM: checkpoints by phase (README there; the best, phase 3, is named **GTS3**), its training script (`--resume`, `--teacher`), and its multithreaded CPU inference kernel. |
+| `scripts/ar_pretrain.py`, `pod/ar_uni_job.sh` | The causal GTS LM (TinyLM, mixed forest) with the masked-LM path's conveniences, and GTS-Uni-AR (`--loops`): time-fitted schedule, resume, warm start, split learning rates, binarized checkpoints, samples, export to `kernel/ar_bench.c` (format 7 decodes the passes, each with its own recurrent state). |
 | `vision/` | Side quest: a ~38M ternary GTS vision backbone and a sidecar into GTS-MLM. `vision/README.md` has the status, data, licensing and next steps; the model is `mamba_ssm/models/gts_vision.py`. |
 | `tests/modules/test_gts*.py` | The tests. |
 | `results/` | Result JSON and samples for the runs in the table above. |

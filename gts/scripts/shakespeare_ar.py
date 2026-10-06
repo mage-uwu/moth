@@ -20,6 +20,7 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint
 import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -110,21 +111,49 @@ class Block(nn.Module):
 
 
 class TinyLM(nn.Module):
-    """The shared wrapper. Only ``make_mixer`` differs between the two models."""
+    """The shared wrapper. Only ``make_mixer`` differs between the two models.
 
-    def __init__(self, vocab, d_model, n_layer, make_mixer):
+    ``loops`` > 1 makes it a GTS-Uni-AR: the whole stack runs ``loops`` times with the same weights; passes after the
+    first add a learned per-pass embedding and add their update through a per-channel gate initialised to zero, so a
+    fresh looped model computes exactly what its one-pass weights do. Fewer passes can be chosen at run time. (No latent
+    tokens, unlike the masked-LM GTS-Uni: in a causal model, tokens at the start see only the start.)"""
+
+    def __init__(self, vocab, d_model, n_layer, make_mixer, loops=1):
         super().__init__()
         self.embedding = nn.Embedding(vocab, d_model)
         nn.init.normal_(self.embedding.weight, std=0.02)
         self.layers = nn.ModuleList([Block(d_model, make_mixer()) for _ in range(n_layer)])
         self.norm_f = RMSNorm(d_model)
         self.head_bias = nn.Parameter(torch.zeros(vocab))
+        self.loops = loops
+        if loops > 1:
+            self.loop_embed = nn.Parameter(torch.zeros(loops - 1, d_model))
+            self.loop_gate = nn.Parameter(torch.zeros(loops - 1, d_model))
+            for q in (self.loop_embed, self.loop_gate):
+                q._no_weight_decay = True
 
-    def forward(self, ids, targets=None):
-        x = self.embedding(ids)
+    def _stack(self, x, checkpoint_layers=False):
         for layer in self.layers:
-            x = layer(x)
-        logits = F.linear(self.norm_f(x), self.embedding.weight, self.head_bias)
+            x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False) if checkpoint_layers else layer(x)
+        return x
+
+    def hidden(self, ids, loops=None, checkpoint_layers=False, checkpoint_loops=False):
+        """Final normed states. ``checkpoint_layers`` recomputes every block in the backward pass, ``checkpoint_loops``
+        every pass after the first."""
+        n = self.loops if loops is None else loops
+        assert 1 <= n <= self.loops
+        x = self._stack(self.embedding(ids), checkpoint_layers)
+        for t in range(n - 1):
+            xin = x + self.loop_embed[t]
+            if checkpoint_loops and torch.is_grad_enabled():
+                y = torch.utils.checkpoint.checkpoint(self._stack, xin, checkpoint_layers, use_reentrant=False)
+            else:
+                y = self._stack(xin, checkpoint_layers)
+            x = x + self.loop_gate[t] * (y - xin)
+        return self.norm_f(x)
+
+    def forward(self, ids, targets=None, loops=None):
+        logits = F.linear(self.hidden(ids, loops), self.embedding.weight, self.head_bias)
         if targets is None:
             return logits
         return logits, F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
@@ -147,7 +176,7 @@ def build(arch, vocab, args):
         bank = lambda: GTS(args.d_model, depth=0, n_trees=args.bank_trees, n_heads=args.bank_heads, d_state=args.bank_state, act="split", **common)
         deep = lambda: GTS(args.d_model, depth=args.gts_depth, n_trees=args.gts_trees, use_context=False, dense_walk=True,
                            route_ste=args.gts_route_ste, route_ste_temp=args.gts_route_temp, **common)
-        return TinyLM(vocab, args.d_model, args.gts_layers, lambda: Hybrid(bank(), deep()))
+        return TinyLM(vocab, args.d_model, args.gts_layers, lambda: Hybrid(bank(), deep()), loops=getattr(args, "loops", 1))
     if arch == "hybrid":
         trunk = lambda: Mamba2Ref(args.d_model, d_state=args.trunk_state, d_inner=args.trunk_inner,
                                   headdim=args.trunk_headdim, ternary=True, ternary_group=args.ternary_group)
@@ -209,8 +238,10 @@ def export(model, arch, path, test_ids):
         mix = model.layers[0].mixer
         if arch == "gts":
             dims = [2, vocab, d, len(model.layers)] + _gts_dims(mix) if not mix.act_bits else [4, vocab, d, len(model.layers)] + _gts_dims(mix) + [mix.act_bits]
-        elif arch == "mixed":  # format 6: two GTS mixers per layer, ten ints each
+        elif arch == "mixed":  # format 6: two GTS mixers per layer, ten ints each; 7: the same looped (GTS-Uni-AR)
             dims = [6, vocab, d, len(model.layers)] + sum(([*_gts_dims(m), m.act_bits or 0, int(m.use_context)] for m in (mix.tree, mix.trunk)), [])
+            if getattr(model, "loops", 1) > 1:
+                dims = [7] + dims[1:] + [model.loops]
         elif arch == "hybrid":
             dims = [3, vocab, d, len(model.layers)] + _gts_dims(mix.tree) + _m2_dims(mix.trunk)
         else:
@@ -224,6 +255,8 @@ def export(model, arch, path, test_ids):
                        else _gts_tensors(m.tree) + (_gts_tensors(m.trunk) if arch == "mixed" else _m2_tensors(m.trunk)))
             for t in tensors:
                 w(f, t)
+        if getattr(model, "loops", 1) > 1:
+            w(f, model.loop_embed); w(f, model.loop_gate)
         f.write(struct.pack("i", len(test_ids)))
         f.write(test_ids.numpy().astype(np.int32).tobytes())
         w(f, model(test_ids.unsqueeze(0).to(model.head_bias.device))[0])

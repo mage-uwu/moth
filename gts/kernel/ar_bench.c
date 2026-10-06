@@ -313,6 +313,17 @@ static GLayer *gts_load(int d, int depth, int N, int kc, int read_state, int wri
     return g;
 }
 
+// The same weights with their own recurrent state (node states, stamps, conv history, clocks): one per extra pass of
+// a looped model. Scratch buffers are shared, since the passes run one after another.
+static GLayer *gts_clone_state(const GLayer *src) {
+    GLayer *g = (GLayer *)xalloc(sizeof(GLayer));
+    *g = *src;
+    g->h = (float *)xalloc((size_t)g->n_nodes * g->N * sizeof(float)); g->stamp = (float *)xalloc(g->n_nodes * sizeof(float));
+    g->visited = (unsigned char *)xalloc(g->n_nodes); g->hist = (float *)xalloc((size_t)(g->kc - 1) * g->d * sizeof(float));
+    memset(g->clock, 0, sizeof(g->clock));
+    return g;
+}
+
 static void gts_reset(GLayer *g) {
     memset(g->visited, 0, g->n_nodes); memset(g->hist, 0, (size_t)(g->kc - 1) * g->d * sizeof(float)); memset(g->clock, 0, sizeof(g->clock));
 }
@@ -526,23 +537,47 @@ static void m2_step(MLayer *m, const float *u, float *out) {
 
 // arch: 0 = GTS (first file format), 1 = Mamba-2, 2 = GTS, 3 = GTS with a Mamba-2 trunk (layers2) beside each tree
 #define IS_M2(a) ((a) == 1 || (a) == 5)
-typedef struct { int arch, V, d, n_layer; float *emb, *head_bias, *normf_w, **norm_w; void **layers, **layers2; float *u, *xn, *o, *o2; double t_mix; } Model;
+// arch 7: arch 6 looped (GTS-Uni-AR): the stack runs `passes` times with shared weights; pass p > 0 has its own
+// recurrent states (lp1/lp2[p]), adds loop_embed[p - 1] and adds its update through the per-channel loop_gate[p - 1].
+#define IS_MIXED(a) ((a) == 6 || (a) == 7)
+typedef struct { int arch, V, d, n_layer, loops, passes; float *emb, *head_bias, *normf_w, **norm_w; void **layers, **layers2; void ***lp1, ***lp2;
+                 float *loop_embed, *loop_gate, *xin, *y; float *u, *xn, *o, *o2; double t_mix; } Model;
 
-static void model_reset(Model *M) { for (int l = 0; l < M->n_layer; l++) { if (!IS_M2(M->arch)) gts_reset((GLayer *)M->layers[l]); else m2_reset((MLayer *)M->layers[l]); if (M->arch == 3) m2_reset((MLayer *)M->layers2[l]); if (M->arch == 6) gts_reset((GLayer *)M->layers2[l]); } }
+static void model_reset(Model *M) {
+    for (int l = 0; l < M->n_layer; l++) {
+        if (!IS_M2(M->arch)) gts_reset((GLayer *)M->layers[l]); else m2_reset((MLayer *)M->layers[l]);
+        if (M->arch == 3) m2_reset((MLayer *)M->layers2[l]);
+        if (IS_MIXED(M->arch)) gts_reset((GLayer *)M->layers2[l]);
+        for (int p = 1; p < M->loops; p++) { gts_reset((GLayer *)M->lp1[p][l]); gts_reset((GLayer *)M->lp2[p][l]); }
+    }
+}
+
+static void stack_step(Model *M, void **L1, void **L2, float *x) {
+    const int d = M->d;
+    for (int l = 0; l < M->n_layer; l++) {
+        rmsnorm(x, M->norm_w[l], M->xn, d);
+        if (!IS_M2(M->arch)) gts_step((GLayer *)L1[l], M->xn, M->o); else m2_step((MLayer *)L1[l], M->xn, M->o);
+        if (M->arch == 3) { m2_step((MLayer *)L2[l], M->xn, M->o2); for (int i = 0; i < d; i++) M->o[i] += M->o2[i]; }
+        if (IS_MIXED(M->arch)) { gts_step((GLayer *)L2[l], M->xn, M->o2); for (int i = 0; i < d; i++) M->o[i] += M->o2[i]; }
+        for (int i = 0; i < d; i++) x[i] += M->o[i];
+    }
+}
 
 static void model_step(Model *M, int tok, float *logits) {
     const int d = M->d;
     memcpy(M->u, M->emb + (size_t)tok * d, d * sizeof(float));
     double t0 = now();
-    for (int l = 0; l < M->n_layer; l++) {
-        rmsnorm(M->u, M->norm_w[l], M->xn, d);
-        if (!IS_M2(M->arch)) gts_step((GLayer *)M->layers[l], M->xn, M->o); else m2_step((MLayer *)M->layers[l], M->xn, M->o);
-        if (M->arch == 3) { m2_step((MLayer *)M->layers2[l], M->xn, M->o2); for (int i = 0; i < d; i++) M->o[i] += M->o2[i]; }
-        if (M->arch == 6) { gts_step((GLayer *)M->layers2[l], M->xn, M->o2); for (int i = 0; i < d; i++) M->o[i] += M->o2[i]; }
-        for (int i = 0; i < d; i++) M->u[i] += M->o[i];
+    stack_step(M, M->layers, M->layers2, M->u);
+    for (int p = 1; p < M->passes; p++) {
+        const float *e = M->loop_embed + (size_t)(p - 1) * d, *g = M->loop_gate + (size_t)(p - 1) * d;
+        for (int i = 0; i < d; i++) M->xin[i] = M->y[i] = M->u[i] + e[i];
+        stack_step(M, M->lp1[p], M->lp2[p], M->y);
+        for (int i = 0; i < d; i++) M->u[i] += g[i] * (M->y[i] - M->xin[i]);
     }
     M->t_mix += now() - t0;
     rmsnorm(M->u, M->normf_w, M->xn, d);
+    // the head (50,257 x d for GPT-2 tokens) is most of a small model's time per token: split it over threads
+#pragma omp parallel for schedule(static) if (M->V >= 4096)
     for (int v = 0; v < M->V; v++) logits[v] = dot(M->emb + (size_t)v * d, M->xn, d) + M->head_bias[v];
 }
 
@@ -668,20 +703,31 @@ int main(int argc, char **argv) {
     g_f = fopen(argv[1], "rb"); if (!g_f) { perror("open"); return 1; }
     Model M; memset(&M, 0, sizeof(M));
     M.arch = rdi(); M.V = rdi(); M.d = rdi(); M.n_layer = rdi();
-    int dims[20] = {0, 0, 0, 0, 1, 1, 0, 1, 0}; const int n_dims = M.arch == 0 ? 3 : M.arch == 1 ? 5 : M.arch == 2 ? 8 : M.arch == 4 ? 9 : M.arch == 5 ? 6 : M.arch == 6 ? 20 : 13; // 6: two GTS mixers per layer // 4: GTS with act_bits, 5: Mamba-2 with act_bits // arch 0: GTS (first format), 1: Mamba-2, 2: GTS with flags
+    int dims[21] = {0, 0, 0, 0, 1, 1, 0, 1, 0}; const int n_dims = M.arch == 0 ? 3 : M.arch == 1 ? 5 : M.arch == 2 ? 8 : M.arch == 4 ? 9 : M.arch == 5 ? 6 : M.arch == 6 ? 20 : M.arch == 7 ? 21 : 13; // 6: two GTS mixers per layer // 4: GTS with act_bits, 5: Mamba-2 with act_bits // arch 0: GTS (first format), 1: Mamba-2, 2: GTS with flags
     for (int i = 0; i < n_dims; i++) dims[i] = rdi();
     M.emb = rdf((size_t)M.V * M.d); M.head_bias = rdf(M.V); M.normf_w = rdf(M.d);
     M.layers = (void **)xalloc(M.n_layer * sizeof(void *)); M.layers2 = (void **)xalloc(M.n_layer * sizeof(void *)); M.norm_w = (float **)xalloc(M.n_layer * sizeof(float *));
     for (int l = 0; l < M.n_layer; l++) {
         M.norm_w[l] = rdf(M.d);
-        M.layers[l] = !IS_M2(M.arch) ? (void *)gts_load(M.d, dims[0], dims[1], dims[2], dims[3], dims[4], dims[5], dims[6], dims[7], M.arch == 4 || M.arch == 6 ? dims[8] : 0, M.arch == 6 ? dims[9] : 1) : (void *)m2_load(M.d, dims[0], dims[1], dims[2], dims[3], dims[4], M.arch == 5 ? dims[5] : 0);
+        M.layers[l] = !IS_M2(M.arch) ? (void *)gts_load(M.d, dims[0], dims[1], dims[2], dims[3], dims[4], dims[5], dims[6], dims[7], M.arch == 4 || IS_MIXED(M.arch) ? dims[8] : 0, IS_MIXED(M.arch) ? dims[9] : 1) : (void *)m2_load(M.d, dims[0], dims[1], dims[2], dims[3], dims[4], M.arch == 5 ? dims[5] : 0);
         if (M.arch == 3) M.layers2[l] = (void *)m2_load(M.d, dims[8], dims[9], dims[10], dims[11], dims[12], 0);
-        if (M.arch == 6) M.layers2[l] = (void *)gts_load(M.d, dims[10], dims[11], dims[12], dims[13], dims[14], dims[15], dims[16], dims[17], dims[18], dims[19]);
+        if (IS_MIXED(M.arch)) M.layers2[l] = (void *)gts_load(M.d, dims[10], dims[11], dims[12], dims[13], dims[14], dims[15], dims[16], dims[17], dims[18], dims[19]);
     }
+    M.loops = M.arch == 7 ? dims[20] : 1;
+    M.lp1 = (void ***)xalloc(M.loops * sizeof(void **)); M.lp2 = (void ***)xalloc(M.loops * sizeof(void **));
+    if (M.loops > 1) {
+        M.loop_embed = rdf((size_t)(M.loops - 1) * M.d); M.loop_gate = rdf((size_t)(M.loops - 1) * M.d);
+        for (int p = 1; p < M.loops; p++) {
+            M.lp1[p] = (void **)xalloc(M.n_layer * sizeof(void *)); M.lp2[p] = (void **)xalloc(M.n_layer * sizeof(void *));
+            for (int l = 0; l < M.n_layer; l++) { M.lp1[p][l] = gts_clone_state((GLayer *)M.layers[l]); M.lp2[p][l] = gts_clone_state((GLayer *)M.layers2[l]); }
+        }
+    }
+    M.passes = M.loops;
     const int T = rdi();
     int *ids = (int *)xalloc(T * sizeof(int)); if (fread(ids, sizeof(int), T, g_f) != (size_t)T) return 1;
     float *ref = rdf((size_t)T * M.V);
     fclose(g_f);
+    M.xin = (float *)xalloc(M.d * sizeof(float)); M.y = (float *)xalloc(M.d * sizeof(float));
     M.u = (float *)xalloc(M.d * sizeof(float)); M.xn = (float *)xalloc(M.d * sizeof(float)); M.o = (float *)xalloc(M.d * sizeof(float)); M.o2 = (float *)xalloc(M.d * sizeof(float));
     float *logits = (float *)xalloc(M.V * sizeof(float));
 
@@ -703,20 +749,25 @@ int main(int argc, char **argv) {
             nll_c += log(zc) + mc - logits[ids[t + 1]]; nll_ref += log(zr) + mr - ref[(size_t)t * M.V + ids[t + 1]];
         }
     }
-    printf("%s  %d layers, width %d\n", IS_M2(M.arch) ? "Mamba-2" : M.arch == 3 ? "GTS + trunk" : M.arch == 6 ? "GTS mixed" : "GTS    ", M.n_layer, M.d);
+    printf("%s  %d layers, width %d\n", IS_M2(M.arch) ? "Mamba-2" : M.arch == 3 ? "GTS + trunk" : M.arch == 6 ? "GTS mixed" : M.arch == 7 ? "GTS-Uni-AR (mixed, looped)" : "GTS    ", M.n_layer, M.d);
+    if (M.loops > 1) printf("  %d passes of the stack with shared weights (the check runs all of them)\n", M.loops);
     printf("  weights: %d tensors packed ternary, %d float32\n", g_packed, g_float);
     printf("  check: max |logit - PyTorch logit| = %.2e over %d tokens, same top-1 on %d; loss on them %.4f (PyTorch %.4f)\n", worst, T, agree, nll_c / (T - 1), nll_ref / (T - 1));
 
-    // 2. timing: a continuous stream, state reset every T tokens
-    double sink = 0; M.t_mix = 0;
-    const double t0 = now();
-    for (long i = 0; i < n_tokens; i++) {
-        if (i % T == 0) model_reset(&M);
-        model_step(&M, ids[i % T], logits);
-        sink += logits[0];
+    // 2. timing: a continuous stream, state reset every T tokens; a looped model at every pass count
+    for (int passes = 1; passes <= M.loops; passes++) {
+        M.passes = passes;
+        double sink = 0; M.t_mix = 0;
+        const double t0 = now();
+        for (long i = 0; i < n_tokens; i++) {
+            if (i % T == 0) model_reset(&M);
+            model_step(&M, ids[i % T], logits);
+            sink += logits[0];
+        }
+        const double dt = now() - t0;
+        if (M.loops > 1) printf("  %d pass%s:", passes, passes > 1 ? "es" : "");
+        printf("  speed: %.1f us per token  (%.0f tokens/s), of which mixers %.1f us  = %.2f us per layer  [%g]\n",
+               dt / n_tokens * 1e6, n_tokens / dt, M.t_mix / n_tokens * 1e6, M.t_mix / n_tokens * 1e6 / M.n_layer / passes, sink);
     }
-    const double dt = now() - t0;
-    printf("  speed: %.1f us per token  (%.0f tokens/s), of which mixers %.1f us  = %.2f us per layer  [%g]\n",
-           dt / n_tokens * 1e6, n_tokens / dt, M.t_mix / n_tokens * 1e6, M.t_mix / n_tokens * 1e6 / M.n_layer, sink);
     return 0;
 }
