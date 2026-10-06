@@ -15,7 +15,8 @@ One kernel serves the forward and both halves of the backward pass. It walks the
 and for each chunk can produce
     O1[t] = sum_s w_ts <Q[t], K[s]> V[s]           (P per head)      forward Y, and dX in the backward pass
     O2[t] = sum_s w_ts <U[t], V[s]> K[s]           (N per head)      dB and dC in the backward pass
-from the same running state S = sum_s w K[s] V[s]^T. The log-decay gradient follows in closed form:
+from the same running state S = sum_s w K[s] V[s]^T. Two schedules: one program per (batch, head) walking its chunks
+(``parallel=False``), or chunk-parallel passes with a short sequential pass in between (the default). The log-decay gradient follows in closed form:
     d cs[t] = <dY[t], Y[t]> - <X[t], dX[t]>        (negated for the reverse direction)
 
 ``gts_scan(C, B, X, cs, reverse)`` is differentiable; ``gts_scan_reference`` is the quadratic PyTorch form it is
@@ -151,6 +152,26 @@ if HAVE_TRITON:
         S = tl.dot(tl.trans(wk), v, input_precision=PREC)
         tl.store(STp + (bh * n_chunks + c) * BLOCK_N * BLOCK_P + n[:, None] * BLOCK_P + p[None, :], S)
 
+
+    @triton.jit
+    def _pass_kernel(CSp, STp, L, H, n_chunks, s_cb, s_cl,
+                     BLOCK_N: tl.constexpr, BLOCK_P: tl.constexpr, CHUNK: tl.constexpr, REVERSE: tl.constexpr):
+        """Between the two parallel passes, one program per (batch, head): turn each chunk's own state into the state
+        entering it, in place: in[c] = exp(end[c-1] - end[c-2]) * in[c-1] + own[c-1], referenced to the end of chunk c-1."""
+        bh = tl.program_id(0)
+        b = bh // H
+        h = bh % H
+        CSp += b * s_cb + h
+        tile = STp + bh * n_chunks * BLOCK_N * BLOCK_P + tl.arange(0, BLOCK_N)[:, None] * BLOCK_P + tl.arange(0, BLOCK_P)[None, :]
+        carry = tl.zeros((BLOCK_N, BLOCK_P), dtype=tl.float32)
+        prev = _cs_end(CSp, 0, L, s_cl, CHUNK, REVERSE)
+        for c in range(0, n_chunks):
+            own = tl.load(tile + c * BLOCK_N * BLOCK_P)
+            tl.store(tile + c * BLOCK_N * BLOCK_P, carry)
+            end = _cs_end(CSp, c, L, s_cl, CHUNK, REVERSE)
+            carry = carry * tl.exp(end - prev) + own
+            prev = end
+
     @triton.jit
     def _out_kernel(
         Qp, Kp, Vp, Up, CSp, STp, O1p, O2p, L, H, n_chunks,
@@ -159,8 +180,7 @@ if HAVE_TRITON:
         N: tl.constexpr, P: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_P: tl.constexpr, CHUNK: tl.constexpr,
         HAS_O1: tl.constexpr, HAS_O2: tl.constexpr, REVERSE: tl.constexpr, PREC: tl.constexpr,
     ):
-        """Pass 2, one program per (chunk, batch * head): the state entering the chunk as a decayed sum of the earlier
-        chunks' own states (16 x 16 tiles), then the chunk's outputs, intra-chunk plus carried."""
+        """Pass 3, one program per (chunk, batch * head): the chunk's outputs, intra-chunk plus the carried state."""
         c = tl.program_id(0)
         bh = tl.program_id(1)
         b = bh // H
@@ -177,16 +197,10 @@ if HAVE_TRITON:
             cs = -cs
         cs = tl.where(ok, cs, _cs_end(CSp, c, L, s_cl, CHUNK, REVERSE))
         # carried state, referenced to the clock at the end of chunk c - 1
-        S = tl.zeros((BLOCK_N, BLOCK_P), dtype=tl.float32)
-        cs_ref = cs  # placeholder of the right type; set below when c > 0
-        if c > 0:
-            ref = _cs_end(CSp, c - 1, L, s_cl, CHUNK, REVERSE)
-            tile = STp + bh * n_chunks * BLOCK_N * BLOCK_P + n[:, None] * BLOCK_P + p[None, :]
-            for cp in range(0, c):
-                S += tl.exp(ref - _cs_end(CSp, cp, L, s_cl, CHUNK, REVERSE)) * tl.load(tile + cp * BLOCK_N * BLOCK_P)
-            dec = tl.exp(cs - ref)
-        else:
-            dec = tl.zeros((CHUNK,), dtype=tl.float32)
+        # state entering the chunk (from _pass_kernel; zero for chunk 0), referenced to the end of chunk c - 1
+        S = tl.load(STp + (bh * n_chunks + c) * BLOCK_N * BLOCK_P + n[:, None] * BLOCK_P + p[None, :])
+        ref = _cs_end(CSp, tl.maximum(c - 1, 0), L, s_cl, CHUNK, REVERSE)
+        dec = tl.where(c > 0, tl.exp(cs - ref), 0.0)
         causal = i[:, None] > i[None, :]
         D = tl.exp(tl.where(causal, cs[:, None] - cs[None, :], -float("inf")))
         k = tl.load(Kp + b * s_kb + pos[:, None] * s_kl + n[None, :], mask=ok[:, None] & n_ok[None, :], other=0.0)
@@ -235,6 +249,7 @@ def _states(K, V, cs, reverse, chunk, precision):
         K.stride(0), K.stride(1), V.stride(0), V.stride(1), V.stride(2), cs.stride(0), cs.stride(1),
         N=n, P=p, BLOCK_N=bn, BLOCK_P=bp, CHUNK=chunk, REVERSE=reverse, PREC=precision,
     )
+    _pass_kernel[(b * h,)](cs, st, length, h, nc, cs.stride(0), cs.stride(1), BLOCK_N=bn, BLOCK_P=bp, CHUNK=chunk, REVERSE=reverse)
     return st
 
 
@@ -294,8 +309,8 @@ class _GTSScan(torch.autograd.Function):
 def gts_scan(C, B, X, cs, reverse=False, chunk=64, precision="ieee", parallel=True):
     """C, B: (b, l, n); X: (b, l, h, p); cs: (b, l, h), non-increasing along l (a running sum of log-decays <= 0).
     Returns (b, l, h, p) float32. ``precision="tf32"`` lets the chunk matmuls use TF32 on GPUs that have it.
-    ``parallel=True`` runs one program per chunk (two passes: chunk states, then outputs with the carried state as a
-    decayed sum of earlier chunks' states); ``False`` walks each (batch, head)'s chunks in one program."""
+    ``parallel=True`` runs one program per chunk (chunk states, a light sequential pass that turns them into carried
+    states, then outputs); ``False`` walks each (batch, head)'s chunks in one program."""
     if not HAVE_TRITON:
         raise RuntimeError("gts_scan needs triton; use gts_scan_reference")
     return _GTSScan.apply(C, B, X, cs, reverse, chunk, precision, parallel)

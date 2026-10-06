@@ -35,7 +35,30 @@ def bench(fn, reps):
         torch.cuda.synchronize()
         times.append(time.perf_counter() - t)
     times.sort()
-    return times[len(times) // 2] * 1e3, (torch.cuda.max_memory_allocated() - base) / 2**20
+    torch.cuda.synchronize()
+    t = time.perf_counter()
+    for _ in range(reps):  # back to back, as inside a training step: launch overhead overlaps GPU work
+        fn()
+    torch.cuda.synchronize()
+    return times[len(times) // 2] * 1e3, (time.perf_counter() - t) / reps * 1e3, (torch.cuda.max_memory_allocated() - base) / 2**20
+
+
+def gpu_profile(fn, title, top=12):
+    """GPU kernel time of one call, from torch.profiler: the total and the largest kernels."""
+    from torch.profiler import ProfilerActivity, profile
+
+    for _ in range(3):
+        fn()
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for _ in range(5):
+            fn()
+        torch.cuda.synchronize()
+    ev = [e for e in prof.key_averages() if e.device_time_total > 0]
+    total = sum(e.device_time_total for e in ev) / 5
+    print(f"  profile {title}: GPU kernel time {total / 1e3:.3f} ms per call, {sum(e.count for e in ev) // 5} kernels")
+    for e in sorted(ev, key=lambda e: -e.device_time_total)[:top]:
+        print(f"      {e.device_time_total / 5 / 1e3:8.3f} ms  x{e.count // 5:3d}  {e.key[:90]}")
 
 
 def main():
@@ -48,6 +71,7 @@ def main():
     p.add_argument("--lengths", type=int, nargs="+", default=[512, 2048, 8192, 32768])
     p.add_argument("--reps", type=int, default=20)
     p.add_argument("--layer", action="store_true", help="also time a whole bank GTS layer with and without the scan")
+    p.add_argument("--profile", action="store_true", help="GPU kernel times from torch.profiler")
     a = p.parse_args()
     dev = "cuda"
     torch.backends.cuda.matmul.allow_tf32 = True  # as lm_run.py trains
@@ -78,20 +102,25 @@ def main():
         if L <= 2048:
             rows.append(("PyTorch quadratic (what GTS trains with)", run(lambda: gts_scan_reference(C, B, X, torch.cumsum(dt * A, 1)))))
         rows.append(("gts_scan sequential chunk  64 tf32", run(lambda: gts_scan(C, B, X, torch.cumsum(dt * A, 1), False, 64, "tf32", parallel=False))))
-        for chunk in (16, 32, 64, 128):
+        for chunk in (32, 64, 128):
             for prec in ("ieee", "tf32"):
                 rows.append((f"gts_scan parallel chunk {chunk:3d} {prec}", run(lambda c=chunk, q=prec: gts_scan(C, B, X, torch.cumsum(dt * A, 1), False, c, q))))
         if mamba_chunk_scan_combined is not None:
             for chunk in (64, 128, 256):
                 rows.append((f"upstream mamba_chunk_scan_combined {chunk}", run(lambda c=chunk: mamba_chunk_scan_combined(X, dt, A, B.unsqueeze(2), C.unsqueeze(2), c))))
+        if a.profile:
+            gpu_profile(run(lambda: gts_scan(C, B, X, torch.cumsum(dt * A, 1), False, 64, "tf32")), f"gts_scan parallel 64 tf32, L {L}", 8)
+            gpu_profile(run(lambda: gts_scan(C, B, X, torch.cumsum(dt * A, 1), False, 64, "tf32", parallel=False)), f"gts_scan sequential 64 tf32, L {L}", 8)
+            if mamba_chunk_scan_combined is not None:
+                gpu_profile(run(lambda: mamba_chunk_scan_combined(X, dt, A, B.unsqueeze(2), C.unsqueeze(2), 128)), f"upstream 128, L {L}", 4)
         ref = gts_scan_reference(C, B, X, torch.cumsum(dt * A, 1)) if L <= 2048 else None
         if ref is not None:
             err = (gts_scan(C, B, X, torch.cumsum(dt * A, 1)) - ref).abs().max().item() / ref.abs().max().item()
             print(f"length {L}: gts_scan vs PyTorch, max relative error {err:.1e}")
         for name, fn in rows:
             try:
-                ms, mb = bench(fn, a.reps)
-                print(f"  L {L:5d}  {name:44s} {ms:8.3f} ms  {mb:8.1f} MB")
+                ms, tput, mb = bench(fn, a.reps)
+                print(f"  L {L:5d}  {name:44s} {ms:8.3f} ms synced  {tput:8.3f} ms back to back  {mb:8.1f} MB")
             except Exception as e:  # report and go on (e.g. out of memory)
                 print(f"  L {L:5d}  {name:44s} failed: {type(e).__name__}: {str(e)[:120]}")
                 torch.cuda.empty_cache()
@@ -108,8 +137,10 @@ def main():
 
                     def layer():
                         torch.autograd.grad(m(u), [u] + list(m.parameters()), gy)
-                    ms, mb = bench(layer, a.reps)
-                    print(f"  L {L:5d}  bank layer, width {a.width}, {'scan     ' if scan else 'quadratic'}          {ms:8.3f} ms  {mb:8.1f} MB")
+                    ms, tput, mb = bench(layer, a.reps)
+                    print(f"  L {L:5d}  bank layer, width {a.width}, {'scan     ' if scan else 'quadratic'}          {ms:8.3f} ms synced  {tput:8.3f} ms back to back  {mb:8.1f} MB")
+                    if a.profile and L == a.lengths[0]:
+                        gpu_profile(layer, f"bank layer {'scan' if scan else 'quadratic'} L {L}")
 
 
 if __name__ == "__main__":
