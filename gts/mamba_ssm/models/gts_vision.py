@@ -71,6 +71,24 @@ class GTSVision(nn.Module):
         order = torch.arange(n * n).view(n, n).t().reshape(-1)  # column order, as indices into the raster order
         self.register_buffer("_col", order, persistent=False)
         self.register_buffer("_col_inv", torch.argsort(order), persistent=False)
+        # Optional per-block callables (e.g. compiled ones from compiled_blocks) used in place of the blocks at the
+        # training resolution; each takes and returns raster order. Not part of the state dict.
+        self.block_fns = None
+
+    def compiled_blocks(self, **compile_kw):
+        """One compiled callable per block. An odd block's switch to column order and back is a transpose of the
+        token grid inside its compiled function, so Inductor fuses it into the block's first and last pointwise
+        kernels instead of two gathers of the whole grid per block."""
+        n = self.side
+
+        def column(layer):
+            def fn(x):
+                B, _, D = x.shape
+                y = layer(x.view(B, n, n, D).transpose(1, 2).reshape(B, n * n, D))
+                return y.view(B, n, n, D).transpose(1, 2).reshape(B, n * n, D)
+            return fn
+
+        return [torch.compile(layer if i % 2 == 0 else column(layer), **compile_kw) for i, layer in enumerate(self.layers)]
 
     def forward(self, images):
         """images (B, 3, H, W), normalised -> tokens (B, side * side, d_model) in raster order."""
@@ -84,6 +102,10 @@ class GTSVision(nn.Module):
         else:
             pos, col, col_inv = self.pos, self._col, self._col_inv
         x = x + pos
+        if self.block_fns is not None and x.shape[1] == self.side * self.side:
+            for fn in self.block_fns:
+                x = fn(x)
+            return self.norm_f(x)
         for i, layer in enumerate(self.layers):
             if i % 2:
                 x = layer(x[:, col])[:, col_inv]

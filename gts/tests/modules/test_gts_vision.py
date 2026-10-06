@@ -50,3 +50,22 @@ def test_sidecar_feeds_the_lm_and_gradients_reach_the_backbone():
     assert h.shape == (2, 10, 64)
     h.sum().backward()
     assert v.stem[0].weight.grad is not None and v.stem[0].weight.grad.abs().sum() > 0
+
+
+def test_frozen_quantized_weights_give_the_same_function():
+    """freeze_quantized caches each GTS module's quantised weights (for a frozen LM); the outputs must not change."""
+    from mamba_ssm.modules.gts import GTS
+
+    torch.manual_seed(0)
+    lm_cfg = GTSConfig(d_model=64, n_layer=2, vocab_size=200, mixer="mixed", bank_trees=8, bank_heads=8, deep_trees=1,
+                       deep_depth=3, causal=False, ternary=True, act_bits=8, route_ste=True)
+    lm = GTSForMaskedLM(lm_cfg).eval()
+    ids = torch.randint(1, 200, (2, 12))
+    before = lm(ids).logits
+    mods = [m for m in lm.modules() if isinstance(m, GTS)]
+    for m in mods:
+        m.freeze_quantized()
+    assert torch.equal(lm(ids).logits, before)
+    for m in mods:
+        m.unfreeze_quantized()
+    assert torch.equal(lm(ids).logits, before)

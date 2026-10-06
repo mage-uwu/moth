@@ -111,6 +111,7 @@ class GTS(nn.Module):
         self.ternary = ternary
         self.ternary_group = ternary_group
         self.act_bits = act_bits
+        self._frozen_q = None  # freeze_quantized(): the quantised weights, computed once, for a module that is not trained
         self.quant_lambda = 1.0  # 0 = full precision, 1 = fully quantised; ramp it to warm quantisation in
         self.capture_paths = False  # if True, forward stores last_nodes / last_logits for distillation
         self.layer_idx = layer_idx
@@ -209,13 +210,34 @@ class GTS(nn.Module):
         return absmean_ternary(w, self.ternary_group, self.quant_lambda) if self.ternary else w
 
     def _w_in(self):
-        return self._q(self.node_in)
+        return self._frozen_q["node_in"] if self._frozen_q else self._q(self.node_in)
 
     def _w_out(self):
-        return self._q(self.node_out)
+        return self._frozen_q["node_out"] if self._frozen_q else self._q(self.node_out)
 
     def _w_ctx(self):
-        return self._q(self.ctx_proj.weight)
+        return self._frozen_q["ctx"] if self._frozen_q else self._q(self.ctx_proj.weight)
+
+    @torch.no_grad()
+    def freeze_quantized(self, dtype=None):
+        """For a GTS whose weights are not trained (a frozen LM read through, say): quantise every ternary weight once,
+        optionally cast it (to the autocast dtype), and reuse it, instead of re-quantising and re-casting all of them
+        on every forward pass. Also keeps the route kernels' zero-padded copies. ``unfreeze_quantized`` undoes it;
+        call this again after changing the weights."""
+        self._frozen_q = None
+        cast = (lambda t: t.to(dtype)) if dtype is not None else (lambda t: t)
+        c = {"node_in": cast(self._q(self.node_in).detach()), "node_out": cast(self._q(self.node_out).detach())}
+        if getattr(self, "ctx_proj", None) is not None:
+            c["ctx"] = cast(self._q(self.ctx_proj.weight).detach())
+        total = self.n_trees * self.n_nodes
+        pad = -total % 64
+        bias = self.node_bias.detach() if self.node_bias is not None else None
+        c["padded"] = (F.pad(c["node_in"], (0, 0, 0, pad)), F.pad(c["node_out"], (0, 0, 0, pad)),
+                       F.pad(cast(bias), (0, pad)) if bias is not None else None)
+        self._frozen_q = c
+
+    def unfreeze_quantized(self):
+        self._frozen_q = None
 
     def _read(self, v):
         """RMS-normalise the concatenated node states and project them to the residual width."""
@@ -445,10 +467,13 @@ class GTS(nn.Module):
             # makes every GEMM misaligned and cuBLAS falls back to slow kernels.
             total = self.n_trees * self.n_nodes
             pad = -total % 64
-            w_in, w_out, bias = self._w_in(), self._w_out(), self.node_bias
-            if pad:
-                w_in, w_out = F.pad(w_in, (0, 0, 0, pad)), F.pad(w_out, (0, 0, 0, pad))
-                bias = F.pad(bias, (0, pad)) if bias is not None else None
+            if self._frozen_q:
+                w_in, w_out, bias = self._frozen_q["padded"]
+            else:
+                w_in, w_out, bias = self._w_in(), self._w_out(), self.node_bias
+                if pad:
+                    w_in, w_out = F.pad(w_in, (0, 0, 0, pad)), F.pad(w_out, (0, 0, 0, pad))
+                    bias = F.pad(bias, (0, pad)) if bias is not None else None
             all_logits = F.linear(x, w_in, bias)  # (b, l, total nodes + pad)
             out, nodes = route_ste_out(all_logits.reshape(batch * length, -1), w_out, self.n_trees, self.depth,
                                        self.act, self.route_ste_temp, want, n_nodes=self.n_nodes, ste=self.route_ste)

@@ -510,6 +510,12 @@ def train(a):
     held, train_idx = perm[: a.held_out], perm[a.held_out :]
     lm, lm_cfg = load_lm(a.lm, device)
     vocab = lm_cfg["vocab_size"]
+    if a.freeze_lm_quant:  # the LM is frozen: quantise (and cast) its ternary weights once, not on every forward
+        from mamba_ssm.modules.gts import GTS
+
+        for m in lm.modules():
+            if isinstance(m, GTS):
+                m.freeze_quantized(torch.bfloat16 if a.amp else None)
     print(f"{data.n:,} pairs ({', '.join(s.meta.get('source', '?')[:40] + f': {s.n:,}' for s in data.sets)}); "
           f"{a.held_out} held out", flush=True)
     t0 = time.time()
@@ -532,25 +538,40 @@ def train(a):
     print(f"GTS vision backbone: {n_params / 1e6:.2f}M parameters; heads and sidecar "
           f"{sum(p.numel() for p in heads.parameters()) / 1e6:.2f}M", flush=True)
     if a.compile and device == "cuda":
-        for mods in (model.layers, lm.backbone.layers):
-            for i in range(len(mods)):
-                mods[i] = torch.compile(mods[i], dynamic=False)
+        model.block_fns = model.compiled_blocks(dynamic=False)  # the blocks themselves stay uncompiled (evaluation)
+        mods = lm.backbone.layers
+        for i in range(len(mods)):
+            mods[i] = torch.compile(mods[i], dynamic=False)
     params = list(model.parameters()) + list(heads.parameters())
     decay = [p for p in params if p.ndim >= 2]
     rest = [p for p in params if p.ndim < 2]
     opt = torch.optim.AdamW([{"params": decay, "weight_decay": a.weight_decay}, {"params": rest, "weight_decay": 0.0}],
                             lr=a.lr, betas=(0.9, 0.98), eps=1e-6, fused=device == "cuda")
     os.makedirs(a.out, exist_ok=True)
-    gen = torch.Generator().manual_seed(a.seed)
     total_steps, curve, last_ckpt, step = None, [], time.time(), 0
+    s0, lr0, warm, phases = 0, 0.0, a.warmup, []
+    if a.resume:  # weights, heads, optimizer state, step and curve; the schedule re-warms from the last rate
+        ck = torch.load(a.resume, map_location="cpu", weights_only=False)
+        assert ck["vision_config"] == config_dict(vcfg), "the checkpoint's backbone differs from --width/--layers/..."
+        model.load_state_dict(ck["model"])
+        heads.load_state_dict(ck["heads"])
+        opt.load_state_dict(ck["optimizer"])
+        step = s0 = ck["step"]
+        curve, lr0, warm = ck["curve"], ck["optimizer"]["param_groups"][0]["lr"], a.rewarm
+        phases = ck.get("phases", [ck["args"]])
+        print(f"resumed from {a.resume} at step {step} (learning rate {lr0:.2e})", flush=True)
+    phases = phases + [{k: v for k, v in vars(a).items()}]
+    gen = torch.Generator().manual_seed(a.seed + s0)
     run = {"clip": 0.0, "cap": 0.0, "n": 0}
 
     def lr_at(s):
-        if s < a.warmup:
-            return a.lr * (s + 1) / a.warmup
+        """Linear from lr0 (0 for a fresh run, the checkpoint's last rate on resume) to --lr, then cosine to 10%."""
+        k = s - s0
+        if k < warm:
+            return lr0 + (a.lr - lr0) * (k + 1) / warm
         if total_steps is None:
             return a.lr
-        frac = min(1.0, (s - a.warmup) / max(1, total_steps - a.warmup))
+        frac = min(1.0, (k - warm) / max(1, total_steps - s0 - warm))
         return a.lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * frac)))
 
     def losses(idx, x, train_mode=True, shuffle_images=False):
@@ -599,14 +620,19 @@ def train(a):
     def save(step):
         strip = lambda sd: {k.replace("._orig_mod", ""): v for k, v in sd.items()}  # noqa: E731
         state = {"model": strip(model.state_dict()), "heads": heads.state_dict(), "optimizer": opt.state_dict(),
-                 "step": step, "vision_config": config_dict(vcfg), "lm_config": lm_cfg, "args": vars(a), "curve": curve}
+                 "step": step, "vision_config": config_dict(vcfg), "lm_config": lm_cfg, "args": vars(a), "curve": curve,
+                 "phases": phases, "total_steps": total_steps}
         torch.save(state, os.path.join(a.out, "checkpoint.pt.tmp"))
         os.replace(os.path.join(a.out, "checkpoint.pt.tmp"), os.path.join(a.out, "checkpoint.pt"))
 
     def record(step):
         try:
-            with uncompiled(model.layers, lm.backbone.layers):
-                ev = evaluate()
+            fns, model.block_fns = model.block_fns, None
+            try:
+                with uncompiled(model.layers, lm.backbone.layers):
+                    ev = evaluate()
+            finally:
+                model.block_fns = fns
         except Exception as e:  # an evaluation failure is reported, not allowed to end the run
             print(f"  evaluation at step {step} failed: {type(e).__name__}: {str(e)[:300]}", flush=True)
             model.train()
@@ -620,31 +646,47 @@ def train(a):
         json.dump({"params": n_params, "vision_config": config_dict(vcfg), "args": vars(a), "total_steps": total_steps,
                    "data": [s.meta for s in data.sets], "curve": curve}, open(os.path.join(a.out, "result.json"), "w"), indent=1)
 
-    # a background thread reads the next batch's JPEG bytes while the GPU works
+    # A background thread prepares the next batch while the GPU works: it reads the JPEG bytes and, with
+    # --async-decode, also decodes and crops them on a side CUDA stream, so the main stream never waits for them.
+    side = torch.cuda.Stream() if (device == "cuda" and a.async_decode) else None
+    aug_gen = torch.Generator().manual_seed(a.seed + 1 + s0)
+
     def sample():
         idx = train_idx[np.random.randint(0, len(train_idx), a.batch_size)]
-        return idx, data.jpegs(idx)
+        jpegs = data.jpegs(idx)
+        if side is None:
+            return idx, jpegs, None
+        with torch.cuda.stream(side):
+            x = augment(decode(jpegs, device), a.image_size, a.crop_min, aug_gen)
+            ev = torch.cuda.Event()
+            ev.record(side)
+        return idx, x, ev
 
-    np.random.seed(a.seed)
+    np.random.seed(a.seed + s0)
     skipped, bad_run = 0, 0
     nxt = [sample()]
     reader = None
     t_rate = None
     model.train()
     while True:
-        if step % a.eval_every == 0 and step > 0:
+        if step % a.eval_every == 0 and step > s0:
             record(step)
             run = {"clip": 0.0, "cap": 0.0, "n": 0}
         if total_steps is not None and step >= total_steps:
             break
         if reader is not None:
             reader.join()
-        idx, jpegs = nxt[0]
+        idx, payload, ready = nxt[0]
         reader = threading.Thread(target=lambda: nxt.__setitem__(0, sample()))
         reader.start()
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
-        x = augment(decode(jpegs, device), a.image_size, a.crop_min, gen)
+        if ready is None:
+            x = augment(decode(payload, device), a.image_size, a.crop_min, gen)
+        else:
+            torch.cuda.current_stream().wait_event(ready)
+            x = payload
+            x.record_stream(torch.cuda.current_stream())
         clip, cap, _, _ = losses(idx, x)
         loss = clip + a.cap_weight * cap
         opt.zero_grad(set_to_none=True)
@@ -673,11 +715,11 @@ def train(a):
             run["n"] += 1
             print(f"  step {step:6d}  clip {clip.item():.4f}  cap {cap.item():.4f}  lr {lr_at(step):.2e}  "
                   f"{(time.time() - t_start) / 60:.1f} min", flush=True)
-        if step == a.rate_from:
+        if step - s0 == a.rate_from:
             if device == "cuda":
                 torch.cuda.synchronize()
             t_rate = time.time()
-        if step == a.rate_from + a.rate_steps:
+        if step - s0 == a.rate_from + a.rate_steps:
             if device == "cuda":
                 torch.cuda.synchronize()
             rate = a.rate_steps / (time.time() - t_rate)
@@ -686,7 +728,8 @@ def train(a):
             share = ev_cost / (a.eval_every + ev_cost)
             total_steps = step + max(0, int(left * (1 - share) * rate))
             print(f"  {rate:.2f} steps/s = {rate * a.batch_size:,.0f} images/s; schedule fitted to {total_steps} steps "
-                  f"({total_steps * a.batch_size / len(train_idx):.1f} epochs of {len(train_idx):,} pairs)", flush=True)
+                  f"({(total_steps - s0) * a.batch_size / len(train_idx):.1f} epochs of {len(train_idx):,} pairs in this "
+                  f"phase)", flush=True)
         if time.time() - last_ckpt > a.ckpt_minutes * 60:
             save(step)
             last_ckpt = time.time()
@@ -794,6 +837,12 @@ def main():
     t.add_argument("--crop-min", type=float, default=0.4)
     t.add_argument("--cap-mask-prob", type=float, default=0.4)
     t.add_argument("--cap-weight", type=float, default=1.0)
+    t.add_argument("--resume", help="checkpoint.pt of an earlier run: continue it (weights, heads, optimizer, step)")
+    t.add_argument("--rewarm", type=int, default=1000, help="on resume: steps from the checkpoint's last rate to --lr")
+    t.add_argument("--no-freeze-lm-quant", dest="freeze_lm_quant", action="store_false",
+                   help="re-quantise the frozen LM's weights every step (the old behaviour)")
+    t.add_argument("--no-async-decode", dest="async_decode", action="store_false",
+                   help="decode and crop on the main stream")
     t.add_argument("--temb-cache", help="file for the caption embeddings (reused when it exists)")
     t.add_argument("--held-out", type=int, default=2048, help="a multiple of --batch-size; recall is among 1,000")
     t.add_argument("--eval-every", type=int, default=2000)

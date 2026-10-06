@@ -6,7 +6,7 @@
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 HF_HOME=/root/hf DEBIAN_FRONTEND=noninteractive
 END=$(date -d "${END_UTC:?set END_UTC} UTC" +%s)
 set -x
-O=/workspace/out; R=/workspace/vl_run; D=/workspace/vl; W=/root/raw
+O=/workspace/out; R=${VL_OUT:-/workspace/vl_run}; D=/workspace/vl; W=/root/raw
 mkdir -p $O $R
 for f in result.json backbone.pt binarized.pt checkpoint.pt; do ln -sf $R/$f $O/vl_$f; done
 apt-get update -qq && apt-get install -y -qq p7zip-full unzip >/dev/null
@@ -23,5 +23,15 @@ rm -rf $W
 cat $D/*/meta.json
 LEFT=$(( (END - $(date +%s)) / 60 ))
 echo "minutes left for training: $LEFT"
-python3 vision/vl_pretrain.py train --data $D/sharegpt4v $D/vgb --lm $LM --out $R --minutes $LEFT --temb-cache $D/temb_phase2.pt
+RESUME=""
+if [ -n "$VL_RESUME" ]; then   # continue an earlier run, e.g. VL_RESUME=/workspace/vl_run/checkpoint.pt VL_OUT=/workspace/vl_run2
+  cp "$VL_RESUME" /root/resume.pt   # a copy: the new run may write its checkpoint where the old one is
+  RESUME="--resume /root/resume.pt --lr ${VL_LR:-5e-4} --rewarm 1000"
+fi
+ARGS="--data $D/sharegpt4v $D/vgb --lm $LM --out $R --temb-cache $D/temb_phase2.pt $RESUME"
+python3 vision/vl_pretrain.py train $ARGS --minutes $LEFT 2>&1 | tee /root/train.log
+if grep -q "InductorError" /root/train.log; then   # torch.compile failed: the same run uncompiled
+  LEFT=$(( (END - $(date +%s)) / 60 ))
+  python3 vision/vl_pretrain.py train $ARGS --minutes $LEFT --no-compile
+fi
 echo "=== ALL DONE $(date -u +%T) ==="

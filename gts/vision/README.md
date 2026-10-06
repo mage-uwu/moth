@@ -84,6 +84,26 @@ loader for the new source; `train` takes any prep directories (`--data dir1 dir2
   every progress line.
 - One pod restart hung at `git clone`; a second restart fixed it.
 
+## The faster path (for the next resume)
+
+Run 1 trained at 241 images/s on an A40, about 60% of the GTS-MLM path's efficiency by a rough estimate. Changes for the
+next run, all on by default, each with a flag to turn it off; none changes what the model computes:
+
+- **The frozen LM's ternary weights are quantised once** (`GTS.freeze_quantized`, cast to bf16 under autocast), with
+  the route kernels' padded copies, instead of re-quantising and re-casting all 89M of them in every forward pass
+  (`--no-freeze-lm-quant`). Tested: same outputs.
+- **Column-order blocks transpose inside their compiled function** (`GTSVision.compiled_blocks`): the switch to column
+  order and back is fused by Inductor into the block's first and last pointwise kernels instead of two gathers of the
+  whole token grid per odd block. Tested: same outputs as the gather path.
+- **Decoding and cropping run ahead on a side CUDA stream** in the prefetch thread (`--no-async-decode`), so nvJPEG and
+  the crops overlap the previous step instead of sitting on its critical path.
+- **Blocks compile with static shapes** (`dynamic=False`; a second shape had recompiled them with dynamic shapes and hit
+  an Inductor bug), evaluation runs uncompiled, and the job retries uncompiled if Inductor still fails.
+- **`--resume`** continues a run: backbone, heads and sidecar, optimizer state, step and curve; the learning rate
+  re-warms from the checkpoint's last rate to `--lr` over `--rewarm` steps, then a cosine to 10%. With the pod job:
+  `VL_RESUME=/workspace/vl_run/checkpoint.pt VL_OUT=/workspace/vl_run2 END_UTC=...` (data and caption embeddings are
+  reused from the volume). The speed-up is not measured yet: compare the new run's "images/s" line with 241.
+
 ## Picking it up
 
 1. When run 1 ends, download `vl_result.json`, `vl_backbone.pt`, `vl_binarized.pt`, `vl_checkpoint.pt` and `vl.log`
