@@ -453,6 +453,26 @@ routing gradient (the encoder's default), replacing the level-loop walk and dens
 `GTSForMaskedLM(..., labelled_only=True)` scores the about 15% of positions that carry a label instead of all of them,
 for the same loss. 64 GPU tests pass.
 
+### A 110M BERT-style run, and CPU inference
+
+`scripts/bert_pretrain.py`: width 768, 14 layers, bank 32 trees (8 heads, state 16) plus 4 deep trees of depth 9 with
+route_ste, 112.9M parameters; bert-base-uncased WordPiece on English Wikipedia, RoBERTa-style masking, 512-token
+windows, batch 64, one A100 at about 188K tokens/s. Checkpoints (float with optimizer state, and binarized) are in
+`checkpoints/bert110m/`.
+
+| | steps | tokens | validation loss | masked accuracy |
+|---|---|---|---|---|
+| Phase 1 (shards 0-6, peak lr 1.5e-3, 157 min) | 53,753 | 1.76B | 2.815 | 50.5% |
+| Phase 2 (resumed on shards 7-19, re-warm to 7.5e-4, 161 min) | 108,829 | 3.57B | 2.713 | 51.7% |
+
+CPU inference of the trained model with `kernel/enc_bench.c` (packed ternary weights, int8 activations, OpenMP over
+tokens and over the bank's two directions), 4-core cloud x86 with VNNI, the encoder without the head, sequence 512:
+7,282 tokens/s on 1 thread, 13,574 on 2, 26,662 on 4 (phase 2 weights; phase 1's are within 3%). BERT-base in
+float32 PyTorch on the same machine: 618 and 1,975 tokens/s on 1 and 4 threads. The masked-LM head (float32,
+30,522 x 768) costs 1.1 ms per scored position on 4 threads. The kernel matches PyTorch's masked-LM loss (4.021 vs
+4.010 on the test sequence); individual logits differ by up to about 2, which the model's hard branches and 8-bit
+rounding also produce from a 1e-7 nudge of the weights.
+
 ## Departures from Mamba-2
 
 - **Bidirectional by default.** Forward and backward context share the key B and use separate queries.
@@ -469,9 +489,10 @@ for the same loss. 64 GPU tests pass.
 
 ## Not done
 
-- An integer or ternary kernel. `kernel/gts_kernel.c` is float32 and single-threaded. `pack_ternary` produces
-  the codes and scales such a kernel would load.
+- An integer or ternary kernel for the reference tree layer: `kernel/gts_kernel.c` is float32 and
+  single-threaded. (The mixed-forest encoder has one: `kernel/enc_bench.c`, above.)
 - Any routing gradient. Branches are hard and learn only through the node's value, as in FFF.
   `GTS.path_stats` reports how many nodes per level are in use.
 - Wide trunk nodes. Every node carries a scalar value; `n_trees > 1` is the only way to widen.
-- Any run at useful size. The one head-to-head above, at half a million parameters, has GTS well behind Mamba-2.
+- A matched baseline for the 110M encoder (a BERT or Mamba-2 encoder trained on the same tokens), so its 2.713 has
+  nothing to compare against yet.

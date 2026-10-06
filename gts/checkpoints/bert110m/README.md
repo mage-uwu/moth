@@ -16,12 +16,20 @@ A bidirectional ternary GTS mixed forest trained as a masked language model on E
 Shards 0 to 6 (902M tokens), 53,753 steps (1.76B tokens, about two passes), peak learning rate 1.5e-3, 1,000
 warmup steps, cosine to 1.5e-4; 157 minutes. Validation: loss 2.815, masked-token accuracy 50.5%.
 
+## Phase 2
+
+Resumed from phase 1's `checkpoint.pt` (weights, AdamW state, step) on new data, shards 7 to 19 (1.16B tokens), for the
+same budget: 55,076 more steps (1.80B tokens) to step 108,829, 3.57B tokens in all. The learning rate re-warms from
+phase 1's last 1.5e-4 to 7.5e-4 over 1,000 steps, then cosine to 7.5e-5; 161 minutes. Validation (same held-out shard
+as phase 1) rises to 3.00 during the re-warm, passes below phase 1's 2.815 at step 88,000 (2.803) and ends at loss 2.713, masked-token
+accuracy 51.7% (best 2.707 / 51.9% at step 106,000). `result.json` holds both phases' curves and settings.
+
 ## Files
 
 Each checkpoint is split into 90 MB parts (GitHub refuses files over 100 MB). Rebuild and check:
 
 ```bash
-cd checkpoints/bert110m/phase1
+cd checkpoints/bert110m/phase1   # or phase2
 cat checkpoint.pt.part* > checkpoint.pt
 cat binarized.pt.part* > binarized.pt
 sha256sum -c SHA256SUMS
@@ -46,4 +54,5 @@ sha256sum -c SHA256SUMS
   rounding flip on last-bit differences, and nudging the float weights by 1e-7 moves the logits as much. The masked-LM
   loss is the same (4.7212 float, 4.7165 binarized on held-out text).
 - `examples.json`: top-5 predictions at `[MASK]` for a few sentences, e.g. "The [MASK] Ocean is the largest ocean on
-  Earth" -> pacific, atlantic, indian, arctic, open.
+  Earth" -> pacific, atlantic, indian, arctic, open
+  (phase 2: ... arctic, southern).
