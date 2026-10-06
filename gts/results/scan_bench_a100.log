@@ -1,0 +1,150 @@
+....................                                                     [100%]
+20 passed in 33.98s
+NVIDIA A100-SXM4-80GB torch 2.8.0+cu128
+shape: batch 8, heads 8, channels per head 4, state 16
+  profile gts_scan 64 tf32, L 512: GPU kernel time 0.104 ms per call, 12 kernels
+         0.048 ms  x  3  _out_kernel
+         0.017 ms  x  2  _state_kernel
+         0.015 ms  x  2  void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrappe
+         0.012 ms  x  2  _pass_kernel
+         0.008 ms  x  2  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:
+         0.004 ms  x  1  _suffix_kernel
+  profile upstream 128, L 512: GPU kernel time 0.279 ms per call, 34 kernels
+         0.053 ms  x  1  _chunk_state_fwd_kernel
+         0.034 ms  x  1  _chunk_scan_chunk_state_bwd_dx_kernel
+         0.028 ms  x  5  void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrappe
+         0.020 ms  x  0  _chunk_scan_fwd_kernel
+length 512: gts_scan vs PyTorch, max relative error 1.7e-03
+  L   512  PyTorch quadratic (what GTS trains with)        2.000 ms synced     1.955 ms back to back     273.2 MB
+  L   512  gts_scan chunk  32 ieee                         0.999 ms synced     0.960 ms back to back       6.9 MB
+  L   512  gts_scan chunk  32 tf32                         0.983 ms synced     1.559 ms back to back       6.9 MB
+  L   512  gts_scan chunk  64 ieee                         1.050 ms synced     1.567 ms back to back       6.4 MB
+  L   512  gts_scan chunk  64 tf32                         1.091 ms synced     1.058 ms back to back       6.4 MB
+  L   512  gts_scan chunk 128 ieee                         0.990 ms synced     0.960 ms back to back       6.1 MB
+  L   512  gts_scan chunk 128 tf32                         1.023 ms synced     1.217 ms back to back       6.1 MB
+  L   512  upstream mamba_chunk_scan_combined 64           3.984 ms synced     4.449 ms back to back       7.3 MB
+  L   512  upstream mamba_chunk_scan_combined 128          3.919 ms synced     4.407 ms back to back      13.1 MB
+  L   512  upstream mamba_chunk_scan_combined 256          3.994 ms synced     4.702 ms back to back      27.1 MB
+  L   512  bank layer, width 1024, quadratic             8.017 ms synced     8.368 ms back to back     343.0 MB
+  profile bank layer quadratic L 512: GPU kernel time 5.879 ms per call, 285 kernels
+         1.855 ms  x 39  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:
+         0.904 ms  x 28  void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std:
+         0.353 ms  x 47  void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::arr
+         0.338 ms  x 15  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:
+         0.238 ms  x  7  void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<float, float, 
+         0.216 ms  x 28  Memcpy DtoD (Device -> Device)
+         0.202 ms  x  2  void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::func_wrappe
+         0.198 ms  x 17  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_64x64_16x6_nn_align4>(cutlass_80_tenso
+         0.186 ms  x  2  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:
+         0.185 ms  x  2  void at::native::tensor_kernel_scan_outer_dim<float, std::plus<float> >(float*, float cons
+         0.136 ms  x  5  void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrappe
+         0.109 ms  x  4  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:
+  L   512  bank layer, width 1024, scan                  4.076 ms synced     4.426 ms back to back     128.1 MB
+  profile bank layer scan L 512: GPU kernel time 1.584 ms per call, 131 kernels
+         0.314 ms  x  7  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:
+         0.168 ms  x 13  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:
+         0.106 ms  x  1  void at::native::(anonymous namespace)::conv_depthwise2d_backward_kernel<0, 1, float, int>
+         0.084 ms  x 13  void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std:
+         0.071 ms  x  0  void at::native::(anonymous namespace)::conv_depthwise2d_forward_kernel_generic<float, int
+         0.062 ms  x  3  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_128x64_16x6_nn_align4>(cutlass_80_tens
+         0.056 ms  x  3  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_64x64_32x6_nt_align4>(cutlass_80_tenso
+         0.055 ms  x  1  void at::native::(anonymous namespace)::conv_depthwise2d_grad_weight_kernel<float, unsigne
+         0.053 ms  x  3  _out_kernel
+         0.050 ms  x  1  void (anonymous namespace)::indexing_backward_kernel_stride_1<float>(long const*, long con
+         0.049 ms  x  5  void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrappe
+         0.046 ms  x  4  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:
+  profile gts_scan 64 tf32, L 2048: GPU kernel time 0.202 ms per call, 9 kernels
+         0.109 ms  x  2  _out_kernel
+         0.034 ms  x  1  _state_kernel
+         0.025 ms  x  1  _pass_kernel
+         0.017 ms  x  1  void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrappe
+         0.009 ms  x  1  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:
+         0.007 ms  x  0  _suffix_kernel
+  profile upstream 128, L 2048: GPU kernel time 0.784 ms per call, 33 kernels
+         0.185 ms  x  1  _chunk_state_fwd_kernel
+         0.132 ms  x  1  _chunk_scan_chunk_state_bwd_dx_kernel
+         0.080 ms  x  1  _chunk_scan_bwd_ddAcs_stable_kernel
+         0.067 ms  x  0  _chunk_scan_fwd_kernel
+length 2048: gts_scan vs PyTorch, max relative error 1.5e-03
+  L  2048  PyTorch quadratic (what GTS trains with)       35.270 ms synced    34.975 ms back to back    4360.0 MB
+  L  2048  gts_scan chunk  32 ieee                         1.003 ms synced     0.963 ms back to back      27.5 MB
+  L  2048  gts_scan chunk  32 tf32                         0.987 ms synced     0.887 ms back to back      27.5 MB
+  L  2048  gts_scan chunk  64 ieee                         1.036 ms synced     0.891 ms back to back      25.5 MB
+  L  2048  gts_scan chunk  64 tf32                         1.000 ms synced     0.963 ms back to back      25.5 MB
+  L  2048  gts_scan chunk 128 ieee                         1.553 ms synced     1.454 ms back to back      24.5 MB
+  L  2048  gts_scan chunk 128 tf32                         0.882 ms synced     0.797 ms back to back      24.5 MB
+  L  2048  upstream mamba_chunk_scan_combined 64           3.712 ms synced     4.086 ms back to back      25.0 MB
+  L  2048  upstream mamba_chunk_scan_combined 128          3.694 ms synced     4.022 ms back to back      36.5 MB
+  L  2048  upstream mamba_chunk_scan_combined 256          3.701 ms synced     4.052 ms back to back      76.3 MB
+  L  2048  bank layer, width 1024, quadratic            66.997 ms synced    66.748 ms back to back    4638.0 MB
+  L  2048  bank layer, width 1024, scan                  5.308 ms synced     5.001 ms back to back     512.3 MB
+  profile gts_scan 64 tf32, L 8192: GPU kernel time 0.617 ms per call, 9 kernels
+         0.342 ms  x  2  _out_kernel
+         0.108 ms  x  1  _pass_kernel
+         0.095 ms  x  1  _state_kernel
+         0.047 ms  x  1  void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrappe
+         0.017 ms  x  0  _suffix_kernel
+         0.008 ms  x  1  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:
+  profile upstream 128, L 8192: GPU kernel time 2.247 ms per call, 33 kernels
+         0.572 ms  x  1  _chunk_state_fwd_kernel
+         0.452 ms  x  1  _chunk_scan_chunk_state_bwd_dx_kernel
+         0.258 ms  x  1  _chunk_scan_bwd_ddAcs_stable_kernel
+         0.224 ms  x  0  _chunk_scan_fwd_kernel
+  L  8192  gts_scan chunk  32 ieee                         2.097 ms synced     1.948 ms back to back     110.0 MB
+  L  8192  gts_scan chunk  32 tf32                         1.245 ms synced     1.090 ms back to back     110.0 MB
+  L  8192  gts_scan chunk  64 ieee                         1.940 ms synced     1.774 ms back to back     102.0 MB
+  L  8192  gts_scan chunk  64 tf32                         1.074 ms synced     0.900 ms back to back     102.0 MB
+  L  8192  gts_scan chunk 128 ieee                         3.740 ms synced     3.526 ms back to back      98.0 MB
+  L  8192  gts_scan chunk 128 tf32                         1.669 ms synced     1.600 ms back to back      98.0 MB
+  L  8192  upstream mamba_chunk_scan_combined 64           4.009 ms synced     4.501 ms back to back     100.0 MB
+  L  8192  upstream mamba_chunk_scan_combined 128          4.025 ms synced     4.347 ms back to back     146.0 MB
+  L  8192  upstream mamba_chunk_scan_combined 256          4.049 ms synced     4.067 ms back to back     241.0 MB
+  L  8192  bank layer, width 1024, scan                 15.648 ms synced    15.570 ms back to back    2049.1 MB
+  profile gts_scan 64 tf32, L 32768: GPU kernel time 2.981 ms per call, 9 kernels
+         1.409 ms  x  2  _out_kernel
+         0.989 ms  x  1  _pass_kernel
+         0.360 ms  x  1  _state_kernel
+         0.145 ms  x  1  void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrappe
+         0.061 ms  x  0  _suffix_kernel
+         0.017 ms  x  1  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:
+  profile upstream 128, L 32768: GPU kernel time 8.665 ms per call, 33 kernels
+         2.255 ms  x  1  _chunk_state_fwd_kernel
+         1.782 ms  x  1  _chunk_scan_chunk_state_bwd_dx_kernel
+         1.003 ms  x  1  _chunk_scan_bwd_ddAcs_stable_kernel
+         0.856 ms  x  0  _chunk_scan_fwd_kernel
+  L 32768  gts_scan chunk  32 ieee                         8.735 ms synced     8.563 ms back to back     440.0 MB
+  L 32768  gts_scan chunk  32 tf32                         5.433 ms synced     5.257 ms back to back     440.0 MB
+  L 32768  gts_scan chunk  64 ieee                         7.830 ms synced     7.655 ms back to back     408.0 MB
+  L 32768  gts_scan chunk  64 tf32                         3.871 ms synced     3.897 ms back to back     408.0 MB
+  L 32768  gts_scan chunk 128 ieee                        15.886 ms synced    15.699 ms back to back     392.0 MB
+  L 32768  gts_scan chunk 128 tf32                         5.254 ms synced     5.117 ms back to back     392.0 MB
+  L 32768  upstream mamba_chunk_scan_combined 64          10.911 ms synced    10.600 ms back to back     400.1 MB
+  L 32768  upstream mamba_chunk_scan_combined 128         10.013 ms synced     9.733 ms back to back     584.1 MB
+  L 32768  upstream mamba_chunk_scan_combined 256         10.423 ms synced    10.154 ms back to back     964.0 MB
+  L 32768  bank layer, width 1024, scan                 66.050 ms synced    65.844 ms back to back    8196.1 MB
+=== BENCH DONE 04:54:46 ===
+--- mixed forest 0.5B, seq 512 batch 8 scan
+step     0  val loss 10.9649  train nan  0 tokens/s  peak GPU memory 3.5 GB
+  step     0  loss 10.9762  lr 2.00e-04  0.95 s/step
+  step    10  loss 7.9083  lr 9.05e-04  0.71 s/step
+  step    20  loss 7.8230  lr 3.45e-04  0.69 s/step
+step    30  val loss 7.7217  train 8.3347  5,931 tokens/s  peak GPU memory 9.5 GB
+--- mixed forest 0.5B, seq 512 batch 8 --no-scan-kernel
+step     0  val loss 10.9588  train nan  0 tokens/s  peak GPU memory 3.5 GB
+  step     0  loss 10.9768  lr 2.00e-04  1.01 s/step
+  step    10  loss 7.9801  lr 9.05e-04  0.88 s/step
+  step    20  loss 7.8733  lr 3.45e-04  0.87 s/step
+step    30  val loss 7.7669  train 8.3778  4,717 tokens/s  peak GPU memory 9.5 GB
+--- mixed forest 0.5B, seq 2048 batch 2 scan
+step     0  val loss 10.9769  train nan  0 tokens/s  peak GPU memory 3.5 GB
+  step     0  loss 10.9984  lr 2.00e-04  0.95 s/step
+  step    10  loss 8.4622  lr 9.05e-04  0.72 s/step
+  step    20  loss 7.9981  lr 3.45e-04  0.70 s/step
+step    30  val loss 7.7156  train 8.3189  5,879 tokens/s  peak GPU memory 9.5 GB
+--- mixed forest 0.5B, seq 2048 batch 2 --no-scan-kernel
+step     0  val loss 10.9745  train nan  0 tokens/s  peak GPU memory 3.5 GB
+  step     0  loss 10.9929  lr 2.00e-04  1.36 s/step
+  step    10  loss 8.4671  lr 9.05e-04  1.24 s/step
+  step    20  loss 7.9954  lr 3.45e-04  1.24 s/step
+step    30  val loss 7.6708  train 8.3364  3,323 tokens/s  peak GPU memory 9.5 GB
+=== E2E DONE 04:57:43 ===

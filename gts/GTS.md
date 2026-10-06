@@ -298,6 +298,90 @@ Other notes from the same period:
   `float` runs the weights as float32. With 8-bit activations a few tokens' logits differ from
   PyTorch's while the loss agrees to three decimals.
 
+### Half a billion parameters, trained: FineWeb, both models
+
+`scripts/lm_run.py` at its defaults on one A100 SXM 80GB (RunPod), 2,000 steps of 8 x 512 GPT-2 tokens of FineWeb
+`sample-10BT` (8.2M tokens read), learning rate 1e-3 with 200 warmup steps and cosine decay, TF32 matmuls for
+training (switched off for the export), gradient checkpointing, one seed each. Same batches for both.
+
+| Validation loss at step | 0 | 500 | 1,000 | 1,500 | 2,000 | Training tokens/s | Peak GPU memory |
+|---|---|---|---|---|---|---|---|
+| Mixed forest, 507.6M (27 layers, deep trees of depth 10) | 10.98 | 6.43 | 6.06 | 5.87 | 5.80 | 5,010 | 9.5 GB |
+| Mamba-2, 500.4M (68 layers, state 128) | 11.05 | 6.29 | 5.90 | 5.68 | 5.62 | 2,778 | 9.5 GB |
+| Gap | | 0.15 | 0.17 | 0.18 | 0.18 | | |
+
+Both learn (ln 50257 = 10.8) and are still falling. The gap at equal steps sits inside the 0.10 to 0.25 nats of the
+small runs. 2,000 steps says little about quality beyond that.
+
+Kernel on the trained weights, `kernel/ar_bench`, one core of a 2.1 GHz Xeon (AVX-512 VNNI, 260 MB L3), the two
+models timed back to back:
+
+| | Check against PyTorch (256 tokens) | Mixers per token | Total per token |
+|---|---|---|---|
+| Mixed forest | top-1 248/256, loss 5.9410 vs 5.9418, max logit diff 1.55 | 0.66 to 0.72 ms | 16 to 19 ms |
+| Mamba-2, packed (column form) | top-1 256/256, loss 5.8228 vs 5.8228, max logit diff 3e-5 | 33.9 ms | 54 ms |
+| Mamba-2, packed, row form (`m2rows`, the earlier kernel) | same | 36.9 ms | 57 ms |
+| Mamba-2, weights as float32 (`float`) | same | 184 ms | 205 ms |
+| Mamba-2 projections only, float32 BLAS, one thread (PyTorch) | | 122 ms (64 ms with weights in cache) | |
+
+- **The mixed forest's check.** Eight differing top-1s is not a kernel error. PyTorch disagrees with itself as much:
+  CPU float32 against the GPU-exported reference has top-1 253/256 and loss 5.9361 vs 5.9418, and CPU float64
+  against CPU float32 has max logit difference 0.83 and loss 5.9379 vs 5.9361 (`scripts/f64_check.py`). With hard
+  branches and 8-bit activations rounded per token in 54 mixers, float-order differences flip discrete decisions and
+  compound through 27 layers. The kernel's loss is closer to the reference than float32 is to float64.
+- **Trained against random.** The mixed forest's stack takes 0.66 to 0.72 ms trained against 0.43 to 0.44 ms with
+  random weights (1.6x); Mamba-2's takes 33.9 ms trained against 32.5 ms synthetic. Both within 2x.
+- **Fairness of the Mamba-2 number.** Neither BLAS nor the float path beats the packed kernel. The kernel was also
+  improved first (one horizontal sum per row; column-form projections: 16 registers of 16 rows take masked adds of a
+  broadcast input), 40.3 to 32.5 ms on the synthetic model. Its projections now run at about 1.1 masked adds per
+  cycle against at most 2, so a perfect kernel of this kind gains at most about 1.8x on them. 130 us per layer is the
+  SSM's 1 MB float32 state, read and written per token: a real cost of Mamba-2.
+- **Ratios.** Mixers alone: about 47x. Whole model with the 50,257 x 1,024 output head: about 2.8x; the head is about
+  18 ms of the mixed forest's total. A claim about the tree rests on the mixer time; a claim about a deployed model
+  must count the head.
+- **Asymmetries to keep in mind.** The mixed forest uses 8-bit activations and this Mamba-2 does not (`lm_run.py`
+  sets `m2_act_bits=None`); Mamba-2's synthetic kernel with 8-bit activations is about 1.5x faster. This CPU's
+  260 MB L3 holds either model's packed weights (about 112 MB), which flatters both against a typical desktop.
+  Batch-1 decoding only: Mamba-2 would amortise its weight reads over a batch, the tree much less.
+
+## A Triton scan for depth-0 trees
+
+A depth-0 tree is visited by every token, so the mixed forest's bank is Mamba-2's SSD with one key/query group and
+the token's own term excluded. `mamba_ssm/ops/gts_scan.py` computes it in chunks instead of the quadratic
+(batch, t, s, heads) form; `GTS` uses it for depth-0 trees on CUDA (`scan_kernel=None`, or force with True/False).
+
+- **Kernels.** Three over (chunk, batch x head): each chunk's own (N x P) state, a short sequential pass that turns
+  them into the state entering each chunk, and the outputs. The same output kernel gives the forward Y, and in the
+  backward pass dX and dB (one transposed pass, run the other way on the exclusive running sum) and dC (reusing the
+  forward's states). No global running sum is formed: every exponent is a difference of chunk-local sums or a
+  chunk's total. The log-decay gradient is <dY, Y> - <X, dX>, written by the dX pass, then a suffix sum.
+- **Correctness.** `tests/modules/test_gts_scan.py`: all four direction and clock variants against the quadratic form,
+  every gradient; the GTS layer against its dense path and the token-at-a-time reference, causal and bidirectional,
+  with float64 as ground truth. 20 tests pass compiled on an A100 and in Triton's interpreter on a CPU.
+- **Accuracy.** On an A100 every output and gradient is within about 2x of float32 PyTorch's error against float64,
+  and the log-decay gradient is ten times more accurate at 8K tokens (2e-5 against 2e-4; `scripts/diag_scan.py`).
+
+A100, bank shape (batch 8, 8 heads x 4 trees, state 16), forward + backward, `scripts/bench_scan.py`, log in
+`results/scan_bench_a100.log`:
+
+| Length | PyTorch quadratic | gts_scan, GPU kernel time | upstream `mamba_chunk_scan_combined`, GPU kernel time | gts_scan wall clock | upstream wall clock |
+|---|---|---|---|---|---|
+| 512 | 1.9 ms, 273 MB | 0.10 ms | 0.28 ms | 1.1 ms | 3.9 ms |
+| 2,048 | 35 ms, 4.4 GB | 0.20 ms | 0.78 ms | 1.0 ms | 3.7 ms |
+| 8,192 | | 0.62 ms | 2.25 ms | 1.1 ms | 4.0 ms |
+| 32,768 | | 2.98 ms | 8.67 ms | 3.9 ms | 10.0 ms |
+
+Up to 8K the wall clock is launch overhead on the CPU, for both. Upstream's kernel is run on the same shape and keeps
+the diagonal term; it is not tuned for 4 channels per head.
+
+Whole training steps of the 0.5B mixed forest (30 steps, including compilation): 512 x 8 tokens, 4,717 to 5,931
+tokens/s (+26%); 2,048 x 2 tokens, 3,323 to 5,879 tokens/s (+77%). With the scan a step costs the same per token at
+2,048 as at 512. The 0.5B runs above were trained before the scan existed, with the quadratic form.
+
+What the scan does not touch: the deep trees, which compute every node in training (route_ste needs every node's
+logit) and are most of a step's FLOPs, and the rest of the bank layer (projections, conv, quantisation), which is
+now most of the bank's time: at 32K tokens 66 ms per layer, of which the scan is 3.
+
 ## Departures from Mamba-2
 
 - **Bidirectional by default.** Forward and backward context share the key B and use separate queries.

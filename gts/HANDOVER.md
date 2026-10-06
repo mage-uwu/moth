@@ -160,6 +160,10 @@ so a given seed sees the same batches on any device.
 | `scripts/width_test.py` | Bidirectional mixed forest against a bidirectional Mamba-2 across widths. |
 | `train_gts.py`, `scripts/gts_ternary_demo.py` | Masked-LM training and a toy ternary comparison. Toy scale only. |
 | `kernel/ar_bench.c` | C inference for every exported model: float, packed ternary, and integer paths. |
+| `mamba_ssm/ops/gts_scan.py` | Chunked Triton scan for depth-0 trees (the mixed forest's bank); `GTS` uses it on CUDA. |
+| `scripts/bench_scan.py`, `scripts/diag_scan.py`, `scripts/f64_check.py` | Scan timing and accuracy; float64 check of a trained model's exported logits. |
+| `pod/job.sh`, `pod/bench_job.sh` | What the RunPod pods ran: the 0.5B runs, and the scan tests and benchmarks. |
+| `results/fineweb_0.5b/`, `results/scan_bench_a100.log` | The 0.5B results and the scan benchmark. |
 | `kernel/gts_kernel.c` | The first, bidirectional float kernel. Superseded by `ar_bench.c`; kept for the width-768 timing in `GTS.md`. |
 | `tests/modules/test_gts*.py` | The tests. |
 | `results/` | Result JSON and samples for the runs in the table above. |
@@ -181,13 +185,12 @@ so a given seed sees the same batches on any device.
 
 ## Known issues and untested ground
 
-- **Scale.** Nothing above 9M parameters has been trained. `lm_run.py` builds the 0.5B models and has
-  only ever taken six steps at width 128.
-- **GPU.** Device selection was added for this handover and smoke-tested on CPU only. Nothing has run
-  on CUDA. Mixed precision is untried, and the ternary straight-through estimator under autocast is
-  unknown.
-- **Memory and time of the training path.** It is quadratic in sequence length: tensors of shape
-  (batch, length, length, clocks). Fine at length 128; plan before going much longer.
+- **Scale.** Both 0.5B models have now trained for 2,000 steps on FineWeb on one A100 (results in `GTS.md`).
+  Nothing longer or larger has run.
+- **GPU.** Runs on CUDA (A100, torch 2.8). Set OMP_NUM_THREADS on pods: PyTorch sized its threads from the
+  host and the CPU tests crawled. Mixed precision is still untried.
+- **Memory and time of the training path.** Depth-0 trees now use the Triton scan on CUDA (linear in length).
+  Deeper trees with context, `Mamba2Ref`, and everything on a CPU are still quadratic in sequence length.
 - **Large trees.** The fast training walk (`dense_walk`) is on by default only up to 2,048 nodes per
   mixer, and `route_ste` requires it. `GTSMixed` and the scripts' mixed forest force it on for the deep
   trees, which costs memory proportional to (tokens x nodes) per layer; a bare `GTS` with more nodes

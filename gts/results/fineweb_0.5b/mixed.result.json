@@ -1,0 +1,75 @@
+{
+ "arch": "mixed",
+ "params": 507624693,
+ "mixer_params": 456082596,
+ "steps": 2000,
+ "val_loss": 5.795877361297608,
+ "train_loss": 5.640172595024109,
+ "train_tokens_per_s": 5009.855773592767,
+ "peak_gpu_gb": 9.478296279907227,
+ "curve": [
+  [
+   0,
+   10.981143903732299,
+   NaN
+  ],
+  [
+   500,
+   6.434379386901855,
+   6.949163697242737
+  ],
+  [
+   1000,
+   6.063117265701294,
+   6.079034692764282
+  ],
+  [
+   1500,
+   5.865072655677795,
+   5.803703333854675
+  ],
+  [
+   2000,
+   5.795877361297608,
+   5.640172595024109
+  ]
+ ],
+ "args": {
+  "arch": "mixed",
+  "data": "/workspace/data/fineweb",
+  "out": "/workspace/out/fw_mixed",
+  "width": 1024,
+  "layers": 27,
+  "bank_trees": 32,
+  "bank_heads": 8,
+  "bank_state": 16,
+  "deep_trees": 4,
+  "deep_depth": 10,
+  "m2_layers": 68,
+  "m2_state": 128,
+  "m2_headdim": 64,
+  "steps": 2000,
+  "batch_size": 8,
+  "seq_len": 512,
+  "grad_accum": 1,
+  "lr": 0.001,
+  "warmup": 200,
+  "weight_decay": 0.01,
+  "eval_every": 500,
+  "eval_batches": 20,
+  "log_every": 50,
+  "seed": 0,
+  "device": "cuda",
+  "no_checkpoint": false,
+  "amp": false,
+  "no_tf32": false,
+  "no_export": false,
+  "count_only": false
+ },
+ "data": {
+  "vocab_size": 50257,
+  "source": "gpt2 tokens of HuggingFaceFW/fineweb sample-10BT",
+  "train_tokens": 20000000,
+  "val_tokens": 500000
+ }
+}
