@@ -33,6 +33,7 @@ probe: ImageNet-1k linear probe of the frozen backbone: mean-pooled features of 
 """
 
 import argparse
+import gc
 import io
 import json
 import math
@@ -110,7 +111,9 @@ class Writer:
         os.makedirs(out, exist_ok=True)
         self.out, self.size, self.quality, self.short = out, size, quality, short or size
         self.f = open(os.path.join(out, "images.bin"), "wb")
-        self.pool = mp.get_context("fork").Pool(workers)
+        # spawned, not forked: a forked worker slowly copies the parent's memory (the caption JSON, ~10 GB of Python
+        # objects) as reference counts touch it, and eight of them run out of memory
+        self.pool = mp.get_context("spawn").Pool(workers)
         self.offsets, self.targets, self.seen, self.t0 = [0], [], 0, time.time()
 
     def add(self, items):
@@ -197,6 +200,7 @@ def prep(a):
             if c and (e["image"] not in best or rank[c[0]] < rank[best[e["image"]][0]]):
                 best[e["image"]] = c
         del conv
+        gc.collect()
         names = sorted(best)
         rng.shuffle(names)
         names = names[: a.vgb]
@@ -239,6 +243,8 @@ def prep(a):
                 missing += 1
                 continue
             items.append((("zip", zm[0], zm[1]), _clean(e["conversations"][1]["value"])))
+        del chosen, coco, lcs, where
+        gc.collect()
         print(f"  {missing} captions without their image", flush=True)
         _write_set(out, items, a.size, a.workers, cap_len=a.cap_len, tok=tok,
                    extra={"source": "Lin-Chen/ShareGPT4V share-captioner_coco_lcs_sam_1246k_1107 (COCO + LCS)",
