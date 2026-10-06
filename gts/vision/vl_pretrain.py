@@ -381,6 +381,27 @@ class Pairs:
         return out
 
 
+class uncompiled:
+    """Within the block, ModuleLists run their original (uncompiled) modules: evaluation under no_grad would
+    otherwise compile a second, inference graph for every block, and that recompile hit an Inductor bug (KeyError
+    'op19') on the GPU."""
+
+    def __init__(self, *module_lists):
+        self.lists, self.saved = module_lists, []
+
+    def __enter__(self):
+        for ml in self.lists:
+            self.saved.append(list(ml))
+            for i, m in enumerate(ml):
+                ml[i] = getattr(m, "_orig_mod", m)
+
+    def __exit__(self, *exc):
+        for ml, saved in zip(self.lists, self.saved):
+            for i, m in enumerate(saved):
+                ml[i] = m
+        self.saved = []
+
+
 def decode(jpegs, device):
     """JPEG bytes -> uint8 (B, 3, S, S) on ``device`` (nvJPEG on a GPU)."""
     from torchvision.io import decode_jpeg
@@ -583,7 +604,13 @@ def train(a):
         os.replace(os.path.join(a.out, "checkpoint.pt.tmp"), os.path.join(a.out, "checkpoint.pt"))
 
     def record(step):
-        ev = evaluate()
+        try:
+            with uncompiled(model.layers, lm.backbone.layers):
+                ev = evaluate()
+        except Exception as e:  # an evaluation failure is reported, not allowed to end the run
+            print(f"  evaluation at step {step} failed: {type(e).__name__}: {str(e)[:300]}", flush=True)
+            model.train()
+            return
         tl = {k: run[k] / max(1, run["n"]) for k in ("clip", "cap")}
         curve.append({"step": step, "images": step * a.batch_size, "train_clip": tl["clip"], "train_cap": tl["cap"],
                       "minutes": (time.time() - t_start) / 60, **ev})

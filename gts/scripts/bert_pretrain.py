@@ -146,6 +146,27 @@ def prep(a):
 # ---------------------------------------------------------------------------------------------------------- train
 
 
+class uncompiled:
+    """Within the block, ModuleLists run their original (uncompiled) modules: evaluation under no_grad would
+    otherwise compile a second, inference graph for every block, and that recompile hit an Inductor bug (KeyError
+    'op19') on the GPU."""
+
+    def __init__(self, *module_lists):
+        self.lists, self.saved = module_lists, []
+
+    def __enter__(self):
+        for ml in self.lists:
+            self.saved.append(list(ml))
+            for i, m in enumerate(ml):
+                ml[i] = getattr(m, "_orig_mod", m)
+
+    def __exit__(self, *exc):
+        for ml, saved in zip(self.lists, self.saved):
+            for i, m in enumerate(saved):
+                ml[i] = m
+        self.saved = []
+
+
 def get_batch(data, a, special, gen, device, mask_prob=None):
     """Windows of the stream starting with [CLS], BERT's masking. Drawn on the CPU from a seeded generator."""
     L, V = a.seq_len, a.vocab
@@ -334,10 +355,11 @@ def train(a):
         os.replace(tmp, os.path.join(a.out, "checkpoint.pt"))
 
     def record(step):
-        vl, acc = evaluate(model, val_data, a, special, device)
-        by_loops = {}
-        for n in range(1, cfg.get("loops", 1)):
-            by_loops[n] = evaluate(model, val_data, a, special, device, loops=n)
+        with uncompiled(model.backbone.layers):
+            vl, acc = evaluate(model, val_data, a, special, device)
+            by_loops = {}
+            for n in range(1, cfg.get("loops", 1)):
+                by_loops[n] = evaluate(model, val_data, a, special, device, loops=n)
         tl = run_loss / run_n if run_n else float("nan")
         elapsed = time.time() - t_start
         curve.append({"step": step, "tokens": step * tokens_per_step, "val_loss": vl, "val_masked_acc": acc, "train_loss": tl,
