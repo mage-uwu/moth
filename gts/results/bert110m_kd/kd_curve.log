@@ -1,0 +1,29 @@
+teacher google-bert/bert-base-uncased: val loss 2.3512  masked acc 0.5903; distilling with alpha 0.75, temperature 2.0
+  step 109000  loss 2.2476  (kl 1.9680  ce 3.0863)  lr 1.48e-04  1.2 min
+  4.10 steps/s = 134,431 tokens/s; schedule fitted to 150176 steps, 41347 in this phase (1.35B tokens)
+  step 110000  loss 2.0289  (kl 1.6445  ce 3.1818)  lr 5.00e-04  5.2 min
+step 110000  tokens   3604.5M  val loss 2.9592  masked acc 0.4847  train 2.1593     5.4 min
+  step 111000  loss 2.0093  (kl 1.5908  ce 3.2651)  lr 4.99e-04  9.4 min
+  step 112000  loss 2.0373  (kl 1.6502  ce 3.1986)  lr 4.97e-04  13.5 min
+step 112000  tokens   3670.0M  val loss 2.9655  masked acc 0.4855  train 1.9832    13.5 min
+  step 113000  loss 1.8833  (kl 1.4563  ce 3.1644)  lr 4.93e-04  17.6 min
+  step 114000  loss 1.9311  (kl 1.5178  ce 3.1709)  lr 4.88e-04  21.6 min
+step 114000  tokens   3735.6M  val loss 2.9468  masked acc 0.4854  train 1.9224    21.7 min
+  step 115000  loss 1.9165  (kl 1.4561  ce 3.2977)  lr 4.82e-04  25.7 min
+  step 116000  loss 1.9140  (kl 1.5029  ce 3.1476)  lr 4.75e-04  29.8 min
+step 116000  tokens   3801.1M  val loss 2.9436  masked acc 0.4851  train 1.8968    29.8 min
+  step 117000  loss 1.9356  (kl 1.4989  ce 3.2456)  lr 4.66e-04  33.9 min
+  step 118000  loss 1.8952  (kl 1.4611  ce 3.1977)  lr 4.56e-04  37.9 min
+step 118000  tokens   3866.6M  val loss 2.9430  masked acc 0.4849  train 1.8792    37.9 min
+  step 119000  loss 1.8256  (kl 1.4131  ce 3.0629)  lr 4.45e-04  42.0 min
+  step 120000  loss 1.8708  (kl 1.4343  ce 3.1803)  lr 4.33e-04  46.1 min
+step 120000  tokens   3932.2M  val loss 2.9335  masked acc 0.4867  train 1.8454    46.1 min
+  step 121000  loss 1.9065  (kl 1.4738  ce 3.2046)  lr 4.20e-04  50.1 min
+  step 122000  loss 1.8744  (kl 1.4332  ce 3.1979)  lr 4.06e-04  54.2 min
+step 122000  tokens   3997.7M  val loss 2.9356  masked acc 0.4863  train 1.8474    54.2 min
+  step 123000  loss 1.8316  (kl 1.4382  ce 3.0116)  lr 3.92e-04  58.3 min
+  step 124000  loss 1.7890  (kl 1.3499  ce 3.1065)  lr 3.76e-04  62.3 min
+step 124000  tokens   4063.2M  val loss 2.9228  masked acc 0.4883  train 1.8455    62.3 min
+  step 125000  loss 1.7540  (kl 1.2837  ce 3.1647)  lr 3.60e-04  66.4 min
+  step 126000  loss 1.8063  (kl 1.3488  ce 3.1791)  lr 3.44e-04  70.5 min
+step 126000  tokens   4128.8M  val loss 2.9256  masked acc 0.4873  train 1.8130    70.5 min
