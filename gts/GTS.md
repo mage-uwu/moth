@@ -407,6 +407,31 @@ At 2 x 2,048 tokens with both kernels and checkpointing, 11,763 tokens/s: length
 left is mostly the dense matmuls of the deep trees (every node's logit and the output, about 140 ms of GPU time per
 step with checkpointing), the output head, AdamW and many small elementwise kernels; bf16 is still untried.
 
+### bf16, fusion and aligned GEMMs
+
+The same step after the route kernels, 8 x 512 tokens on an A100, no gradient checkpointing (`scripts/profile_step.py`):
+
+| | ms per step | Tokens/s |
+|---|---|---|
+| Route kernels and scan, float32/TF32 | 263 | 15,598 |
+| + fused AdamW | 239 | 17,127 |
+| + bf16 autocast | 229 | 17,889 |
+| + node dimension and head padded to multiples of 64 (aligned GEMMs), fused ternary quantiser, conv as shifted sums | 188 | 21,738 |
+| + `torch.compile` of each block | **121** | **33,894** |
+| the same with gradient checkpointing (8.6 GB) | 152 | 26,929 |
+
+- **Why bf16 alone gave little.** 4 x 2,047 tree nodes and a 50,257-row head made every GEMM misaligned, and cuBLAS
+  fell back to slow kernels. Padding with zero rows the kernels never visit (and slicing the logits back) fixes it.
+- **Exactness.** The fused quantiser (`mamba_ssm/ops/ternary_fused.py`) gives the PyTorch codes, scales within one
+  float32 ulp; the shifted-sum conv equals `nn.Conv1d` (tested); padding and slicing leave the loss unchanged.
+  bf16 autocast rounds activations in float32 before quantising, so the codes match the float32 export.
+- **Quality.** 300 steps on FineWeb, validation loss: float32/TF32 6.5943, bf16 6.5979, bf16 + compile 6.5892.
+- **What is left.** About 40% of the step is the deep trees' six dense bf16 GEMMs per layer, now running near
+  peak; then fused AdamW (9 ms), the head and softmax, and small fused kernels.
+
+`lm_run.py --amp --compile --no-checkpoint` trains this way. The 0.5B results above were trained before all of this,
+in float32 with checkpointing.
+
 ## Departures from Mamba-2
 
 - **Bidirectional by default.** Forward and backward context share the key B and use separate queries.
