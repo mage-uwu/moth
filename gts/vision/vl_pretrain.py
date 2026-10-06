@@ -1,10 +1,10 @@
 # Golden Tree Snake (GTS) fork, 2026.
 """Vision-language pretraining of a ternary GTS vision backbone (~38M), with a sidecar into the GTS masked LM.
 
-    python scripts/vl_pretrain.py prep     --out /root/vl --work /root/raw
-    python scripts/vl_pretrain.py prep-imagenet --out /root/imnet --work /root/raw     # needs HF_TOKEN (gated set)
-    python scripts/vl_pretrain.py train    --data /root/vl --lm binarized.pt --out /root/run --minutes 600
-    python scripts/vl_pretrain.py probe    --ckpt /root/run/checkpoint.pt --data /root/imnet --out /root/run
+    python vision/vl_pretrain.py prep     --out /root/vl --work /root/raw
+    python vision/vl_pretrain.py prep-imagenet --out /root/imnet --work /root/raw     # needs HF_TOKEN (gated set)
+    python vision/vl_pretrain.py train    --data /root/vl --lm binarized.pt --out /root/run --minutes 600
+    python vision/vl_pretrain.py probe    --ckpt /root/run/checkpoint.pt --data /root/imnet --out /root/run
 
 prep: image-caption pairs from
       - ShareGPT4V-PT (Lin-Chen/ShareGPT4V, share-captioner_coco_lcs_sam_1246k): its COCO train2017 and LLaVA
