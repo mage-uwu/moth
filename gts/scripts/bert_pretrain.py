@@ -15,6 +15,11 @@ train: RoBERTa-style masked LM: 512-token windows of the stream starting with [C
        Writes, to --out: result.json (curve, settings), checkpoint.pt (float: latent weights, AdamW state, step,
        config, curve; also every --ckpt-minutes) and binarized.pt (2-bit ternary codes and scales plus the float
        tensors; mamba_ssm/utils/ternary_pack.py loads it back into an identical model).
+       ``--teacher google-bert/bert-base-uncased`` adds knowledge distillation: the teacher (any Hugging Face masked LM
+       with the same vocabulary, run frozen in bf16) sees the same masked batch, and at the labelled positions the loss
+       is alpha * T^2 * KL(teacher || student at temperature T) + (1 - alpha) * cross-entropy with the true tokens.
+       Validation stays the plain masked-LM loss and accuracy at --eval-mask-prob, so it compares across runs; the
+       teacher's own validation numbers are recorded at the start.
 
 ``prep --text-file FILE`` tokenises a local text file instead, for smoke tests.
 """
@@ -141,14 +146,15 @@ def prep(a):
 # ---------------------------------------------------------------------------------------------------------- train
 
 
-def get_batch(data, a, special, gen, device):
+def get_batch(data, a, special, gen, device, mask_prob=None):
     """Windows of the stream starting with [CLS], BERT's masking. Drawn on the CPU from a seeded generator."""
     L, V = a.seq_len, a.vocab
+    mask_prob = a.mask_prob if mask_prob is None else mask_prob
     starts = torch.randint(0, len(data) - L, (a.batch_size,), generator=gen).tolist()
     ids = torch.from_numpy(np.stack([data[s : s + L - 1] for s in starts]).astype(np.int64))
     ids = torch.cat([torch.full((a.batch_size, 1), special["[CLS]"]), ids], 1)
     maskable = (ids != special["[CLS]"]) & (ids != special["[SEP]"]) & (ids != special["[PAD]"])
-    chosen = (torch.rand(ids.shape, generator=gen) < a.mask_prob) & maskable
+    chosen = (torch.rand(ids.shape, generator=gen) < mask_prob) & maskable
     labels = torch.where(chosen, ids, torch.full_like(ids, -100))
     r = torch.rand(ids.shape, generator=gen)
     inputs = ids.clone()
@@ -159,20 +165,56 @@ def get_batch(data, a, special, gen, device):
 
 
 @torch.no_grad()
-def evaluate(model, data, a, special, device):
+def evaluate(model, data, a, special, device, teacher=None):
+    """Masked-LM loss and accuracy on the same validation batches every time (fixed seed, --eval-mask-prob); of the
+    student, or of ``teacher`` when given."""
     model.eval()
     g = torch.Generator().manual_seed(1234)
     loss, correct, total = 0.0, 0, 0
     for _ in range(a.eval_batches):
-        x, y = get_batch(data, a, special, g, device)
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.amp):
-            out = model(x, labels=y, labelled_only=True)
+        x, y = get_batch(data, a, special, g, device, mask_prob=a.eval_mask_prob)
         sel = y[y != -100]
-        loss += out.loss.item() * len(sel)
-        correct += (out.logits.argmax(-1) == sel).sum().item()
+        if teacher is not None:
+            logits = teacher_logits(teacher, x, y != -100).float()
+        else:
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.amp):
+                logits = model(x, labels=y, labelled_only=True).logits.float()
+        loss += torch.nn.functional.cross_entropy(logits, sel, reduction="sum").item()
+        correct += (logits.argmax(-1) == sel).sum().item()
         total += len(sel)
     model.train()
     return loss / total, correct / total
+
+
+def load_teacher(name, vocab, device):
+    """A frozen Hugging Face masked LM (bf16 on GPU) with the student's vocabulary."""
+    from transformers import AutoModelForMaskedLM
+
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    teacher = AutoModelForMaskedLM.from_pretrained(name, dtype=dtype, attn_implementation="sdpa").to(device).eval()
+    assert teacher.config.vocab_size == vocab, f"the teacher's vocabulary ({teacher.config.vocab_size}) is not the student's ({vocab})"
+    for p in teacher.parameters():
+        p.requires_grad_(False)
+    return teacher
+
+
+@torch.no_grad()
+def teacher_logits(teacher, x, sel):
+    """The teacher's logits at the positions ``sel`` (row-major, as the student's labelled_only logits): the encoder
+    over the whole batch, the masked-LM head only where needed."""
+    hidden = teacher.base_model(input_ids=x, attention_mask=torch.ones_like(x)).last_hidden_state
+    head = teacher.cls if hasattr(teacher, "cls") else teacher.lm_head  # BERT's head, or RoBERTa-style models'
+    return head(hidden[sel])
+
+
+def distill_loss(student, teacher, labels, alpha, temp):
+    """alpha * T^2 * KL(teacher || student, both at temperature T) + (1 - alpha) * CE(student, labels), in float32.
+    Returns the total and its two parts."""
+    s, t = student.float(), teacher.float()
+    ce = torch.nn.functional.cross_entropy(s, labels)
+    kl = torch.nn.functional.kl_div(torch.log_softmax(s / temp, -1), torch.log_softmax(t / temp, -1), log_target=True,
+                                    reduction="batchmean") * temp * temp
+    return alpha * kl + (1 - alpha) * ce, kl, ce
 
 
 EXAMPLES = [
@@ -226,6 +268,12 @@ def train(a):
         assert ck["config"] == cfg, f"the checkpoint's model differs: {ck['config']} vs {cfg}"
         model.load_state_dict(ck["model"])
         print(f"resumed from {a.resume} at step {ck['step']}", flush=True)
+    teacher = load_teacher(a.teacher, a.vocab, device) if a.teacher else None
+    teacher_val = None
+    if teacher is not None:
+        teacher_val = evaluate(model, val_data, a, special, device, teacher=teacher)
+        print(f"teacher {a.teacher}: val loss {teacher_val[0]:.4f}  masked acc {teacher_val[1]:.4f}; distilling with alpha "
+              f"{a.distill_alpha}, temperature {a.distill_temp}", flush=True)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"GTS masked LM: {n_params / 1e6:.1f}M parameters; {meta['source']}, {meta['train_tokens']:,} training tokens", flush=True)
     if a.compile and device == "cuda":
@@ -279,6 +327,7 @@ def train(a):
         print(f"step {step:6d}  tokens {step * tokens_per_step / 1e6:8.1f}M  val loss {vl:.4f}  masked acc {acc:.4f}  "
               f"train {tl:.4f}  {elapsed / 60:6.1f} min", flush=True)
         json.dump({"params": n_params, "config": cfg, "args": vars(a), "phases": phases, "data": meta, "total_steps": total_steps,
+                   "teacher_val": teacher_val and {"name": a.teacher, "val_loss": teacher_val[0], "val_masked_acc": teacher_val[1]},
                    "curve": curve},
                   open(os.path.join(a.out, "result.json"), "w"), indent=1)
 
@@ -294,7 +343,11 @@ def train(a):
             group["lr"] = lr_at(step)
         x, y = get_batch(train_data, a, special, gen, device)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.amp):
-            loss = model(x, labels=y, labelled_only=True).loss
+            out = model(x, labels=y, labelled_only=True)
+        if teacher is None:
+            loss = out.loss
+        else:
+            loss, kl, ce = distill_loss(out.logits, teacher_logits(teacher, x, y != -100), y[y != -100], a.distill_alpha, a.distill_temp)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -318,7 +371,8 @@ def train(a):
             print(f"  {rate:.2f} steps/s = {rate * tokens_per_step:,.0f} tokens/s; schedule fitted to {total_steps} steps, "
                   f"{total_steps - s0} in this phase ({(total_steps - s0) * tokens_per_step / 1e9:.2f}B tokens)", flush=True)
         if step % a.log_every == 0:
-            print(f"  step {step:6d}  loss {loss.item():.4f}  lr {lr_at(step):.2e}  {(time.time() - t_start) / 60:.1f} min", flush=True)
+            parts = f"  (kl {kl.item():.4f}  ce {ce.item():.4f})" if teacher is not None else ""
+            print(f"  step {step:6d}  loss {loss.item():.4f}{parts}  lr {lr_at(step):.2e}  {(time.time() - t_start) / 60:.1f} min", flush=True)
         if time.time() - last_ckpt > a.ckpt_minutes * 60:
             save_float(step)
             last_ckpt = time.time()
@@ -363,6 +417,10 @@ def main():
     t.add_argument("--batch-size", type=int, default=64)
     t.add_argument("--seq-len", type=int, default=512)
     t.add_argument("--mask-prob", type=float, default=0.15)
+    t.add_argument("--eval-mask-prob", type=float, default=0.15, help="masking of the validation batches (kept fixed across runs)")
+    t.add_argument("--teacher", help="Hugging Face masked LM to distil from, e.g. google-bert/bert-base-uncased")
+    t.add_argument("--distill-alpha", type=float, default=0.75, help="weight of the distillation term (the rest: true tokens)")
+    t.add_argument("--distill-temp", type=float, default=2.0)
     t.add_argument("--lr", type=float, default=1e-3)
     t.add_argument("--warmup", type=int, default=1000)
     t.add_argument("--resume", help="float checkpoint.pt to continue from: weights, AdamW state, step, curve, sampler")
