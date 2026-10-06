@@ -10,6 +10,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint
 import torch.nn.functional as F
 
 from mamba_ssm.modules.gts import GTS, GTSMixed
@@ -44,6 +45,12 @@ class GTSConfig:
     bank_state: int = 16
     deep_trees: int = 4
     deep_depth: int = 6
+    # GTS-Uni: depth recurrence. The whole stack of n_layer blocks runs ``loops`` times with the same weights; passes
+    # after the first add a learned per-pass embedding, carry ``latent_tokens`` learned scratch vectors after [CLS],
+    # and add their update through a per-channel gate that starts at zero (so a fresh GTS-Uni computes exactly what
+    # its one-pass weights do). The number of passes can be lowered at run time.
+    loops: int = 1
+    latent_tokens: int = 0
 
 
 class RMSNorm(nn.Module):
@@ -91,13 +98,43 @@ class GTSEncoder(nn.Module):
             self.embedding.weight[config.pad_token_id].zero_()
         self.layers = nn.ModuleList([GTSBlock(config, i) for i in range(config.n_layer)])
         self.norm_f = RMSNorm(config.d_model, eps=config.norm_eps)
+        self.checkpoint_loops = False  # recompute each later pass in the backward pass (activation memory of one pass)
+        if config.loops > 1:
+            self.loop_embed = nn.Parameter(torch.zeros(config.loops - 1, config.d_model))
+            self.loop_gate = nn.Parameter(torch.zeros(config.loops - 1, config.d_model))
+            for p in (self.loop_embed, self.loop_gate):
+                p._no_weight_decay = True
+        if config.latent_tokens:
+            self.latents = nn.Parameter(torch.randn(config.latent_tokens, config.d_model) * 0.02)
+            self.latents._no_weight_decay = True
 
-    def forward(self, input_ids, attention_mask=None):
-        if attention_mask is None:
-            attention_mask = input_ids != self.config.pad_token_id
-        x = self.embedding(input_ids)
+    def _stack(self, x, attention_mask):
         for layer in self.layers:
             x = layer(x, attention_mask=attention_mask)
+        return x
+
+    def forward(self, input_ids, attention_mask=None, loops=None):
+        """``loops``: passes to run, 1 to config.loops (default all)."""
+        if attention_mask is None:
+            attention_mask = input_ids != self.config.pad_token_id
+        n = self.config.loops if loops is None else loops
+        assert 1 <= n <= self.config.loops
+        x = self._stack(self.embedding(input_ids), attention_mask)
+        if n > 1:
+            K, B = self.config.latent_tokens, x.shape[0]
+            mask = attention_mask
+            if K:
+                x = torch.cat([x[:, :1], self.latents.to(x.dtype).expand(B, -1, -1), x[:, 1:]], 1)
+                mask = torch.cat([mask[:, :1], mask.new_ones(B, K), mask[:, 1:]], 1)
+            for t in range(n - 1):
+                xin = x + self.loop_embed[t]
+                if self.checkpoint_loops and torch.is_grad_enabled():
+                    y = torch.utils.checkpoint.checkpoint(self._stack, xin, mask, use_reentrant=False)
+                else:
+                    y = self._stack(xin, mask)
+                x = x + self.loop_gate[t] * (y - xin)
+            if K:
+                x = torch.cat([x[:, :1], x[:, 1 + K :]], 1)
         return self.norm_f(x)
 
 
@@ -120,11 +157,11 @@ class GTSForMaskedLM(nn.Module):
             self.lm_head.weight = self.backbone.embedding.weight
         nn.init.zeros_(self.lm_head.bias)
 
-    def forward(self, input_ids, attention_mask=None, labels=None, labelled_only=False):
+    def forward(self, input_ids, attention_mask=None, labels=None, labelled_only=False, loops=None):
         """``labelled_only`` (with labels): score only the positions that carry a label (about 15% under masked-LM
         training) and return their logits, (n_labelled, vocab), in row-major order of the batch. Same loss as the
         full head, for a fraction of its work."""
-        hidden = self.backbone(input_ids, attention_mask=attention_mask)
+        hidden = self.backbone(input_ids, attention_mask=attention_mask, loops=loops)
         if labelled_only and labels is not None:
             sel = labels != -100
             hidden, labels = hidden[sel], labels[sel]

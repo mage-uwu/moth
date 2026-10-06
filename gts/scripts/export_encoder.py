@@ -1,12 +1,13 @@
 # Golden Tree Snake (GTS) fork, 2026.
-"""Export a bidirectional mixed-forest masked LM (GTSForMaskedLM, mixer "mixed") for kernel/enc_bench.c.
+"""Export a bidirectional mixed-forest masked LM (GTSForMaskedLM, mixer "mixed"; a GTS-Uni too) for kernel/enc_bench.c.
 
     python scripts/export_encoder.py checkpoints/.../checkpoint.pt runs/enc.bin   # float checkpoint.pt or binarized.pt
 
 Writes the weights (ternary tensors as their effective scale * code values; the kernel packs them) plus a test: a
 sequence with masked positions and PyTorch's float32 logits at them, so the kernel can show it computes the same
 function. Layout: 12 ints (format 7, vocab, width, layers, bank trees, bank heads, bank state, deep trees, deep depth,
-conv taps, activation bits, unused), then float32 tensors in the order of ``_tensors``, then the test.
+conv taps, activation bits, unused; format 8, a GTS-Uni, adds passes and latent tokens), then float32 tensors in the
+order of ``_tensors`` (a GTS-Uni's pass embeddings, gates and latents after the layers), then the test.
 """
 import os
 import struct
@@ -40,6 +41,8 @@ def _tensors(model):
         out += [bank._w_in(), bank.node_bias, bank._w_out(), bank.conv1d.weight.squeeze(1), bank.conv1d.bias,
                 bank._w_ctx(), bank.dt_bias, bank.A_log]
         out += [deep._w_in(), deep.node_bias, deep._w_out(), deep.conv1d.weight.squeeze(1), deep.conv1d.bias]
+    if model.config.loops > 1:  # GTS-Uni
+        out += [b.loop_embed, b.loop_gate] + ([b.latents] if model.config.latent_tokens else [])
     return out
 
 
@@ -61,6 +64,8 @@ def main():
     deep = model.backbone.layers[0].mixer.deep
     head = [7, cfg["vocab_size"], cfg["d_model"], cfg["n_layer"], bank.n_trees, bank.n_heads, bank.d_state,
             deep.n_trees, deep.depth, bank.d_conv, cfg["act_bits"], 0]
+    if cfg.get("loops", 1) > 1:  # format 8: GTS-Uni, two more ints (passes, latent tokens)
+        head = [8] + head[1:] + [cfg["loops"], cfg.get("latent_tokens", 0)]
     with open(dst, "wb") as f:
         f.write(struct.pack(f"{len(head)}i", *head))
         for t in _tensors(model):

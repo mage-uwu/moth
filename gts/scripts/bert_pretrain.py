@@ -165,7 +165,7 @@ def get_batch(data, a, special, gen, device, mask_prob=None):
 
 
 @torch.no_grad()
-def evaluate(model, data, a, special, device, teacher=None):
+def evaluate(model, data, a, special, device, teacher=None, loops=None):
     """Masked-LM loss and accuracy on the same validation batches every time (fixed seed, --eval-mask-prob); of the
     student, or of ``teacher`` when given."""
     model.eval()
@@ -178,7 +178,7 @@ def evaluate(model, data, a, special, device, teacher=None):
             logits = teacher_logits(teacher, x, y != -100).float()
         else:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.amp):
-                logits = model(x, labels=y, labelled_only=True).logits.float()
+                logits = model(x, labels=y, labelled_only=True, loops=loops).logits.float()
         loss += torch.nn.functional.cross_entropy(logits, sel, reduction="sum").item()
         correct += (logits.argmax(-1) == sel).sum().item()
         total += len(sel)
@@ -245,9 +245,12 @@ def fill_mask_examples(model, a, device):
 
 
 def model_config(a):
-    return dict(d_model=a.width, n_layer=a.layers, vocab_size=a.vocab, mixer="mixed", bank_trees=a.bank_trees,
-                bank_heads=a.bank_heads, bank_state=a.bank_state, deep_trees=a.deep_trees, deep_depth=a.deep_depth,
-                d_conv=3, causal=False, ternary=True, ternary_group=128, act_bits=8, route_ste=a.route_ste, pad_token_id=0)
+    cfg = dict(d_model=a.width, n_layer=a.layers, vocab_size=a.vocab, mixer="mixed", bank_trees=a.bank_trees,
+               bank_heads=a.bank_heads, bank_state=a.bank_state, deep_trees=a.deep_trees, deep_depth=a.deep_depth,
+               d_conv=3, causal=False, ternary=True, ternary_group=128, act_bits=8, route_ste=a.route_ste, pad_token_id=0)
+    if a.loops > 1:  # GTS-Uni; left out otherwise, so one-pass checkpoints keep their config
+        cfg.update(loops=a.loops, latent_tokens=a.latent_tokens)
+    return cfg
 
 
 def train(a):
@@ -268,6 +271,18 @@ def train(a):
         assert ck["config"] == cfg, f"the checkpoint's model differs: {ck['config']} vs {cfg}"
         model.load_state_dict(ck["model"])
         print(f"resumed from {a.resume} at step {ck['step']}", flush=True)
+    elif a.init_from:  # e.g. a one-pass GTS-MLM's weights for a GTS-Uni: the new parameters keep their initial values
+        src = torch.load(a.init_from, map_location="cpu", weights_only=False)
+        new = {"backbone.loop_embed", "backbone.loop_gate", "backbone.latents"}
+        if "model" in src:
+            missing, unexpected = model.load_state_dict(src["model"], strict=False)
+        else:
+            from mamba_ssm.utils.ternary_pack import load_binarized
+            load_binarized(src, model, allow_missing=new)
+            missing, unexpected = sorted(new & {n for n, _ in model.named_parameters()}), []
+        assert not unexpected and set(missing) <= new, f"init-from mismatch: missing {missing}, unexpected {unexpected}"
+        print(f"weights from {a.init_from} (step {src.get('step')}); new parameters: {sorted(missing)}", flush=True)
+    model.backbone.checkpoint_loops = a.checkpoint_loops
     teacher = load_teacher(a.teacher, a.vocab, device) if a.teacher else None
     teacher_val = None
     if teacher is not None:
@@ -320,10 +335,16 @@ def train(a):
 
     def record(step):
         vl, acc = evaluate(model, val_data, a, special, device)
+        by_loops = {}
+        for n in range(1, cfg.get("loops", 1)):
+            by_loops[n] = evaluate(model, val_data, a, special, device, loops=n)
         tl = run_loss / run_n if run_n else float("nan")
         elapsed = time.time() - t_start
         curve.append({"step": step, "tokens": step * tokens_per_step, "val_loss": vl, "val_masked_acc": acc, "train_loss": tl,
-                      "minutes": elapsed / 60, "phase": len(phases)})
+                      "minutes": elapsed / 60, "phase": len(phases),
+                      **({"val_by_loops": {n: {"loss": l, "acc": c} for n, (l, c) in by_loops.items()}} if by_loops else {})})
+        if by_loops:
+            print("           fewer passes: " + "  ".join(f"{n}: loss {l:.4f} acc {c:.4f}" for n, (l, c) in by_loops.items()), flush=True)
         print(f"step {step:6d}  tokens {step * tokens_per_step / 1e6:8.1f}M  val loss {vl:.4f}  masked acc {acc:.4f}  "
               f"train {tl:.4f}  {elapsed / 60:6.1f} min", flush=True)
         json.dump({"params": n_params, "config": cfg, "args": vars(a), "phases": phases, "data": meta, "total_steps": total_steps,
@@ -333,6 +354,12 @@ def train(a):
 
     step = s0
     model.train()
+    import random as _random
+    loop_rng = _random.Random(a.seed + s0)
+    loop_probs = [float(v) for v in a.loop_probs.split(",")] if cfg.get("loops", 1) > 1 else [1.0]
+    assert len(loop_probs) == cfg.get("loops", 1), "--loop-probs needs one probability per pass count"
+    if a.init_from and ck is None:
+        record(step)  # where the warm start begins
     while True:
         if step % a.eval_every == 0 and step > s0:
             record(step)
@@ -342,8 +369,9 @@ def train(a):
         for group in opt.param_groups:
             group["lr"] = lr_at(step)
         x, y = get_batch(train_data, a, special, gen, device)
+        n_loops = loop_rng.choices(range(1, len(loop_probs) + 1), weights=loop_probs)[0]
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.amp):
-            out = model(x, labels=y, labelled_only=True)
+            out = model(x, labels=y, labelled_only=True, loops=n_loops)
         if teacher is None:
             loss = out.loss
         else:
@@ -424,6 +452,12 @@ def main():
     t.add_argument("--lr", type=float, default=1e-3)
     t.add_argument("--warmup", type=int, default=1000)
     t.add_argument("--resume", help="float checkpoint.pt to continue from: weights, AdamW state, step, curve, sampler")
+    t.add_argument("--init-from", help="weights to start a new run from (no optimizer state or step): e.g. a one-pass "
+                   "checkpoint.pt or binarized.pt for a GTS-Uni")
+    t.add_argument("--loops", type=int, default=1, help="GTS-Uni: passes of the whole stack with shared weights")
+    t.add_argument("--latent-tokens", type=int, default=0, help="GTS-Uni: learned scratch tokens after [CLS] from pass 2")
+    t.add_argument("--loop-probs", default="0.1,0.2,0.7", help="GTS-Uni: probability of training a step with 1, 2, ... passes")
+    t.add_argument("--checkpoint-loops", action="store_true", help="GTS-Uni: recompute passes after the first in backward")
     t.add_argument("--rewarm", type=int, default=1000, help="on resume: steps from the checkpoint's last rate to --lr")
     t.add_argument("--weight-decay", type=float, default=0.01)
     t.add_argument("--eval-every", type=int, default=1000)

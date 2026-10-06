@@ -70,8 +70,9 @@ def save_binarized(model, config, path):
 
 
 @torch.no_grad()
-def load_binarized(path_or_blob, model):
-    """Fill ``model`` (built from the saved config) from a binarized checkpoint. Returns the model."""
+def load_binarized(path_or_blob, model, allow_missing=()):
+    """Fill ``model`` (built from the saved config) from a binarized checkpoint. Returns the model. ``allow_missing``:
+    parameter names the checkpoint may lack, which keep their initial values (a GTS-Uni built from one-pass weights)."""
     blob = torch.load(path_or_blob, map_location="cpu") if isinstance(path_or_blob, str) else path_or_blob
     missing, _ = model.load_state_dict(blob["float"], strict=False)
     params = dict(model.named_parameters())
@@ -83,6 +84,6 @@ def load_binarized(path_or_blob, model):
         latent = (cg * e["scales"].unsqueeze(-1) / frac).reshape(codes.shape)
         params[name].copy_(latent)
     left = [n for n in missing if n not in blob["ternary"]]
-    tied = {n for n in left if n.endswith("lm_head.weight")}
+    tied = {n for n in left if n.endswith("lm_head.weight")} | set(allow_missing)
     assert not (set(left) - tied), f"not in the checkpoint: {sorted(set(left) - tied)}"
     return model

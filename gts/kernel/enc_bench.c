@@ -37,6 +37,8 @@ typedef struct { float *norm; Mix bank, deep; } Layer;
 
 static int V, D, NL, KC, TB, HB, NB, TD, DD;
 static float *emb, *head_bias, *norm_f;
+static int LOOPS = 1, KL = 0;                         // GTS-Uni: passes of the stack, latent scratch tokens
+static float *loop_embed, *loop_gate, *latents;
 static Layer *layers;
 
 static void load_mix(Mix *m, int n_trees, int depth, int N, int H, int ctx) {
@@ -60,7 +62,7 @@ static void load_mix(Mix *m, int n_trees, int depth, int N, int H, int ctx) {
 }
 
 // Scratch, sized for the longest sequence.
-static float *X, *U, *OUT, *P, *LB, *SRC, *CTX, *CTXB, *AD, *STEP, *HST;
+static float *X, *U, *OUT, *P, *LB, *SRC, *CTX, *CTXB, *AD, *STEP, *HST, *XB, *XIN, *Y;
 static signed char *Q;
 
 static void alloc_scratch(int T) {
@@ -70,6 +72,7 @@ static void alloc_scratch(int T) {
     P = (float *)xalloc((size_t)T * (3 * NB + HB) * 4); LB = (float *)xalloc((size_t)T * TB * 4);
     SRC = (float *)xalloc((size_t)T * TB * 4); CTX = (float *)xalloc((size_t)T * TB * 4); CTXB = (float *)xalloc((size_t)T * TB * 4);
     AD = (float *)xalloc((size_t)T * HB * 4); HST = (float *)xalloc((size_t)2 * TB * NB * 4);
+    XB = (float *)xalloc((size_t)T * D * 4); XIN = (float *)xalloc((size_t)T * D * 4); Y = (float *)xalloc((size_t)T * D * 4);
 }
 
 // The mixer's input for every token: centred conv over U, then int8 per token (codes in Q, step in STEP).
@@ -157,20 +160,44 @@ static void deep(const Mix *m, int T) {
 
 static double t_layers;
 
-static void encode(const int *ids, int T, float *hidden) {
-    for (int t = 0; t < T; t++) memcpy(X + (size_t)t * D, emb + (size_t)ids[t] * D, D * 4);
-    const double t0 = now();
+// The whole stack over x (T tokens), in place.
+static void stack(float *x, int T) {
     for (int l = 0; l < NL; l++) {
 #pragma omp parallel for schedule(static)
         for (int t = 0; t < T; t++) {
-            rmsnorm(X + (size_t)t * D, layers[l].norm, U + (size_t)t * D, D);
+            rmsnorm(x + (size_t)t * D, layers[l].norm, U + (size_t)t * D, D);
             memset(OUT + (size_t)t * D, 0, D * 4);
         }
         bank(&layers[l].bank, T);
         deep(&layers[l].deep, T);
 #pragma omp parallel for schedule(static)
         for (int t = 0; t < T; t++)
-            for (int c = 0; c < D; c++) X[(size_t)t * D + c] += OUT[(size_t)t * D + c];
+            for (int c = 0; c < D; c++) x[(size_t)t * D + c] += OUT[(size_t)t * D + c];
+    }
+}
+
+// passes: 1 to LOOPS. After the first, the latents go in after [CLS] and each pass adds gate * (stack(x + e) - (x + e)).
+static void encode(const int *ids, int T, float *hidden, int passes) {
+    for (int t = 0; t < T; t++) memcpy(X + (size_t)t * D, emb + (size_t)ids[t] * D, D * 4);
+    const double t0 = now();
+    stack(X, T);
+    if (passes > 1) {
+        const int T2 = T + KL;
+        memcpy(XB, X, D * 4);
+        if (KL) memcpy(XB + D, latents, (size_t)KL * D * 4);
+        memcpy(XB + (size_t)(1 + KL) * D, X + D, (size_t)(T - 1) * D * 4);
+        for (int it = 0; it < passes - 1; it++) {
+            const float *e = loop_embed + (size_t)it * D, *g = loop_gate + (size_t)it * D;
+#pragma omp parallel for schedule(static)
+            for (int t = 0; t < T2; t++)
+                for (int c = 0; c < D; c++) XIN[(size_t)t * D + c] = Y[(size_t)t * D + c] = XB[(size_t)t * D + c] + e[c];
+            stack(Y, T2);
+#pragma omp parallel for schedule(static)
+            for (int t = 0; t < T2; t++)
+                for (int c = 0; c < D; c++) XB[(size_t)t * D + c] += g[c] * (Y[(size_t)t * D + c] - XIN[(size_t)t * D + c]);
+        }
+        memcpy(X, XB, D * 4);
+        memcpy(X + D, XB + (size_t)(1 + KL) * D, (size_t)(T - 1) * D * 4);
     }
     t_layers += now() - t0;
 #pragma omp parallel for schedule(static)
@@ -186,9 +213,11 @@ int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: enc_bench enc.bin [repeats]\n"); return 1; }
     const int reps = argc > 2 ? atoi(argv[2]) : 5;
     g_f = fopen(argv[1], "rb"); if (!g_f) { perror("open"); return 1; }
-    if (rdi() != 7) { fprintf(stderr, "not an encoder file\n"); return 1; }
+    const int format = rdi();
+    if (format != 7 && format != 8) { fprintf(stderr, "not an encoder file\n"); return 1; }
     V = rdi(); D = rdi(); NL = rdi(); TB = rdi(); HB = rdi(); NB = rdi(); TD = rdi(); DD = rdi(); KC = rdi();
     const int bits = rdi(); rdi();
+    if (format == 8) { LOOPS = rdi(); KL = rdi(); }
     if (bits != 8 || NB != 16 || D % 64 || D > 1024) { fprintf(stderr, "unsupported shape\n"); return 1; }
     emb = rdf((size_t)V * D); head_bias = rdf(V); norm_f = rdf(D);
     layers = (Layer *)xalloc(NL * sizeof(Layer));
@@ -197,13 +226,17 @@ int main(int argc, char **argv) {
         load_mix(&layers[l].bank, TB, 0, NB, HB, 1);
         load_mix(&layers[l].deep, TD, DD, 0, 1, 0);
     }
+    if (LOOPS > 1) {
+        loop_embed = rdf((size_t)(LOOPS - 1) * D); loop_gate = rdf((size_t)(LOOPS - 1) * D);
+        if (KL) latents = rdf((size_t)KL * D);
+    }
     const int T = rdi(), M = rdi();
     int *ids = (int *)xalloc(T * 4), *pos = (int *)xalloc(M * 4);
     if (fread(ids, 4, T, g_f) != (size_t)T || fread(pos, 4, M, g_f) != (size_t)M) return 1;
     float *ref = rdf((size_t)M * V);
     fclose(g_f);
     const int TMAX = 512 > T ? 512 : T;
-    alloc_scratch(TMAX);
+    alloc_scratch(TMAX + KL);
     float *hidden = (float *)xalloc((size_t)TMAX * D * 4), *logits = (float *)xalloc((size_t)V * 4);
     int threads = 1;
 #ifdef _OPENMP
@@ -211,9 +244,10 @@ int main(int argc, char **argv) {
 #endif
     printf("%d thread(s). GTS encoder: %d layers, width %d; bank %d trees (%d heads, state %d), %d deep trees of depth %d; %d tensors packed ternary\n",
            threads, NL, D, TB, HB, NB, TD, DD, g_packed);
+    if (LOOPS > 1) printf("  GTS-Uni: %d passes of the stack with shared weights, %d latent tokens\n", LOOPS, KL);
 
     // 1. same function as PyTorch at the masked positions
-    encode(ids, T, hidden);
+    encode(ids, T, hidden, LOOPS);
     float worst = 0; int agree = 0; double nll_c = 0, nll_r = 0;
     for (int k = 0; k < M; k++) {
         head(hidden + (size_t)pos[k] * D, logits);
@@ -232,13 +266,14 @@ int main(int argc, char **argv) {
     int *seq = (int *)xalloc(TMAX * 4);
     for (int t = 0; t < TMAX; t++) seq[t] = ids[t % T];
     const int lens[2] = {128, 512};
+    for (int passes = 1; passes <= LOOPS; passes++)
     for (int li = 0; li < 2; li++) {
         const int L = lens[li];
-        encode(seq, L, hidden);  // warm
+        encode(seq, L, hidden, passes);  // warm
         double best = 1e30; t_layers = 0;
-        for (int r = 0; r < reps; r++) { const double t0 = now(); encode(seq, L, hidden); const double dt = now() - t0; if (dt < best) best = dt; }
-        printf("  sequence %3d: %.2f ms per sequence (best of %d) = %.1f us per token = %.0f tokens/s; layers %.1f us per token per layer\n",
-               L, best * 1e3, reps, best / L * 1e6, L / best, t_layers / reps / L / NL * 1e6);
+        for (int r = 0; r < reps; r++) { const double t0 = now(); encode(seq, L, hidden, passes); const double dt = now() - t0; if (dt < best) best = dt; }
+        printf("  %d pass%s, sequence %3d: %.2f ms per sequence (best of %d) = %.1f us per token = %.0f tokens/s; layers %.1f us per token per layer\n",
+               passes, passes > 1 ? "es" : "", L, best * 1e3, reps, best / L * 1e6, L / best, t_layers / reps / L / NL / passes * 1e6);
     }
     const double t0 = now();
     for (int r = 0; r < 20; r++) head(hidden + (size_t)(r % 128) * D, logits);
