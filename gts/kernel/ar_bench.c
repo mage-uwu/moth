@@ -6,8 +6,9 @@
 //   gcc -O3 -march=native -ffast-math -funroll-loops ar_bench.c -o ar_bench -lm
 //   ./ar_bench runs/gts/model.bin [n_tokens]
 //
-// Both models run in float32. Ternary weights arrive as scale * {-1, 0, +1} floats: this measures the
-// arithmetic each architecture needs, not what a packed ternary kernel would do.
+// The file holds ternary weights as scale * {-1, 0, +1} floats. With AVX-512 they are packed at load time (below);
+// the third argument "float" runs them as plain float32 instead, and "m2rows" runs Mamba-2's float projections as
+// row dot products rather than in column form (the kernel before the column form was added).
 #include <immintrin.h>
 #include <math.h>
 #include <stdio.h>
@@ -51,7 +52,7 @@ static void rmsnorm(const float *x, const float *w, float *y, int n) { rmsnorm_e
 // in registers, and a scaled add of the row is masked adds into the output. Same function as the float path, up
 // to summation order. The file stores effective float weights (scale * code); packing recovers the codes at load
 // time and refuses any tensor that is not exactly ternary per group.
-static int g_use_pack = 1, g_packed = 0, g_float = 0, g_i16 = 0;
+static int g_use_pack = 1, g_packed = 0, g_float = 0, g_i16 = 0, g_colform = 1;
 typedef struct { int rows, cols, nch, gch, ng; unsigned short *pos, *neg; float *scale; } TMat;
 #ifdef __AVX512F__
 static int tm_pack(TMat *m, const float *w, int rows, int cols) {
@@ -79,16 +80,16 @@ static int tm_pack(TMat *m, const float *w, int rows, int cols) {
 static inline void tm_load(const float *x, __m512 *xv, int nch) { for (int c = 0; c < nch; c++) xv[c] = _mm512_loadu_ps(x + 16 * c); }
 static inline float tm_dot(const TMat *m, int r, const __m512 *xv) {
     const unsigned short *p = m->pos + (size_t)r * m->nch, *n = m->neg + (size_t)r * m->nch;
-    float total = 0;
+    __m512 tv = _mm512_setzero_ps();
     for (int g = 0; g < m->ng; g++) {
         __m512 p0 = _mm512_setzero_ps(), p1 = p0, n0 = p0, n1 = p0; // four short chains instead of one long one
         for (int c = g * m->gch; c < (g + 1) * m->gch; c += 2) {
             p0 = _mm512_mask_add_ps(p0, p[c], p0, xv[c]); n0 = _mm512_mask_add_ps(n0, n[c], n0, xv[c]);
             p1 = _mm512_mask_add_ps(p1, p[c + 1], p1, xv[c + 1]); n1 = _mm512_mask_add_ps(n1, n[c + 1], n1, xv[c + 1]);
         }
-        total += m->scale[(size_t)r * m->ng + g] * _mm512_reduce_add_ps(_mm512_sub_ps(_mm512_add_ps(p0, p1), _mm512_add_ps(n0, n1)));
+        tv = _mm512_fmadd_ps(_mm512_set1_ps(m->scale[(size_t)r * m->ng + g]), _mm512_sub_ps(_mm512_add_ps(p0, p1), _mm512_add_ps(n0, n1)), tv);
     }
-    return total;
+    return _mm512_reduce_add_ps(tv); // one horizontal sum per row, not one per group
 }
 static inline void tm_axpy(const TMat *m, int r, float alpha, __m512 *yv) {
     const unsigned short *p = m->pos + (size_t)r * m->nch, *n = m->neg + (size_t)r * m->nch;
@@ -128,6 +129,66 @@ static void tm_out_rows(const TMat *m, const int *rows, const float *coef, int S
     tm_load(out, yv, m->nch);
     for (int i = 0; i < S; i++) tm_axpy(m, rows[i], coef[i], yv);
     memcpy(out, yv, (size_t)m->cols * sizeof(float));
+}
+// Column form of a packed ternary matrix for dense matrix-vector products y = W x (every row needed, as in Mamba-2's
+// projections). Rows go in blocks of up to 256 (16 registers of 16 rows). Within a block, for each input column c,
+// the masks of its rows are stored together: pos[block][c][j], j = register. One broadcast of x[c] is added into all
+// sixteen registers under those masks, so there is no horizontal sum, and sixteen independent chains.
+// Per-row scales (one per 128-column group) are applied once per group: t[j] holds the group's partial sums.
+typedef struct { int rows, cols, gsz, ng, nblk; unsigned short *pos, *neg; float *scale_t; } CMat; // scale_t[g * rows + r]
+static int cm_from_tm(CMat *c, const TMat *m) {
+    if (m->rows % 16) return 0;
+    c->rows = m->rows; c->cols = m->cols; c->gsz = m->gch * 16; c->ng = m->ng; c->nblk = (m->rows + 255) / 256;
+    c->pos = (unsigned short *)xalloc((size_t)m->rows / 16 * m->cols * 2); c->neg = (unsigned short *)xalloc((size_t)m->rows / 16 * m->cols * 2);
+    c->scale_t = (float *)xalloc((size_t)m->ng * m->rows * sizeof(float));
+    for (int r = 0; r < m->rows; r++) for (int g = 0; g < m->ng; g++) c->scale_t[(size_t)g * m->rows + r] = m->scale[(size_t)r * m->ng + g];
+    for (int b = 0; b < c->nblk; b++) {
+        const int r0 = 256 * b, nj = (m->rows - r0) / 16 < 16 ? (m->rows - r0) / 16 : 16;
+        unsigned short *P = c->pos + (size_t)r0 / 16 * m->cols, *N = c->neg + (size_t)r0 / 16 * m->cols;
+        for (int col = 0; col < m->cols; col++)
+            for (int j = 0; j < nj; j++) {
+                unsigned short pw = 0, nw = 0;
+                for (int l = 0; l < 16; l++) {
+                    const int r = r0 + 16 * j + l;
+                    pw |= ((m->pos[(size_t)r * m->nch + col / 16] >> (col % 16)) & 1u) << l;
+                    nw |= ((m->neg[(size_t)r * m->nch + col / 16] >> (col % 16)) & 1u) << l;
+                }
+                P[(size_t)col * nj + j] = pw; N[(size_t)col * nj + j] = nw;
+            }
+    }
+    return 1;
+}
+#define CM_STEP(J) { t##J = _mm512_mask_add_ps(t##J, P[J], t##J, xb); t##J = _mm512_mask_sub_ps(t##J, N[J], t##J, xb); }
+static void cm_matvec(const CMat *c, const float *x, float *y) {
+    for (int b = 0; b < c->nblk; b++) {
+        const int r0 = 256 * b, nj = (c->rows - r0) / 16 < 16 ? (c->rows - r0) / 16 : 16;
+        __m512 acc[16];
+        for (int j = 0; j < nj; j++) acc[j] = _mm512_setzero_ps();
+        for (int g = 0; g < c->ng; g++) {
+            __m512 t0 = _mm512_setzero_ps(), t1 = t0, t2 = t0, t3 = t0, t4 = t0, t5 = t0, t6 = t0, t7 = t0, t8 = t0, t9 = t0, t10 = t0, t11 = t0, t12 = t0, t13 = t0, t14 = t0, t15 = t0;
+            const unsigned short *P = c->pos + (size_t)r0 / 16 * c->cols + (size_t)g * c->gsz * nj, *N = c->neg + (size_t)r0 / 16 * c->cols + (size_t)g * c->gsz * nj;
+            if (nj == 16) {
+                for (int col = g * c->gsz; col < (g + 1) * c->gsz; col++, P += 16, N += 16) {
+                    const __m512 xb = _mm512_set1_ps(x[col]);
+                    CM_STEP(0) CM_STEP(1) CM_STEP(2) CM_STEP(3) CM_STEP(4) CM_STEP(5) CM_STEP(6) CM_STEP(7)
+                    CM_STEP(8) CM_STEP(9) CM_STEP(10) CM_STEP(11) CM_STEP(12) CM_STEP(13) CM_STEP(14) CM_STEP(15)
+                }
+            } else {
+                __m512 t[16];
+                for (int j = 0; j < nj; j++) t[j] = _mm512_setzero_ps();
+                for (int col = g * c->gsz; col < (g + 1) * c->gsz; col++, P += nj, N += nj) {
+                    const __m512 xb = _mm512_set1_ps(x[col]);
+                    for (int j = 0; j < nj; j++) { t[j] = _mm512_mask_add_ps(t[j], P[j], t[j], xb); t[j] = _mm512_mask_sub_ps(t[j], N[j], t[j], xb); }
+                }
+                t0 = t[0]; t1 = t[1]; t2 = t[2]; t3 = t[3]; t4 = t[4]; t5 = t[5]; t6 = t[6]; t7 = t[7];
+                t8 = t[8]; t9 = t[9]; t10 = t[10]; t11 = t[11]; t12 = t[12]; t13 = t[13]; t14 = t[14]; t15 = t[15];
+            }
+            const __m512 tv[16] = {t0, t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15};
+            const float *sc = c->scale_t + (size_t)g * c->rows + r0;
+            for (int j = 0; j < nj; j++) acc[j] = _mm512_fmadd_ps(_mm512_loadu_ps(sc + 16 * j), tv[j], acc[j]);
+        }
+        for (int j = 0; j < nj; j++) _mm512_storeu_ps(y + r0 + 16 * j, acc[j]);
+    }
 }
 #endif
 // 8-bit activations: when the input of a ternary layer was trained quantised to int8 per token, a row's dot product
@@ -210,6 +271,9 @@ static inline void tm_load(const float *x, __m512 *xv, int nch) { (void)x; (void
 static inline float tm_dot(const TMat *m, int r, const __m512 *xv) { (void)m; (void)r; (void)xv; return 0; }
 static inline void tm_axpy(const TMat *m, int r, float alpha, __m512 *yv) { (void)m; (void)r; (void)alpha; (void)yv; }
 static void tm_out_rows(const TMat *m, const int *rows, const float *coef, int S, float *out) { (void)m; (void)rows; (void)coef; (void)S; (void)out; }
+typedef struct { int rows; } CMat;
+static int cm_from_tm(CMat *c, const TMat *m) { (void)c; (void)m; return 0; }
+static void cm_matvec(const CMat *c, const float *x, float *y) { (void)c; (void)x; (void)y; }
 #endif
 
 // ------------------------------------------------------------------------------ causal GTS
@@ -379,7 +443,7 @@ coef:
 
 typedef struct {
     int d, di, N, H, P, kc, n_in, conv_dim;
-    float *in_w, *conv_w, *conv_b, *dt_bias, *A, *D, *norm_w, *out_w, *conv_state, *state, *zx, *y, *tmp, *conv_t, *cv, *uq; TMat t_in, t_out; int packed, act_bits; signed char *q8;
+    float *in_w, *conv_w, *conv_b, *dt_bias, *A, *D, *norm_w, *out_w, *conv_state, *state, *zx, *y, *tmp, *conv_t, *cv, *uq; TMat t_in, t_out; CMat c_in, c_out; int packed, colform, act_bits; signed char *q8;
 } MLayer;
 
 static MLayer *m2_load(int d, int di, int N, int H, int P, int kc, int act_bits) {
@@ -391,6 +455,7 @@ static MLayer *m2_load(int d, int di, int N, int H, int P, int kc, int act_bits)
     m->conv_state = (float *)xalloc(m->conv_dim * kc * sizeof(float)); m->state = (float *)xalloc((size_t)di * N * sizeof(float));
     m->zx = (float *)xalloc(m->n_in * sizeof(float)); m->y = (float *)xalloc(di * sizeof(float)); m->tmp = (float *)xalloc(m->n_in * sizeof(float));
     m->packed = tm_pack(&m->t_in, m->in_w, m->n_in, d) && tm_pack(&m->t_out, m->out_w, d, di);
+    m->colform = m->packed && g_colform && !act_bits && cm_from_tm(&m->c_in, &m->t_in) && cm_from_tm(&m->c_out, &m->t_out);
     m->act_bits = act_bits; m->uq = (float *)xalloc((d > di ? d : di) * sizeof(float)); m->q8 = (signed char *)xalloc((d > di ? d : di) + 64);
     m->conv_t = (float *)xalloc((size_t)kc * m->conv_dim * sizeof(float)); m->cv = (float *)xalloc(m->conv_dim * sizeof(float));
     for (int c = 0; c < m->conv_dim; c++) for (int j = 0; j < kc; j++) m->conv_t[(size_t)j * m->conv_dim + c] = m->conv_w[c * kc + j];
@@ -415,6 +480,7 @@ static void m2_step(MLayer *m, const float *u, float *out) {
 #endif
     if (m->act_bits && !i8) { quant_float(u, m->uq, d, m->act_bits); u = m->uq; }
     if (i8) {}
+    else if (m->colform) cm_matvec(&m->c_in, u, m->zx);
     else if (m->packed) { tm_load(u, xv, d / 16); for (int i = 0; i < m->n_in; i++) m->zx[i] = tm_dot(&m->t_in, i, xv); }
     else for (int i = 0; i < m->n_in; i++) m->zx[i] = dot(m->in_w + (size_t)i * d, u, d);
     float *z = m->zx, *xBC = m->zx + di, *dt = m->zx + di + m->conv_dim;
@@ -451,7 +517,8 @@ static void m2_step(MLayer *m, const float *u, float *out) {
     }
 #endif
     if (m->act_bits) quant_float(m->y, m->y, di, m->act_bits);
-    if (m->packed) { tm_load(m->y, xv, di / 16); for (int i = 0; i < d; i++) out[i] = tm_dot(&m->t_out, i, xv); }
+    if (m->colform) cm_matvec(&m->c_out, m->y, out);
+    else if (m->packed) { tm_load(m->y, xv, di / 16); for (int i = 0; i < d; i++) out[i] = tm_dot(&m->t_out, i, xv); }
     else for (int i = 0; i < d; i++) out[i] = dot(m->out_w + (size_t)i * di, m->y, di);
 }
 
@@ -533,9 +600,11 @@ static MLayer *m2_synth(int d, int N, int P, int act_bits) {
     m->cv = (float *)xalloc(m->conv_dim * sizeof(float)); m->uq = (float *)xalloc(di * sizeof(float)); m->q8 = (signed char *)xalloc(di + 64);
     tm_random(&m->t_in, m->n_in, d); tm_random(&m->t_out, d, di);
     m->packed = 1;
+    m->colform = g_colform && !act_bits && cm_from_tm(&m->c_in, &m->t_in) && cm_from_tm(&m->c_out, &m->t_out);
     return m;
 }
 static int synth_main(int argc, char **argv) {
+    if (getenv("M2ROWS")) g_colform = 0;
     if (argc < 4) { fprintf(stderr, "see the comment above synth_main for usage\n"); return 1; }
     const int mixed = !strcmp(argv[2], "mixed"), d = atoi(argv[3]), L = atoi(argv[4]);
     Model M; memset(&M, 0, sizeof(M));
@@ -594,7 +663,8 @@ int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: ar_bench model.bin [n_tokens]\n"); return 1; }
     const long n_tokens = argc > 2 ? atol(argv[2]) : 100000;
     if (argc > 3 && !strcmp(argv[3], "float")) g_use_pack = 0; // run the ternary weights as plain float32
-    if (argc > 3 && !strcmp(argv[3], "i16out")) g_i16 = 1;     // also sum the output rows with 16-bit integer coefficients (no faster, less exact)
+    if (argc > 3 && !strcmp(argv[3], "i16out")) g_i16 = 1;
+    if (argc > 3 && !strcmp(argv[3], "m2rows")) g_colform = 0; // Mamba-2 float projections as row dot products (the earlier kernel)     // also sum the output rows with 16-bit integer coefficients (no faster, less exact)
     g_f = fopen(argv[1], "rb"); if (!g_f) { perror("open"); return 1; }
     Model M; memset(&M, 0, sizeof(M));
     M.arch = rdi(); M.V = rdi(); M.d = rdi(); M.n_layer = rdi();
