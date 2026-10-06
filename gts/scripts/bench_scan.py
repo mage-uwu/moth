@@ -100,22 +100,20 @@ def main():
 
         rows = []
         if L <= 2048:
-            rows.append(("PyTorch quadratic (what GTS trains with)", run(lambda: gts_scan_reference(C, B, X, torch.cumsum(dt * A, 1)))))
-        rows.append(("gts_scan sequential chunk  64 tf32", run(lambda: gts_scan(C, B, X, torch.cumsum(dt * A, 1), False, 64, "tf32", parallel=False))))
+            rows.append(("PyTorch quadratic (what GTS trains with)", run(lambda: gts_scan_reference(C, B, X, dt * A))))
         for chunk in (32, 64, 128):
             for prec in ("ieee", "tf32"):
-                rows.append((f"gts_scan parallel chunk {chunk:3d} {prec}", run(lambda c=chunk, q=prec: gts_scan(C, B, X, torch.cumsum(dt * A, 1), False, c, q))))
+                rows.append((f"gts_scan chunk {chunk:3d} {prec}", run(lambda c=chunk, q=prec: gts_scan(C, B, X, dt * A, False, False, c, q))))
         if mamba_chunk_scan_combined is not None:
             for chunk in (64, 128, 256):
                 rows.append((f"upstream mamba_chunk_scan_combined {chunk}", run(lambda c=chunk: mamba_chunk_scan_combined(X, dt, A, B.unsqueeze(2), C.unsqueeze(2), c))))
         if a.profile:
-            gpu_profile(run(lambda: gts_scan(C, B, X, torch.cumsum(dt * A, 1), False, 64, "tf32")), f"gts_scan parallel 64 tf32, L {L}", 8)
-            gpu_profile(run(lambda: gts_scan(C, B, X, torch.cumsum(dt * A, 1), False, 64, "tf32", parallel=False)), f"gts_scan sequential 64 tf32, L {L}", 8)
+            gpu_profile(run(lambda: gts_scan(C, B, X, dt * A, False, False, 64, "tf32")), f"gts_scan 64 tf32, L {L}", 8)
             if mamba_chunk_scan_combined is not None:
                 gpu_profile(run(lambda: mamba_chunk_scan_combined(X, dt, A, B.unsqueeze(2), C.unsqueeze(2), 128)), f"upstream 128, L {L}", 4)
-        ref = gts_scan_reference(C, B, X, torch.cumsum(dt * A, 1)) if L <= 2048 else None
+        ref = gts_scan_reference(C, B, X, dt * A) if L <= 2048 else None
         if ref is not None:
-            err = (gts_scan(C, B, X, torch.cumsum(dt * A, 1)) - ref).abs().max().item() / ref.abs().max().item()
+            err = (gts_scan(C, B, X, dt * A) - ref).abs().max().item() / ref.abs().max().item()
             print(f"length {L}: gts_scan vs PyTorch, max relative error {err:.1e}")
         for name, fn in rows:
             try:

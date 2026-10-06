@@ -19,19 +19,31 @@ from mamba_ssm.ops.gts_scan import gts_scan, gts_scan_reference  # noqa: E402
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-@pytest.mark.parametrize("parallel", [True, False])
+@pytest.mark.parametrize("excl", [False, True])
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("b,l,h,p,n,chunk", [(2, 64, 2, 4, 16, 16), (2, 100, 3, 4, 16, 32), (1, 37, 2, 8, 16, 16), (1, 50, 2, 5, 20, 16)])
-def test_scan_matches_reference(b, l, h, p, n, chunk, reverse, parallel):
+def test_scan_matches_reference(b, l, h, p, n, chunk, reverse, excl):
     torch.manual_seed(0)
     C, B = (torch.randn(b, l, n, device=DEV, requires_grad=True) for _ in range(2))
     X = torch.randn(b, l, h, p, device=DEV, requires_grad=True)
     a = (-torch.rand(b, l, h, device=DEV) * 0.3).requires_grad_()
-    cs = torch.cumsum(a, 1)
-    ref, out = gts_scan_reference(C, B, X, cs, reverse), gts_scan(C, B, X, cs, reverse, chunk, parallel=parallel)
+    ref, out = gts_scan_reference(C, B, X, a, reverse, excl), gts_scan(C, B, X, a, reverse, excl, chunk, "ieee")
     g = torch.randn_like(ref)
     for x, y in zip((out,) + torch.autograd.grad((out * g).sum(), (C, B, X, a)), (ref,) + torch.autograd.grad((ref * g).sum(), (C, B, X, a))):
         assert torch.allclose(x, y, rtol=1e-4, atol=1e-4 * y.abs().max().item())
+
+
+def test_scan_reverse_is_gts_backward_context():
+    """reverse=True is the decay a[t] + ... + a[s-1] from s > t, which GTS's bidirectional context uses."""
+    torch.manual_seed(0)
+    C, B = torch.randn(1, 20, 16, device=DEV), torch.randn(1, 20, 16, device=DEV)
+    X, a = torch.randn(1, 20, 2, 4, device=DEV), -torch.rand(1, 20, 2, device=DEV)
+    cs = torch.cumsum(a, 1)
+    cs_ex = cs - a
+    w = torch.exp((cs_ex[:, None, :, :] - cs_ex[:, :, None, :]).masked_fill(~torch.ones(20, 20, dtype=torch.bool, device=DEV).triu(1)[None, :, :, None], -torch.inf))
+    want = torch.einsum("btsh,bshp->bthp", (C @ B.transpose(1, 2)).unsqueeze(-1) * w, X)
+    assert torch.allclose(gts_scan_reference(C, B, X, a, reverse=True), want, atol=1e-5)
+    assert torch.allclose(gts_scan(C, B, X, a, reverse=True, chunk=16, precision="ieee"), want, atol=1e-4)
 
 
 @pytest.mark.parametrize("causal", [True, False])

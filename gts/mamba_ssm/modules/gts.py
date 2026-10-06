@@ -354,10 +354,9 @@ class GTS(nn.Module):
 
         batch, length, _ = src.shape
         X = src.reshape(batch, length, self.n_heads, self.n_trees // self.n_heads)
-        cs = torch.cumsum(a, dim=1)  # (b, l, heads)
-        ctx = gts_scan(C_fwd, B, X, cs)
+        ctx = gts_scan(C_fwd, B, X, a)  # a: (b, l, heads), one clock per head
         if not self.causal:
-            ctx = ctx + gts_scan(C_bwd, B, X, cs - a, reverse=True)  # [t, s] = sum_{r=t..s-1} a_r on exclusive sums
+            ctx = ctx + gts_scan(C_bwd, B, X, a, reverse=True)  # decay a[t] + ... + a[s-1] from s > t
         return ctx.reshape(batch, length, self.n_trees).to(src.dtype)
 
     def _decay_weights(self, B, C_fwd, C_bwd, a):
