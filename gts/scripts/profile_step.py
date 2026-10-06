@@ -25,6 +25,9 @@ def main():
     p.add_argument("--no-scan-kernel", action="store_true")
     p.add_argument("--no-route-kernel", action="store_true")
     p.add_argument("--no-checkpoint", action="store_true")
+    p.add_argument("--amp", action="store_true", help="bf16 autocast")
+    p.add_argument("--fused-adam", action="store_true")
+    p.add_argument("--compile", action="store_true", help="torch.compile each block")
     p.add_argument("--top", type=int, default=25)
     a = p.parse_args()
     d = dict(width=1024, layers=27, bank_trees=32, bank_heads=8, bank_state=16, deep_trees=4, deep_depth=10, m2_layers=68, m2_state=128, m2_headdim=64)
@@ -37,12 +40,16 @@ def main():
             m.scan_kernel = False
         if a.no_route_kernel and hasattr(m, "route_kernel"):
             m.route_kernel = False
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=a.fused_adam)
+    if a.compile:
+        for i, layer in enumerate(model.layers):
+            model.layers[i] = torch.compile(layer)
     x = torch.randint(0, 50257, (a.batch_size, a.seq_len), device="cuda")
 
     def step():
         opt.zero_grad(set_to_none=True)
-        loss = lm_run.forward(model, x, x, not a.no_checkpoint)[1]
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.amp):
+            loss = lm_run.forward(model, x, x, not a.no_checkpoint)[1]
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
@@ -56,7 +63,7 @@ def main():
     torch.cuda.synchronize()
     dt = (time.perf_counter() - t) / 3
     print(f"{a.arch}, {a.batch_size} x {a.seq_len} tokens, scan {not a.no_scan_kernel}, route kernel {not a.no_route_kernel}, "
-          f"checkpoint {not a.no_checkpoint}: {dt * 1e3:.0f} ms per step = {a.batch_size * a.seq_len / dt:,.0f} tokens/s, "
+          f"checkpoint {not a.no_checkpoint}, amp {a.amp}, fused adam {a.fused_adam}, compile {a.compile}: {dt * 1e3:.0f} ms per step = {a.batch_size * a.seq_len / dt:,.0f} tokens/s, "
           f"peak memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GB")
     from torch.profiler import ProfilerActivity, profile
 

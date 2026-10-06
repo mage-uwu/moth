@@ -150,7 +150,7 @@ def main():
     decay = [q for q in model.parameters() if q.ndim >= 2 and not getattr(q, "_no_weight_decay", False)]
     rest = [q for q in model.parameters() if not (q.ndim >= 2 and not getattr(q, "_no_weight_decay", False))]
     opt = torch.optim.AdamW([{"params": decay, "weight_decay": args.weight_decay}, {"params": rest, "weight_decay": 0.0}],
-                            lr=args.lr, betas=(0.9, 0.95))
+                            lr=args.lr, betas=(0.9, 0.95), fused=args.device.startswith("cuda"))  # same update, one kernel
     g = torch.Generator().manual_seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
     use_checkpoint = not args.no_checkpoint

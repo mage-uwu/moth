@@ -65,8 +65,9 @@ def quantize_activations(x, bits=8, lam=1.0, eps=1e-5):
     if lam <= 0 or bits is None:
         return x
     qmax = 2 ** (bits - 1) - 1
-    scale = qmax / x.abs().amax(dim=-1, keepdim=True).clamp(min=eps)
-    xq = (x * scale).round().clamp(-qmax - 1, qmax) / scale
+    xf = x.float()  # under bf16 autocast, round in float32 so the codes match the float32 export
+    scale = qmax / xf.abs().amax(dim=-1, keepdim=True).clamp(min=eps)
+    xq = ((xf * scale).round().clamp(-qmax - 1, qmax) / scale).to(x.dtype)
     if lam >= 1:
         return xq.detach() + (x - x.detach())
     return x + lam * (xq - x).detach()

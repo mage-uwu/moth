@@ -58,7 +58,7 @@ if HAVE_TRITON:
         cur = tl.zeros((BLOCK,), dtype=tl.int32)
         for k in tl.static_range(DEPTH + 1):
             node = base + cur
-            lg = tl.load(Lp + tok * s_l + node, mask=ok, other=0.0)
+            lg = tl.load(Lp + tok * s_l + node, mask=ok, other=0.0).to(tl.float32)
             tl.store(Ap + tok * s_a + node, _coef(lg, ACT), mask=ok)
             if STORE_NODES:
                 tl.store(NODESp + (tok * n_trees + tree) * (DEPTH + 1) + k, node, mask=ok)
@@ -75,15 +75,15 @@ if HAVE_TRITON:
         cur = tl.zeros((BLOCK,), dtype=tl.int32)
         total = tl.zeros((BLOCK,), dtype=tl.float32)
         for k in tl.static_range(DEPTH + 1):
-            lg = tl.load(Lp + tok * s_l + base + cur, mask=ok, other=0.0)
-            total += _coef(lg, ACT) * tl.load(Gp + tok * s_g + base + cur, mask=ok, other=0.0)
+            lg = tl.load(Lp + tok * s_l + base + cur, mask=ok, other=0.0).to(tl.float32)
+            total += _coef(lg, ACT) * tl.load(Gp + tok * s_g + base + cur, mask=ok, other=0.0).to(tl.float32)
             cur = 2 * cur + 1 + (lg > 0).to(tl.int32)
         # pass 2: each path node's gradient
         cur = tl.zeros((BLOCK,), dtype=tl.int32)
         done = tl.zeros((BLOCK,), dtype=tl.float32)  # coef * g summed over the path down to this node
         for k in tl.static_range(DEPTH + 1):
-            lg = tl.load(Lp + tok * s_l + base + cur, mask=ok, other=0.0)
-            gk = tl.load(Gp + tok * s_g + base + cur, mask=ok, other=0.0)
+            lg = tl.load(Lp + tok * s_l + base + cur, mask=ok, other=0.0).to(tl.float32)
+            gk = tl.load(Gp + tok * s_g + base + cur, mask=ok, other=0.0).to(tl.float32)
             done += _coef(lg, ACT) * gk
             d = _dcoef(lg, ACT) * gk
             right = lg > 0
@@ -92,8 +92,8 @@ if HAVE_TRITON:
                 s = 2 * cur + 2 - right.to(tl.int32)  # the other child
                 alt = tl.zeros((BLOCK,), dtype=tl.float32)
                 for j in tl.static_range(DEPTH - k):
-                    ls = tl.load(Lp + tok * s_l + base + s, mask=ok, other=0.0)
-                    alt += _coef(ls, ACT) * tl.load(Gp + tok * s_g + base + s, mask=ok, other=0.0)
+                    ls = tl.load(Lp + tok * s_l + base + s, mask=ok, other=0.0).to(tl.float32)
+                    alt += _coef(ls, ACT) * tl.load(Gp + tok * s_g + base + s, mask=ok, other=0.0).to(tl.float32)
                     s = 2 * s + 1 + (ls > 0).to(tl.int32)
                 p = 1.0 / (1.0 + tl.exp(-lg * inv_temp))
                 d += tl.where(right, on - alt, alt - on) * p * (1.0 - p) * inv_temp
@@ -107,6 +107,7 @@ def _grid(n_tok, n_trees, block):
 
 class _RouteSTE(torch.autograd.Function):
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(ctx, L, W, n_trees, depth, act, temp, want_nodes):
         n_tok, total = L.shape
         n_nodes = total // n_trees
@@ -124,6 +125,7 @@ class _RouteSTE(torch.autograd.Function):
         return out, (nodes if want_nodes else None)
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, dout, _dnodes):
         L, W = ctx.saved_tensors
         n_trees, depth, act, temp = ctx.cfg
@@ -147,11 +149,12 @@ class _RouteSTE(torch.autograd.Function):
 
 
 def route_ste_out(L, W, n_trees, depth, act="gelu", temp=1.0, want_nodes=False):
-    """L: (tokens, trees * nodes) every node's logit; W: (trees * nodes, d) output rows. Returns (out, nodes): out is
+    """L: (tokens, trees * nodes) every node's logit, in any float dtype (the kernels work in float32; under bf16
+    autocast the (tokens x nodes) buffers stay bf16 and the matmuls run in bf16); W: (trees * nodes, d) output rows. Returns (out, nodes): out is
     (tokens, d), the stateless trees' output with the straight-through routing gradient; nodes is (tokens, trees,
     depth + 1) int32 global node ids along each path if ``want_nodes``, else None. ``act`` is "gelu", "split"
     (the same with no context) or "linear"."""
     if not HAVE_TRITON:
         raise RuntimeError("route_ste_out needs triton")
     code = {"gelu": 0, "split": 0, "linear": 1}[act]
-    return _RouteSTE.apply(L.float(), W, n_trees, depth, code, float(temp), want_nodes)
+    return _RouteSTE.apply(L, W, n_trees, depth, code, float(temp), want_nodes)
