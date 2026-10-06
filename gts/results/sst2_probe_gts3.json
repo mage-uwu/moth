@@ -1,0 +1,44 @@
+{
+ "task": "SST-2",
+ "train_sentences": 20000,
+ "selection_sentences": 2000,
+ "validation_sentences": 872,
+ "models": {
+  "GTS3": {
+   "zero_shot_acc": 0.5389908256880734,
+   "feature_seconds": 543,
+   "probe": {
+    "val_acc": 0.7396788990825688,
+    "selection_acc": 0.762,
+    "weight_decay": 0.01,
+    "epochs": 10,
+    "parameters": 3074
+   },
+   "adapter": {
+    "val_acc": 0.7339449541284404,
+    "selection_acc": 0.806,
+    "weight_decay": 0.01,
+    "epochs": 30,
+    "parameters": 98498
+   }
+  },
+  "BERT-base (reference)": {
+   "zero_shot_acc": 0.5619266055045872,
+   "feature_seconds": 114,
+   "probe": {
+    "val_acc": 0.8600917431192661,
+    "selection_acc": 0.884,
+    "weight_decay": 0.01,
+    "epochs": 60,
+    "parameters": 3074
+   },
+   "adapter": {
+    "val_acc": 0.8474770642201835,
+    "selection_acc": 0.8965,
+    "weight_decay": 0.0001,
+    "epochs": 10,
+    "parameters": 98498
+   }
+  }
+ }
+}
