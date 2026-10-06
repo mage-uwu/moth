@@ -1,0 +1,126 @@
+.......................................                                  [100%]
+39 passed in 41.58s
+mixed, 8 x 512 tokens, scan False, route kernel False, checkpoint True: 795 ms per step = 5,151 tokens/s, peak memory 9.5 GB
+  GPU busy 1556 ms per step (196% of the step)
+       140.3 ms    9.0%  x  542  aten::mm
+       131.3 ms    8.4%  x 2243  void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl
+       103.8 ms    6.7%  x 1867  aten::add_
+       100.7 ms    6.5%  x 3926  aten::mul
+        98.2 ms    6.3%  x 2889  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        94.1 ms    6.1%  x 2674  aten::copy_
+        61.4 ms    3.9%  x 2785  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        46.8 ms    3.0%  x   81  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_256x128_32x3_tn_align4>(cutl
+        45.9 ms    3.0%  x   81  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_128x256_32x3_nn_align4>(cutl
+        38.6 ms    2.5%  x  922  void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa
+        38.4 ms    2.5%  x 1029  aten::add
+        32.6 ms    2.1%  x  757  aten::cat
+        30.1 ms    1.9%  x   54  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_256x128_32x3_nt_align4>(cutl
+        30.0 ms    1.9%  x 1894  aten::fill_
+        29.7 ms    1.9%  x 1786  void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>
+        27.5 ms    1.8%  x 1026  aten::sub
+        26.2 ms    1.7%  x    1  Optimizer.step#AdamW.step
+        22.3 ms    1.4%  x  594  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        21.2 ms    1.4%  x  487  aten::div
+        15.1 ms    1.0%  x  300  aten::sum
+        12.3 ms    0.8%  x   81  void at::native::vectorized_elementwise_kernel<4, at::native::BUnaryFunctor<floa
+        11.0 ms    0.7%  x  972  aten::bmm
+        10.5 ms    0.7%  x   54  void at::native::(anonymous namespace)::CatArrayBatchedCopy_alignedK_contig<at::
+         8.9 ms    0.6%  x   54  void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda
+         8.7 ms    0.6%  x  919  Memcpy DtoD (Device -> Device)
+mixed, 8 x 512 tokens, scan True, route kernel False, checkpoint True: 646 ms per step = 6,342 tokens/s, peak memory 9.5 GB
+  GPU busy 1255 ms per step (194% of the step)
+       140.5 ms   11.2%  x  542  aten::mm
+       109.0 ms    8.7%  x 1838  void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl
+        86.7 ms    6.9%  x 3791  aten::mul
+        81.5 ms    6.5%  x 1462  aten::add_
+        53.5 ms    4.3%  x 2704  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        46.9 ms    3.7%  x   81  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_256x128_32x3_tn_align4>(cutl
+        45.9 ms    3.7%  x   81  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_128x256_32x3_nn_align4>(cutl
+        44.8 ms    3.6%  x 1809  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        38.4 ms    3.1%  x 1029  aten::add
+        33.1 ms    2.6%  x  865  aten::copy_
+        32.5 ms    2.6%  x  868  void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa
+        32.2 ms    2.6%  x  703  aten::cat
+        30.1 ms    2.4%  x   54  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_256x128_32x3_nt_align4>(cutl
+        26.3 ms    2.1%  x    1  Optimizer.step#AdamW.step
+        23.3 ms    1.9%  x  972  aten::sub
+        21.1 ms    1.7%  x  487  aten::div
+        20.8 ms    1.7%  x  733  aten::fill_
+        20.7 ms    1.6%  x  679  void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>
+        18.2 ms    1.4%  x  540  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        12.3 ms    1.0%  x   81  void at::native::vectorized_elementwise_kernel<4, at::native::BUnaryFunctor<floa
+        10.5 ms    0.8%  x   54  void at::native::(anonymous namespace)::CatArrayBatchedCopy_alignedK_contig<at::
+         8.9 ms    0.7%  x   54  void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda
+         8.7 ms    0.7%  x  108  aten::gelu
+         8.7 ms    0.7%  x  108  void at::native::vectorized_elementwise_kernel<4, at::native::GeluCUDAKernelImpl
+         8.6 ms    0.7%  x   54  aten::sigmoid
+mixed, 8 x 512 tokens, scan True, route kernel True, checkpoint True: 370 ms per step = 11,063 tokens/s, peak memory 9.5 GB
+  GPU busy 709 ms per step (191% of the step)
+       140.4 ms   19.8%  x  542  aten::mm
+        46.8 ms    6.6%  x   81  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_256x128_32x3_tn_align4>(cutl
+        46.0 ms    6.5%  x   81  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_128x256_32x3_nn_align4>(cutl
+        30.1 ms    4.2%  x   54  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_256x128_32x3_nt_align4>(cutl
+        26.1 ms    3.7%  x    1  Optimizer.step#AdamW.step
+        25.3 ms    3.6%  x 1577  aten::mul
+        23.3 ms    3.3%  x 1138  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        20.3 ms    2.9%  x  541  aten::copy_
+        19.6 ms    2.8%  x  459  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        19.0 ms    2.7%  x  947  void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl
+        14.0 ms    2.0%  x  297  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        13.4 ms    1.9%  x  678  aten::add
+        12.5 ms    1.8%  x  679  aten::add_
+         9.4 ms    1.3%  x  517  aten::fill_
+         9.3 ms    1.3%  x  463  void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>
+         8.8 ms    1.2%  x  406  aten::div
+         8.4 ms    1.2%  x  378  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+         8.0 ms    1.1%  x    3  aten::_foreach_mul_
+         7.8 ms    1.1%  x  273  aten::sum
+         7.8 ms    1.1%  x  108  aten::_conv_depthwise2d
+         7.8 ms    1.1%  x  108  void at::native::(anonymous namespace)::conv_depthwise2d_forward_kernel_generic<
+         7.4 ms    1.0%  x  378  aten::sub
+         7.2 ms    1.0%  x   54  aten::convolution_backward
+         7.2 ms    1.0%  x  756  aten::abs
+         6.7 ms    0.9%  x  757  aten::clamp
+mixed, 8 x 512 tokens, scan True, route kernel True, checkpoint False: 257 ms per step = 15,954 tokens/s, peak memory 16.2 GB
+  GPU busy 535 ms per step (208% of the step)
+       108.1 ms   20.2%  x  407  aten::mm
+        31.4 ms    5.9%  x   54  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_256x128_32x3_tn_align4>(cutl
+        30.6 ms    5.7%  x   54  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_128x256_32x3_nn_align4>(cutl
+        30.0 ms    5.6%  x   54  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_256x128_32x3_nt_align4>(cutl
+        26.3 ms    4.9%  x    1  Optimizer.step#AdamW.step
+        17.4 ms    3.3%  x 1064  aten::mul
+        15.6 ms    2.9%  x  733  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        13.3 ms    2.5%  x  379  aten::copy_
+        12.7 ms    2.4%  x  324  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        11.5 ms    2.2%  x  596  void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl
+         8.1 ms    1.5%  x    3  aten::_foreach_mul_
+         7.9 ms    1.5%  x  381  aten::add
+         7.8 ms    1.5%  x  625  aten::add_
+         7.8 ms    1.5%  x  273  aten::sum
+         7.7 ms    1.4%  x  162  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+         7.2 ms    1.4%  x  382  aten::fill_
+         7.2 ms    1.4%  x   54  aten::convolution_backward
+         7.2 ms    1.3%  x  355  void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>
+         6.0 ms    1.1%  x    1  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_128x256_32x3_nt_align1>(cutl
+         5.5 ms    1.0%  x    1  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_256x128_32x3_nn_align1>(cutl
+         5.4 ms    1.0%  x   52  void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(a
+         5.4 ms    1.0%  x    1  aten::addmm
+         5.4 ms    1.0%  x    1  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_256x128_32x3_tn_align1>(cutl
+         4.9 ms    0.9%  x    1  aten::_foreach_addcdiv_
+         4.9 ms    0.9%  x   26  void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(a
+mixed, 2 x 2048 tokens, scan True, route kernel True, checkpoint True: 348 ms per step = 11,763 tokens/s, peak memory 9.5 GB
+mamba2, 8 x 512 tokens, scan True, route kernel True, checkpoint True: 1474 ms per step = 2,778 tokens/s, peak memory 9.5 GB
+  GPU busy 3129 ms per step (212% of the step)
+       459.6 ms   14.7%  x 3411  aten::mul
+       420.9 ms   13.5%  x 2180  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+       356.0 ms   11.4%  x 1361  aten::copy_
+       309.5 ms    9.9%  x  680  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+       161.9 ms    5.2%  x 2778  Command Buffer Full
+       134.4 ms    4.3%  x  546  aten::mm
+        72.9 ms    2.3%  x  204  aten::masked_fill_
+        72.9 ms    2.3%  x  204  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        64.0 ms    2.0%  x  544  aten::bmm
+        56.7 ms    1.8%  x  476  void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a
+        54.2 ms    1.7%  x  204  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_128x128_16x5_tn_align4>(cutl
+        53.3 ms    1.7%  x  819  aten::sum
+=== BENCH DONE 05:25:41 ===

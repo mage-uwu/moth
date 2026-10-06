@@ -382,6 +382,31 @@ What the scan does not touch: the deep trees, which compute every node in traini
 logit) and are most of a step's FLOPs, and the rest of the bank layer (projections, conv, quantisation), which is
 now most of the bank's time: at 32K tokens 66 ms per layer, of which the scan is 3.
 
+### Route kernels: the deep trees' straight-through gradient without the path weights
+
+Under `route_ste` the training path built the path weights pi level by level (stack, then cat over all nodes) and ran
+the activation, the sigmoid and the products over every (token, node), forward and backward, after an 11-level hard
+walk whose result went unused. `mamba_ssm/ops/gts_route.py` replaces this for stateless trees on CUDA: pi going
+forward is the one-hot of the path, and a path node's routing gradient needs only the path below it and the chain
+from its other child that follows the token's own decisions (11 + 55 nodes per depth-10 tree, not 2,047). The
+logits and the output are still dense matmuls. Tests: `tests/modules/test_gts_route.py` (values and every gradient
+against the dense form, ternary with 8-bit activations, padding), 39 GPU tests passing on an A100.
+
+One training step of the 0.5B mixed forest, 8 x 512 tokens, A100, TF32, `scripts/profile_step.py`, log in
+`results/step_profile_a100.log`:
+
+| | ms per step | Tokens/s | Peak memory |
+|---|---|---|---|
+| As the 0.5B run was trained (quadratic bank, dense path weights) | 795 | 5,151 | 9.5 GB |
+| + scan for the bank | 646 | 6,342 | 9.5 GB |
+| + route kernels | 370 | 11,063 | 9.5 GB |
+| + no gradient checkpointing | 257 | **15,954** | 16.2 GB |
+| Mamba-2 (`Mamba2Ref`), as trained | 1,474 | 2,778 | 9.5 GB |
+
+At 2 x 2,048 tokens with both kernels and checkpointing, 11,763 tokens/s: length no longer costs extra. What is
+left is mostly the dense matmuls of the deep trees (every node's logit and the output, about 140 ms of GPU time per
+step with checkpointing), the output head, AdamW and many small elementwise kernels; bf16 is still untried.
+
 ## Departures from Mamba-2
 
 - **Bidirectional by default.** Forward and backward context share the key B and use separate queries.
