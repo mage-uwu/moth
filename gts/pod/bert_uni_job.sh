@@ -19,8 +19,12 @@ LEFT=$(( (END - $(date +%s)) / 60 ))
 echo "minutes left for training: $LEFT"
 ARGS="--data $D --out $R --init-from $CK --loops 3 --latent-tokens 16 --loop-probs 0.1,0.2,0.7 --lr 3e-4 --warmup 1000 --eval-every 2000"
 python3 scripts/bert_pretrain.py train $ARGS --minutes $LEFT 2>&1 | tee /root/train.log
-if grep -q "OutOfMemoryError" /root/train.log; then   # three passes' activations did not fit: recompute passes 2 and 3
+EXTRA=""
+grep -q "OutOfMemoryError" /root/train.log && EXTRA="--checkpoint-loops"   # three passes' activations did not fit
+grep -q "InductorError" /root/train.log && EXTRA="$EXTRA --no-compile"     # torch.compile failed: run uncompiled
+if [ -n "$EXTRA" ]; then
   LEFT=$(( (END - $(date +%s)) / 60 ))
-  python3 scripts/bert_pretrain.py train $ARGS --minutes $LEFT --checkpoint-loops
+  python3 scripts/bert_pretrain.py train $ARGS --minutes $LEFT $EXTRA 2>&1 | tee /root/train2.log
+  if grep -q "InductorError" /root/train2.log; then LEFT=$(( (END - $(date +%s)) / 60 )); python3 scripts/bert_pretrain.py train $ARGS --minutes $LEFT --no-compile; fi
 fi
 echo "=== ALL DONE $(date -u +%T) ==="

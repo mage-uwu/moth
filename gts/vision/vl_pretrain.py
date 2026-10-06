@@ -534,7 +534,7 @@ def train(a):
     if a.compile and device == "cuda":
         for mods in (model.layers, lm.backbone.layers):
             for i in range(len(mods)):
-                mods[i] = torch.compile(mods[i])
+                mods[i] = torch.compile(mods[i], dynamic=False)
     params = list(model.parameters()) + list(heads.parameters())
     decay = [p for p in params if p.ndim >= 2]
     rest = [p for p in params if p.ndim < 2]

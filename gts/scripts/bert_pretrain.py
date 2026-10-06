@@ -315,7 +315,7 @@ def train(a):
     if a.compile and device == "cuda":
         layers = model.backbone.layers
         for i in range(len(layers)):
-            layers[i] = torch.compile(layers[i])
+            layers[i] = torch.compile(layers[i], dynamic=False)  # a second sequence length would otherwise recompile with dynamic shapes, which hit an Inductor bug
     decay = [p for p in model.parameters() if p.ndim >= 2 and not getattr(p, "_no_weight_decay", False)]
     rest = [p for p in model.parameters() if not (p.ndim >= 2 and not getattr(p, "_no_weight_decay", False))]
     opt = torch.optim.AdamW([{"params": decay, "weight_decay": a.weight_decay}, {"params": rest, "weight_decay": 0.0}],
