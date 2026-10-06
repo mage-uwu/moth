@@ -107,13 +107,14 @@ def prep(a):
 
         files = sorted(f for f in list_repo_files("wikimedia/wikipedia", repo_type="dataset") if f.startswith("20231101.en/"))
         per_shard = min(160_000_000, a.train_tokens)  # an English shard holds about 150M word pieces
-        n_train_shards = min(len(files) - 1, -(-a.train_tokens // per_shard) + 1)
-        print(f"{len(files)} parquet shards; tokenising {n_train_shards} for training and the last for validation, "
+        n_train_shards = min(len(files) - 1 - a.shard_offset, -(-a.train_tokens // per_shard) + 1)
+        print(f"{len(files)} parquet shards; tokenising {n_train_shards} from shard {a.shard_offset} for training and the last for validation, "
               f"{a.workers} at a time", flush=True)
-        tmp = os.path.join(a.out, "shards")
+        tmp = a.tmp_dir or os.path.join(a.out, "shards")
         os.makedirs(tmp, exist_ok=True)
         jobs = [(files[-1], os.path.join(tmp, "val.bin"), a.val_tokens)]
-        jobs += [(files[i], os.path.join(tmp, f"train{i:02d}.bin"), per_shard) for i in range(n_train_shards)]
+        jobs += [(files[i], os.path.join(tmp, f"train{i:02d}.bin"), per_shard)
+                 for i in range(a.shard_offset, a.shard_offset + n_train_shards)]
         with mp.get_context("spawn").Pool(a.workers) as pool:
             counts = pool.map(_shard_worker, jobs, chunksize=1)
         print(f"  tokenised {sum(counts):,} tokens in {time.time() - t0:.0f} s", flush=True)
@@ -129,7 +130,8 @@ def prep(a):
                 if n_train >= a.train_tokens:
                     break
         shutil.rmtree(tmp, ignore_errors=True)
-        source = "bert-base-uncased WordPiece of wikimedia/wikipedia 20231101.en"
+        source = (f"bert-base-uncased WordPiece of wikimedia/wikipedia 20231101.en, training shards "
+                  f"{a.shard_offset} to {a.shard_offset + n_train_shards - 1}")
     meta = {"vocab_size": tok.get_vocab_size(), "source": source, "train_tokens": n_train, "val_tokens": n_val,
             "special": {k: tok.token_to_id(k) for k in ("[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]")}}
     json.dump(meta, open(os.path.join(a.out, "meta.json"), "w"), indent=1)
@@ -218,6 +220,12 @@ def train(a):
     torch.manual_seed(a.seed)
     cfg = model_config(a)
     model = GTSForMaskedLM(GTSConfig(**cfg)).to(device)
+    ck = None
+    if a.resume:
+        ck = torch.load(a.resume, map_location="cpu", weights_only=False)
+        assert ck["config"] == cfg, f"the checkpoint's model differs: {ck['config']} vs {cfg}"
+        model.load_state_dict(ck["model"])
+        print(f"resumed from {a.resume} at step {ck['step']}", flush=True)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"GTS masked LM: {n_params / 1e6:.1f}M parameters; {meta['source']}, {meta['train_tokens']:,} training tokens", flush=True)
     if a.compile and device == "cuda":
@@ -233,19 +241,31 @@ def train(a):
     tokens_per_step = a.batch_size * a.seq_len
     total_steps = None  # fitted to --minutes once the step rate is known
     curve, run_loss, run_n, last_ckpt, t_rate = [], 0.0, 0, time.time(), None
+    s0, lr0, phases = 0, 0.0, []  # this phase starts at step s0, warming from lr0
+    if ck is not None:
+        opt.load_state_dict(ck["optimizer"])
+        gen.set_state(ck["generator"])
+        s0, curve = ck["step"], ck["curve"]
+        lr0 = ck["optimizer"]["param_groups"][0]["lr"]
+        phases = ck.get("phases", [ck["args"]])
+    phases = phases + [{k: v for k, v in vars(a).items()}]
+    warm = a.warmup if ck is None else a.rewarm
 
     def lr_at(step):
-        if step < a.warmup:
-            return a.lr * (step + 1) / a.warmup
+        """Linear from lr0 (0 for a fresh run, the checkpoint's last rate on resume) to --lr over the warmup, then a
+        cosine to 10% of --lr at total_steps."""
+        k = step - s0
+        if k < warm:
+            return lr0 + (a.lr - lr0) * (k + 1) / warm
         if total_steps is None:
             return a.lr
-        frac = min(1.0, (step - a.warmup) / max(1, total_steps - a.warmup))
+        frac = min(1.0, (k - warm) / max(1, total_steps - s0 - warm))
         return a.lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * frac)))
 
     def save_float(step):
         to_save = {"model": model.state_dict() if not a.compile else {k.replace("._orig_mod", ""): v for k, v in model.state_dict().items()},
                    "optimizer": opt.state_dict(), "step": step, "config": cfg, "args": vars(a), "curve": curve,
-                   "generator": gen.get_state()}
+                   "generator": gen.get_state(), "phases": phases}
         tmp = os.path.join(a.out, "checkpoint.pt.tmp")
         torch.save(to_save, tmp)
         os.replace(tmp, os.path.join(a.out, "checkpoint.pt"))
@@ -255,16 +275,17 @@ def train(a):
         tl = run_loss / run_n if run_n else float("nan")
         elapsed = time.time() - t_start
         curve.append({"step": step, "tokens": step * tokens_per_step, "val_loss": vl, "val_masked_acc": acc, "train_loss": tl,
-                      "minutes": elapsed / 60})
+                      "minutes": elapsed / 60, "phase": len(phases)})
         print(f"step {step:6d}  tokens {step * tokens_per_step / 1e6:8.1f}M  val loss {vl:.4f}  masked acc {acc:.4f}  "
               f"train {tl:.4f}  {elapsed / 60:6.1f} min", flush=True)
-        json.dump({"params": n_params, "config": cfg, "args": vars(a), "data": meta, "total_steps": total_steps, "curve": curve},
+        json.dump({"params": n_params, "config": cfg, "args": vars(a), "phases": phases, "data": meta, "total_steps": total_steps,
+                   "curve": curve},
                   open(os.path.join(a.out, "result.json"), "w"), indent=1)
 
-    step = 0
+    step = s0
     model.train()
     while True:
-        if step % a.eval_every == 0 and step > 0:
+        if step % a.eval_every == 0 and step > s0:
             record(step)
             run_loss, run_n = 0.0, 0
         if total_steps is not None and step >= total_steps:
@@ -282,11 +303,11 @@ def train(a):
         if step % a.log_every == 0:
             run_loss += loss.item()
             run_n += 1
-        if step == a.rate_from:
+        if step - s0 == a.rate_from:
             if device == "cuda":
                 torch.cuda.synchronize()
             t_rate = time.time()
-        if step == a.rate_from + a.rate_steps:
+        if step - s0 == a.rate_from + a.rate_steps:
             if device == "cuda":
                 torch.cuda.synchronize()
             rate = a.rate_steps / (time.time() - t_rate)
@@ -294,8 +315,8 @@ def train(a):
             # each evaluation is eval_batches forward passes, about a third of a training step each
             share = (a.eval_batches / 3) / (a.eval_every + a.eval_batches / 3)
             total_steps = step + max(0, int(left * (1 - share) * rate))
-            print(f"  {rate:.2f} steps/s = {rate * tokens_per_step:,.0f} tokens/s; schedule fitted to {total_steps} steps "
-                  f"({total_steps * tokens_per_step / 1e9:.2f}B tokens)", flush=True)
+            print(f"  {rate:.2f} steps/s = {rate * tokens_per_step:,.0f} tokens/s; schedule fitted to {total_steps} steps, "
+                  f"{total_steps - s0} in this phase ({(total_steps - s0) * tokens_per_step / 1e9:.2f}B tokens)", flush=True)
         if step % a.log_every == 0:
             print(f"  step {step:6d}  loss {loss.item():.4f}  lr {lr_at(step):.2e}  {(time.time() - t_start) / 60:.1f} min", flush=True)
         if time.time() - last_ckpt > a.ckpt_minutes * 60:
@@ -324,6 +345,8 @@ def main():
     q.add_argument("--val-tokens", type=int, default=2_000_000)
     q.add_argument("--text-file")
     q.add_argument("--workers", type=int, default=8, help="shards tokenised in parallel")
+    q.add_argument("--shard-offset", type=int, default=0, help="first training shard (to continue on unseen text)")
+    q.add_argument("--tmp-dir", help="per-shard files before concatenation (default: inside --out)")
     t = sub.add_parser("train")
     t.add_argument("--data", required=True)
     t.add_argument("--out", required=True)
@@ -342,6 +365,8 @@ def main():
     t.add_argument("--mask-prob", type=float, default=0.15)
     t.add_argument("--lr", type=float, default=1e-3)
     t.add_argument("--warmup", type=int, default=1000)
+    t.add_argument("--resume", help="float checkpoint.pt to continue from: weights, AdamW state, step, curve, sampler")
+    t.add_argument("--rewarm", type=int, default=1000, help="on resume: steps from the checkpoint's last rate to --lr")
     t.add_argument("--weight-decay", type=float, default=0.01)
     t.add_argument("--eval-every", type=int, default=1000)
     t.add_argument("--eval-batches", type=int, default=20)
