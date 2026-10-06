@@ -76,7 +76,18 @@ def _read(src):
     if kind == "bytes":
         return member
     with open(path, "rb") as f:
-        return f.read()
+        data = f.read()
+        _drop_cache(f.fileno())
+        return data
+
+
+def _drop_cache(fd):
+    """Tell the kernel this file's cached pages are no longer needed: the container's memory limit counts the page
+    cache, and reading or writing tens of GB of images otherwise fills it (two prep runs were OOM-killed so)."""
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    except (AttributeError, OSError):
+        pass
 
 
 def _square_jpeg(job):
@@ -128,6 +139,9 @@ class Writer:
                     self.f.write(data)
                     self.offsets.append(self.offsets[-1] + len(data))
                     self.targets.append(target)
+            self.f.flush()
+            os.fsync(self.f.fileno())
+            _drop_cache(self.f.fileno())
             if self.seen % 60000 < chunk:
                 print(f"    {self.seen:,} images, {self.seen / (time.time() - self.t0):.0f}/s; {_memory()}", flush=True)
 
@@ -262,6 +276,7 @@ def prep(a):
         subprocess.run(["7z", "x", "-y", "-bd", "-o" + dest, parts[-1]], check=True, stdout=subprocess.DEVNULL)
         for p in parts:
             os.remove(p)
+        subprocess.run(["sync"])
         items = [(("file", os.path.join(dest, n.lstrip("./")), None), c[1]) for n, c in best.items()]
         _write_set(out, items, a.size, a.workers, cap_len=a.cap_len, tok=tok, extra={"source": "VideoGameBunny/Dataset", "kinds": kinds})
         subprocess.run(["rm", "-rf", dest])
@@ -278,8 +293,11 @@ def prep(a):
         lcs_zip = _hf("liuhaotian/LLaVA-Pretrain", "images.zip", a.work)
         dest = os.path.join(a.work, "s4v_images")
         for z, sub in ((coco_zip, "coco"), (lcs_zip, "lcs")):
+            os.makedirs(os.path.join(dest, sub), exist_ok=True)
             subprocess.run(["unzip", "-q", "-o", z, "-d", os.path.join(dest, sub)], check=True)
             os.remove(z)
+            subprocess.run(["sync"])
+            print(f"  unzipped {sub}; {_memory()}", flush=True)
         where = _find_images(dest)
         items, missing = [], 0
         for image, caption in chosen:
