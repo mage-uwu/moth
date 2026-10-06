@@ -316,9 +316,20 @@ def train(a):
         layers = model.backbone.layers
         for i in range(len(layers)):
             layers[i] = torch.compile(layers[i], dynamic=False)  # a second sequence length would otherwise recompile with dynamic shapes, which hit an Inductor bug
-    decay = [p for p in model.parameters() if p.ndim >= 2 and not getattr(p, "_no_weight_decay", False)]
-    rest = [p for p in model.parameters() if not (p.ndim >= 2 and not getattr(p, "_no_weight_decay", False))]
-    opt = torch.optim.AdamW([{"params": decay, "weight_decay": a.weight_decay}, {"params": rest, "weight_decay": 0.0}],
+    # GTS-Uni's own parameters (pass embeddings, gates, latents) can learn faster than the shared weights:
+    # --new-param-lr, applied as a fixed ratio to the schedule
+    uni_names = {"backbone.loop_embed", "backbone.loop_gate", "backbone.latents"}
+    named = [(n.replace("._orig_mod", ""), p) for n, p in model.named_parameters()]
+    new = [p for n, p in named if n in uni_names] if a.new_param_lr else []
+    new_ids = {id(p) for p in new}
+    old = [p for n, p in named if id(p) not in new_ids]
+    decay = [p for p in old if p.ndim >= 2 and not getattr(p, "_no_weight_decay", False)]
+    rest = [p for p in old if not (p.ndim >= 2 and not getattr(p, "_no_weight_decay", False))]
+    groups = [{"params": decay, "weight_decay": a.weight_decay, "lr_scale": 1.0}, {"params": rest, "weight_decay": 0.0, "lr_scale": 1.0}]
+    if new:
+        groups.append({"params": new, "weight_decay": 0.0, "lr_scale": a.new_param_lr / a.lr})
+        print(f"GTS-Uni parameters at {a.new_param_lr:.1e} ({a.new_param_lr / a.lr:.0f}x the shared weights' rate)", flush=True)
+    opt = torch.optim.AdamW(groups,
                             lr=a.lr, betas=(0.9, 0.98), eps=1e-6, fused=device == "cuda")
     os.makedirs(a.out, exist_ok=True)
     gen = torch.Generator().manual_seed(a.seed)
@@ -389,7 +400,7 @@ def train(a):
         if total_steps is not None and step >= total_steps:
             break
         for group in opt.param_groups:
-            group["lr"] = lr_at(step)
+            group["lr"] = lr_at(step) * group.get("lr_scale", 1.0)
         x, y = get_batch(train_data, a, special, gen, device)
         n_loops = loop_rng.choices(range(1, len(loop_probs) + 1), weights=loop_probs)[0]
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.amp):
@@ -479,6 +490,8 @@ def main():
     t.add_argument("--loops", type=int, default=1, help="GTS-Uni: passes of the whole stack with shared weights")
     t.add_argument("--latent-tokens", type=int, default=0, help="GTS-Uni: learned scratch tokens after [CLS] from pass 2")
     t.add_argument("--loop-probs", default="0.1,0.2,0.7", help="GTS-Uni: probability of training a step with 1, 2, ... passes")
+    t.add_argument("--new-param-lr", type=float, help="GTS-Uni: peak learning rate of the pass embeddings, gates and "
+                   "latents (default: --lr)")
     t.add_argument("--checkpoint-loops", action="store_true", help="GTS-Uni: recompute passes after the first in backward")
     t.add_argument("--rewarm", type=int, default=1000, help="on resume: steps from the checkpoint's last rate to --lr")
     t.add_argument("--weight-decay", type=float, default=0.01)
