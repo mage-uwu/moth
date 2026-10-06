@@ -78,6 +78,7 @@ class GTS(nn.Module):
         act_bits=None,  # if set (and ternary), quantise the mixer input to this many bits per token
         node_bias=True,
         dense_walk=None,  # training path: compute every node's logit with one matmul (default when the trees are small)
+        scan_kernel=None,  # depth 0: compute the context with the chunked Triton scan (ops/gts_scan.py); default on CUDA when triton is installed
         A_init_range=(1, 16),
         dt_min=0.001,
         dt_max=0.1,
@@ -120,6 +121,10 @@ class GTS(nn.Module):
         # (total nodes x d_model) per token instead of gathering (slots x d_model) rows, which is cheaper
         # in PyTorch while the node tables are small. Inference kernels never do this.
         self.dense_walk = (n_trees * self.n_nodes <= 2048) if dense_walk is None else dense_walk
+        # A depth-0 tree is visited by every token, so its context is Mamba-2's SSD (with the token's own term
+        # excluded) and can run as a chunked scan, linear in length, instead of the quadratic form below.
+        assert not (scan_kernel and depth > 0), "the scan kernel covers depth-0 trees only"
+        self.scan_kernel = scan_kernel
         # slot s of a path belongs to tree s // n_levels and level s % n_levels
         self.register_buffer("slot_level", torch.arange(self.n_levels).repeat(n_trees), persistent=False)
         self.register_buffer("tree_offset", torch.arange(n_trees) * self.n_nodes, persistent=False)
@@ -327,11 +332,33 @@ class GTS(nn.Module):
         src = dt[..., self.slot_group] * mask.unsqueeze(-1)
         if self.write_logit:
             src = src * logits
+        if self._use_scan(src):
+            return self._context_scan(B, C_fwd, C_bwd, a, src)
         w = self._decay_weights(B, C_fwd, C_bwd, a)
         cols = self.node_col[nodes]  # (b, l, slots)
         z = torch.zeros(batch, length, self.n_trees * self.n_nodes, dtype=src.dtype, device=src.device).scatter(2, cols, src)
         y = torch.cat([w[..., g] @ z[:, :, self.group_bounds[g] : self.group_bounds[g + 1]] for g in range(self.n_groups)], dim=2)
         return y.gather(2, cols)
+
+    def _use_scan(self, x):
+        if self.depth > 0 or self.scan_kernel is False:
+            return False
+        from mamba_ssm.ops.gts_scan import HAVE_TRITON
+
+        return HAVE_TRITON and (self.scan_kernel or (self.scan_kernel is None and x.is_cuda))
+
+    def _context_scan(self, B, C_fwd, C_bwd, a, src):
+        """Depth 0: slot = tree, and a head's trees are contiguous, so what the tokens write is (b, l, heads, trees per
+        head) and each head is one SSD channel group on its own clock."""
+        from mamba_ssm.ops.gts_scan import gts_scan
+
+        batch, length, _ = src.shape
+        X = src.reshape(batch, length, self.n_heads, self.n_trees // self.n_heads)
+        cs = torch.cumsum(a, dim=1)  # (b, l, heads)
+        ctx = gts_scan(C_fwd, B, X, cs)
+        if not self.causal:
+            ctx = ctx + gts_scan(C_bwd, B, X, cs - a, reverse=True)  # [t, s] = sum_{r=t..s-1} a_r on exclusive sums
+        return ctx.reshape(batch, length, self.n_trees).to(src.dtype)
 
     def _decay_weights(self, B, C_fwd, C_bwd, a):
         """(b, t, s, groups): <C[t], B[s]> times the decay between s and t on each group's clock; zero on the diagonal."""
