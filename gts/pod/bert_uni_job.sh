@@ -1,6 +1,6 @@
 # GTS-Uni: the 110M GTS masked LM with depth recurrence. The 14-layer stack runs 3 times with shared weights (pass
-# embeddings, per-channel gates starting at zero, 16 latent scratch tokens from pass 2), started from phase 3's final
-# weights, so step 0 computes exactly what phase 3 does. Each step trains with 1, 2 or 3 passes (10/20/70%), so the
+# embeddings, per-channel gates starting at zero, 16 latent scratch tokens from pass 2), started from GTS3 (phase 3's final
+# weights), so step 0 computes exactly what GTS3 does. Each step trains with 1, 2 or 3 passes (10/20/70%), so the
 # weights also work with fewer passes (full CPU speed at 1). Data: all 40 Wikipedia shards again. No network volume:
 # the phase 3 checkpoint comes from this repo's parts. Logs and outputs in /workspace/out on port 8888.
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 HF_HOME=/root/hf

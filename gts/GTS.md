@@ -464,7 +464,7 @@ windows, batch 64, one A100 at about 188K tokens/s. Checkpoints (float with opti
 |---|---|---|---|---|
 | Phase 1 (shards 0-6, peak lr 1.5e-3, 157 min) | 53,753 | 1.76B | 2.815 | 50.5% |
 | Phase 2 (resumed on shards 7-19, re-warm to 7.5e-4, 161 min) | 108,829 | 3.57B | 2.713 | 51.7% |
-| Phase 3 (resumed on shards 0-39, re-warm to 5e-4, 336 min) | 225,197 | 7.38B | 2.615 | 53.2% |
+| Phase 3, **GTS3** (resumed on shards 0-39, re-warm to 5e-4, 336 min) | 225,197 | 7.38B | 2.615 | 53.2% |
 
 CPU inference of the trained model with `kernel/enc_bench.c` (packed ternary weights, int8 activations, OpenMP over
 tokens and over the bank's two directions), 4-core cloud x86 with VNNI, the encoder without the head, sequence 512:

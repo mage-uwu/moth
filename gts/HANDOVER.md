@@ -165,7 +165,7 @@ so a given seed sees the same batches on any device.
 | `pod/job.sh`, `pod/bench_job.sh` | What the RunPod pods ran: the 0.5B runs, and the scan tests and benchmarks. |
 | `results/fineweb_0.5b/`, `results/scan_bench_a100.log` | The 0.5B results and the scan benchmark. |
 | `kernel/gts_kernel.c` | The first, bidirectional float kernel. Superseded by `ar_bench.c`; kept for the width-768 timing in `GTS.md`. |
-| `checkpoints/bert110m/`, `scripts/bert_pretrain.py`, `kernel/enc_bench.c` | The 110M BERT-style GTS masked LM: checkpoints by phase (README there), its training script (`--resume`, `--teacher`), and its multithreaded CPU inference kernel. |
+| `checkpoints/bert110m/`, `scripts/bert_pretrain.py`, `kernel/enc_bench.c` | The 110M BERT-style GTS masked LM: checkpoints by phase (README there; the best, phase 3, is named **GTS3**), its training script (`--resume`, `--teacher`), and its multithreaded CPU inference kernel. |
 | `vision/` | Side quest: a ~38M ternary GTS vision backbone and a sidecar into GTS-MLM. `vision/README.md` has the status, data, licensing and next steps; the model is `mamba_ssm/models/gts_vision.py`. |
 | `tests/modules/test_gts*.py` | The tests. |
 | `results/` | Result JSON and samples for the runs in the table above. |

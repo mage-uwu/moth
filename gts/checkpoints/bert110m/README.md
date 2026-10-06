@@ -24,7 +24,11 @@ phase 1's last 1.5e-4 to 7.5e-4 over 1,000 steps, then cosine to 7.5e-5; 161 min
 as phase 1) rises to 3.00 during the re-warm, passes below phase 1's 2.815 at step 88,000 (2.803) and ends at loss 2.713, masked-token
 accuracy 51.7% (best 2.707 / 51.9% at step 106,000). `result.json` holds both phases' curves and settings.
 
-## Phase 3
+## Phase 3: GTS3
+
+**GTS3** is the name of this checkpoint (`phase3/`): the current best GTS masked LM, and the starting point for
+GTS-Uni.
+
 
 Resumed from phase 2's `checkpoint.pt` for a $10 budget (one A100, 336 minutes): all 40 Wikipedia training shards
 (0 to 39, 3.88B tokens; 20 to 39 new, 0 to 19 seen before), 116,368 more steps (3.81B tokens) to step 225,197, 7.38B
@@ -37,7 +41,7 @@ masked-token accuracy **53.2%**. (A distillation leg from bert-base-uncased was 
 |---|---|---|---|---|
 | Phase 1 | 53,753 | 1.76B | 2.815 | 50.5% |
 | Phase 2 | 108,829 | 3.57B | 2.713 | 51.7% |
-| Phase 3 | 225,197 | 7.38B | 2.615 | 53.2% |
+| Phase 3 (**GTS3**) | 225,197 | 7.38B | 2.615 | 53.2% |
 
 ## Files
 
