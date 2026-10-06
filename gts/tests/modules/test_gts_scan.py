@@ -62,7 +62,8 @@ def test_gts_depth0_scan_matches_dense_and_reference(causal):
     (yb * g).sum().backward()
     assert torch.allclose(ua.grad, ub.grad, atol=1e-5)
     for (name, pa), pb in zip(a.named_parameters(), b.parameters()):
-        assert torch.allclose(pa.grad, pb.grad, atol=1e-5 * (1 + pb.grad.abs().max().item())), name
+        err = (pa.grad - pb.grad).abs().max().item()
+        assert err <= 1e-5 * (1 + pb.grad.abs().max().item()), f"{name}: max |diff| {err:.3e}, max |grad| {pb.grad.abs().max().item():.3e}"
 
 
 def test_mixed_bank_uses_scan():

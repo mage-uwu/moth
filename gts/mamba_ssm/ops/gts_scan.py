@@ -21,7 +21,8 @@ the chunk's own sums, and between chunks only each chunk's total. Three kernels,
     _out_kernel     O1[i] = sum_j w <Q[i], K[j]> V[j]   and/or   O2[i] = sum_j w <U[i], V[j]> K[j]
 
 O1 is the forward output and dX; O2 is dB and dC. The forward's chunk states are reused for dC. The log-decay
-gradient is d c[i] = <dY[i], Y[i]> - <X[i], dX[i]>, summed from each token onwards (_suffix_kernel).
+gradient is d c[i] = <dY[i], Y[i]> - <X[i], dX[i]>, written by the dX pass and summed from each token onwards
+(_suffix_kernel).
 
 ``gts_scan(C, B, X, a, reverse)`` is differentiable; ``gts_scan_reference`` is the quadratic form it is tested against.
 """
@@ -102,12 +103,15 @@ if HAVE_TRITON:
 
     @triton.jit
     def _out_kernel(
-        Qp, Kp, Vp, Up, Ap, STp, O1p, O2p, L, H, n_chunks,
+        Qp, Kp, Vp, Up, Ap, STp, O1p, O2p, Yp, DCp, L, H, n_chunks,
         s_qb, s_ql, s_kb, s_kl, s_vb, s_vl, s_vh, s_ub, s_ul, s_uh, s_ab, s_al,
         s_o1b, s_o1l, s_o1h, s_o2b, s_o2l, s_o2h,
         N: tl.constexpr, P: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_P: tl.constexpr, CHUNK: tl.constexpr,
-        HAS_O1: tl.constexpr, HAS_O2: tl.constexpr, REVERSE: tl.constexpr, EXCL: tl.constexpr, PREC: tl.constexpr,
+        HAS_O1: tl.constexpr, HAS_O2: tl.constexpr, HAS_DCLOCK: tl.constexpr,
+        REVERSE: tl.constexpr, EXCL: tl.constexpr, PREC: tl.constexpr,
     ):
+        """HAS_DCLOCK (the transposed pass, where V = dY, U = X and O1 = dX): also write <dY, Y> - <X, dX> per row,
+        with Y laid out like O1."""
         c = tl.program_id(0)
         bh = tl.program_id(1)
         b = bh // H
@@ -133,6 +137,10 @@ if HAVE_TRITON:
             M2 = tl.dot(u, tl.trans(v), input_precision=PREC) * D
             o2 = tl.dot(M2, k, input_precision=PREC) + dec[:, None] * tl.dot(u, tl.trans(S), input_precision=PREC)
             tl.store(O2p + b * s_o2b + h * s_o2h + pos[:, None] * s_o2l + n[None, :], o2, mask=ok[:, None] & n_ok[None, :])
+        if HAS_DCLOCK:
+            y = tl.load(Yp + b * s_o1b + h * s_o1h + pos[:, None] * s_o1l + p[None, :], mask=ok[:, None] & p_ok[None, :], other=0.0)
+            dc = tl.sum(v * y, axis=1) - tl.sum(u * o1, axis=1)
+            tl.store(DCp + (b * L + pos) * H + h, dc, mask=ok)
 
     @triton.jit
     def _suffix_kernel(Dp, Op, L, H, s_b, s_l, REVERSE: tl.constexpr, EXCL: tl.constexpr, BLOCK: tl.constexpr):
@@ -174,7 +182,7 @@ def _states(K, V, a, reverse, excl, chunk, prec):
     return st
 
 
-def _outputs(Q, K, V, U, a, st, reverse, excl, want_o1, want_o2, chunk, prec):
+def _outputs(Q, K, V, U, a, st, reverse, excl, want_o1, want_o2, chunk, prec, Y=None):
     b, length, h, p = V.shape
     n = K.shape[-1]
     dev = V.device
@@ -184,14 +192,17 @@ def _outputs(Q, K, V, U, a, st, reverse, excl, want_o1, want_o2, chunk, prec):
     o2 = torch.empty(b, length, h, n, device=dev, dtype=torch.float32) if want_o2 else torch.empty(1, 1, 1, 1, device=dev)
     Q = Q if want_o1 else K
     U = U if want_o2 else V
+    dclock = torch.empty(b, length, h, device=dev, dtype=torch.float32) if Y is not None else o1
     _out_kernel[(nc, b * h)](
-        Q, K, V, U, a, st, o1, o2, length, h, nc,
+        Q, K, V, U, a, st, o1, o2, Y if Y is not None else o1, dclock, length, h, nc,
         Q.stride(0), Q.stride(1), K.stride(0), K.stride(1), V.stride(0), V.stride(1), V.stride(2),
         U.stride(0), U.stride(1), U.stride(2), a.stride(0), a.stride(1),
         o1.stride(0), o1.stride(1), o1.stride(2), o2.stride(0), o2.stride(1), o2.stride(2),
         N=n, P=p, BLOCK_N=bn, BLOCK_P=bp, CHUNK=chunk,
-        HAS_O1=want_o1, HAS_O2=want_o2, REVERSE=reverse, EXCL=excl, PREC=prec,
+        HAS_O1=want_o1, HAS_O2=want_o2, HAS_DCLOCK=Y is not None, REVERSE=reverse, EXCL=excl, PREC=prec,
     )
+    if Y is not None:
+        return o1, o2, dclock
     return (o1 if want_o1 else None), (o2 if want_o2 else None)
 
 
@@ -202,10 +213,17 @@ def _suffix(d, reverse, excl):
     return out
 
 
+def _unit_last(t):
+    """float32 with a unit stride along the last dimension (the kernels take every other stride as given); GTS's B
+    and C are column slices of one projection and need no copy."""
+    t = t.float()
+    return t if t.stride(-1) == 1 else t.contiguous()
+
+
 class _GTSScan(torch.autograd.Function):
     @staticmethod
     def forward(ctx, C, B, X, a, reverse, excl, chunk, prec):
-        C, B, X, a = (t.float().contiguous() for t in (C, B, X, a))
+        C, B, X, a = (_unit_last(t) for t in (C, B, X, a))
         st = _states(B, X, a, reverse, excl, chunk, prec)
         Y, _ = _outputs(C, B, X, None, a, st, reverse, excl, True, False, chunk, prec)
         ctx.save_for_backward(C, B, X, a, Y, st)
@@ -216,13 +234,12 @@ class _GTSScan(torch.autograd.Function):
     def backward(ctx, dY):
         C, B, X, a, Y, st = ctx.saved_tensors
         r, e, chunk, prec = ctx.cfg
-        dY = dY.float().contiguous()
+        dY = _unit_last(dY)
         # The transposed scan runs the other way on the other clock: dX[j] = sum_i w <B[j], C[i]> dY[i] and
         # dB[j] = sum_i w <X[j], dY[i]> C[i], one pass. dC[i] = sum_j w <dY[i], X[j]> B[j] reuses the forward's states.
-        dX, dB = _outputs(B, C, dY, X, a, _states(C, dY, a, not r, not e, chunk, prec), not r, not e, True, True, chunk, prec)
+        dX, dB, dclock = _outputs(B, C, dY, X, a, _states(C, dY, a, not r, not e, chunk, prec), not r, not e, True, True, chunk, prec, Y)
         _, dC = _outputs(None, B, X, dY, a, st, r, e, False, True, chunk, prec)
-        dclock = (dY * Y).sum(-1) - (X * dX).sum(-1)  # (b, l, h)
-        return dC.sum(2), dB.sum(2), dX, _suffix(dclock.contiguous(), r, e), None, None, None, None
+        return dC.sum(2), dB.sum(2), dX, _suffix(dclock, r, e), None, None, None, None
 
 
 def gts_scan(C, B, X, a, reverse=False, excl=False, chunk=64, precision=None):
