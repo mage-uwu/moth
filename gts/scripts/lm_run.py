@@ -118,6 +118,7 @@ def main():
     p.add_argument("--amp", action="store_true", help="bfloat16 autocast. Untested with the ternary straight-through estimator")
     p.add_argument("--no-tf32", action="store_true", help="CUDA: train with full float32 matmuls instead of TF32")
     p.add_argument("--no-scan-kernel", action="store_true", help="depth-0 trees: the quadratic PyTorch context, not the Triton scan")
+    p.add_argument("--no-route-kernel", action="store_true", help="route_ste trees: the dense PyTorch form, not the Triton walk kernels")
     p.add_argument("--no-export", action="store_true")
     p.add_argument("--count-only", action="store_true")
     args = p.parse_args()
@@ -136,10 +137,11 @@ def main():
     if args.count_only:
         return
     model.to(args.device)
-    if args.no_scan_kernel:
-        for m in model.modules():
-            if hasattr(m, "scan_kernel"):
-                m.scan_kernel = False
+    for m in model.modules():
+        if args.no_scan_kernel and hasattr(m, "scan_kernel"):
+            m.scan_kernel = False
+        if args.no_route_kernel and hasattr(m, "route_kernel"):
+            m.route_kernel = False
     if args.device.startswith("cuda"):
         # TF32 for training, the same for both models. The export below switches it off again, so the logits the
         # C kernel checks against are full float32.

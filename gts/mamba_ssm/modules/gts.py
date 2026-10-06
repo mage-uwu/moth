@@ -79,6 +79,7 @@ class GTS(nn.Module):
         node_bias=True,
         dense_walk=None,  # training path: compute every node's logit with one matmul (default when the trees are small)
         scan_kernel=None,  # depth 0: compute the context with the chunked Triton scan (ops/gts_scan.py); default on CUDA when triton is installed
+        route_kernel=None,  # stateless trees with route_ste: Triton walk kernels (ops/gts_route.py); default on CUDA when triton is installed
         A_init_range=(1, 16),
         dt_min=0.001,
         dt_max=0.1,
@@ -125,6 +126,7 @@ class GTS(nn.Module):
         # excluded) and can run as a chunked scan, linear in length, instead of the quadratic form below.
         assert not (scan_kernel and depth > 0), "the scan kernel covers depth-0 trees only"
         self.scan_kernel = scan_kernel
+        self.route_kernel = route_kernel
         # slot s of a path belongs to tree s // n_levels and level s % n_levels
         self.register_buffer("slot_level", torch.arange(self.n_levels).repeat(n_trees), persistent=False)
         self.register_buffer("tree_offset", torch.arange(n_trees) * self.n_nodes, persistent=False)
@@ -407,6 +409,39 @@ class GTS(nn.Module):
             ctx = y[..., self.node_col]  # what the token would read at each node
         return (pi * self._coef(all_logits, ctx)) @ self._w_out()
 
+    def _use_route_kernel(self, x):
+        if self.use_context or self.read_state or self.route_kernel is False:
+            return False
+        from mamba_ssm.ops.gts_route import HAVE_TRITON
+
+        return HAVE_TRITON and (self.route_kernel or (self.route_kernel is None and x.is_cuda))
+
+    def _forward_route_ste(self, x, mask, return_paths):
+        """route_ste: every node's logit from one matmul. The walk runs only if the paths are wanted; stateless trees
+        on CUDA use the Triton kernels, which never form the path weights."""
+        assert self.dense_walk and not self.read_state, "route_ste needs the dense training path and no state read"
+        want = return_paths or self.capture_paths
+        batch, length, _ = x.shape
+        all_logits = F.linear(x, self._w_in(), self.node_bias)  # (b, l, total nodes)
+        nodes = None
+        if self._use_route_kernel(x):
+            from mamba_ssm.ops.gts_route import route_ste_out
+
+            out, nodes = route_ste_out(all_logits.reshape(batch * length, -1), self._w_out(), self.n_trees, self.depth,
+                                       self.act, self.route_ste_temp, want)
+            out = out.view(batch, length, -1).to(x.dtype)
+            if want:
+                nodes = nodes.view(batch, length, -1).long()
+        else:
+            out = self._forward_ste(x, mask, all_logits)
+            if want:
+                nodes, _ = self._walk(x)
+                self._all_logits = None
+        if self.capture_paths:
+            self.last_nodes, self.last_logits = nodes, all_logits.gather(2, nodes)
+        out = out * mask.unsqueeze(-1)
+        return (out, nodes) if return_paths else out
+
     def _coef(self, logit, ctx):
         """Output coefficient of a path node from its branch logit and the context it read."""
         if self.act == "split":
@@ -429,13 +464,12 @@ class GTS(nn.Module):
             mask = attention_mask.to(dtype=u.dtype)
 
         x = self._local_mix(u, mask)
+        if self.route_ste:
+            return self._forward_route_ste(x, mask, return_paths)
         nodes, logits = self._walk(x)
         if self.capture_paths:
             self.last_nodes, self.last_logits = nodes, logits
-        all_logits, self._all_logits = self._all_logits, None  # do not keep a graph tensor on the module
-        if self.route_ste:
-            out = self._forward_ste(x, mask, all_logits) * mask.unsqueeze(-1)
-            return (out, nodes) if return_paths else out
+        self._all_logits = None  # do not keep a graph tensor on the module
         ctx = 0.0
         if self.use_context:
             ctx, states = self._context_dense(x, nodes, logits, mask)
