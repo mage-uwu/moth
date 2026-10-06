@@ -1,4 +1,5 @@
-# GTS-Uni-AR: the causal ternary GTS mixed forest (110M-class: width 768, 14 layers) with 3 shared-weight passes,
+# GTS-Uni-AR: the causal ternary GTS mixed forest (110M-class: width 768, 14 layers) with 3 shared-weight passes and
+# pause tokens (2 after every 32 real tokens, from pass 2),
 # trained on FineWeb GPT-2 tokens by scripts/ar_pretrain.py with the masked-LM path's conveniences. Not run yet.
 # Needs END_UTC. With INIT_FROM (a one-pass ar_pretrain checkpoint.pt) it warm-starts from it with split learning
 # rates; otherwise it trains from scratch. Logs and outputs in /workspace/out, served read-only on port 8888.

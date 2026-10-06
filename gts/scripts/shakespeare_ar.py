@@ -115,10 +115,14 @@ class TinyLM(nn.Module):
 
     ``loops`` > 1 makes it a GTS-Uni-AR: the whole stack runs ``loops`` times with the same weights; passes after the
     first add a learned per-pass embedding and add their update through a per-channel gate initialised to zero, so a
-    fresh looped model computes exactly what its one-pass weights do. Fewer passes can be chosen at run time. (No latent
-    tokens, unlike the masked-LM GTS-Uni: in a causal model, tokens at the start see only the start.)"""
+    fresh looped model computes exactly what its one-pass weights do. Fewer passes can be chosen at run time.
 
-    def __init__(self, vocab, d_model, n_layer, make_mixer, loops=1):
+    ``pause_every`` P and ``pause_tokens`` M add pause tokens, the causal counterpart of the masked-LM GTS-Uni's latents:
+    from pass 2 on, M learned vectors sit after every P real tokens. Each reads everything before it and is read by
+    everything after it, so later passes get slots to compute in that are not words; they carry no labels and their
+    outputs are dropped. Pass 1 runs on the real tokens alone, so with the gates at zero they change nothing."""
+
+    def __init__(self, vocab, d_model, n_layer, make_mixer, loops=1, pause_every=0, pause_tokens=0):
         super().__init__()
         self.embedding = nn.Embedding(vocab, d_model)
         nn.init.normal_(self.embedding.weight, std=0.02)
@@ -131,6 +135,25 @@ class TinyLM(nn.Module):
             self.loop_gate = nn.Parameter(torch.zeros(loops - 1, d_model))
             for q in (self.loop_embed, self.loop_gate):
                 q._no_weight_decay = True
+        self.pause_every, self.pause_tokens = (pause_every, pause_tokens) if loops > 1 and pause_every and pause_tokens else (0, 0)
+        if self.pause_tokens:
+            self.pause = nn.Parameter(torch.randn(self.pause_tokens, d_model) * 0.02)
+            self.pause._no_weight_decay = True
+
+    def _with_pauses(self, x):
+        """(B, T, d) -> (B, T', d) with the pause vectors after every pause_every positions (T padded at the end to a
+        multiple first: causal, so the padding touches nothing before it)."""
+        B, T, d = x.shape
+        P, M = self.pause_every, self.pause_tokens
+        nb = -(-T // P)
+        x = F.pad(x, (0, 0, 0, nb * P - T)).view(B, nb, P, d)
+        pz = self.pause.to(x.dtype).view(1, 1, M, d).expand(B, nb, M, d)
+        return torch.cat([x, pz], 2).reshape(B, nb * (P + M), d)
+
+    def _without_pauses(self, x, T):
+        B, _, d = x.shape
+        P = self.pause_every
+        return x.view(B, -1, P + self.pause_tokens, d)[:, :, :P].reshape(B, -1, d)[:, :T]
 
     def _stack(self, x, checkpoint_layers=False):
         for layer in self.layers:
@@ -143,6 +166,9 @@ class TinyLM(nn.Module):
         n = self.loops if loops is None else loops
         assert 1 <= n <= self.loops
         x = self._stack(self.embedding(ids), checkpoint_layers)
+        T = x.shape[1]
+        if n > 1 and self.pause_tokens:
+            x = self._with_pauses(x)
         for t in range(n - 1):
             xin = x + self.loop_embed[t]
             if checkpoint_loops and torch.is_grad_enabled():
@@ -150,6 +176,8 @@ class TinyLM(nn.Module):
             else:
                 y = self._stack(xin, checkpoint_layers)
             x = x + self.loop_gate[t] * (y - xin)
+        if n > 1 and self.pause_tokens:
+            x = self._without_pauses(x, T)
         return self.norm_f(x)
 
     def forward(self, ids, targets=None, loops=None):
@@ -176,7 +204,8 @@ def build(arch, vocab, args):
         bank = lambda: GTS(args.d_model, depth=0, n_trees=args.bank_trees, n_heads=args.bank_heads, d_state=args.bank_state, act="split", **common)
         deep = lambda: GTS(args.d_model, depth=args.gts_depth, n_trees=args.gts_trees, use_context=False, dense_walk=True,
                            route_ste=args.gts_route_ste, route_ste_temp=args.gts_route_temp, **common)
-        return TinyLM(vocab, args.d_model, args.gts_layers, lambda: Hybrid(bank(), deep()), loops=getattr(args, "loops", 1))
+        return TinyLM(vocab, args.d_model, args.gts_layers, lambda: Hybrid(bank(), deep()), loops=getattr(args, "loops", 1),
+                      pause_every=getattr(args, "pause_every", 0), pause_tokens=getattr(args, "pause_tokens", 0))
     if arch == "hybrid":
         trunk = lambda: Mamba2Ref(args.d_model, d_state=args.trunk_state, d_inner=args.trunk_inner,
                                   headdim=args.trunk_headdim, ternary=True, ternary_group=args.ternary_group)
@@ -240,8 +269,8 @@ def export(model, arch, path, test_ids):
             dims = [2, vocab, d, len(model.layers)] + _gts_dims(mix) if not mix.act_bits else [4, vocab, d, len(model.layers)] + _gts_dims(mix) + [mix.act_bits]
         elif arch == "mixed":  # format 6: two GTS mixers per layer, ten ints each; 7: the same looped (GTS-Uni-AR)
             dims = [6, vocab, d, len(model.layers)] + sum(([*_gts_dims(m), m.act_bits or 0, int(m.use_context)] for m in (mix.tree, mix.trunk)), [])
-            if getattr(model, "loops", 1) > 1:
-                dims = [7] + dims[1:] + [model.loops]
+            if getattr(model, "loops", 1) > 1:  # format 7 adds: passes, pause_every, pause_tokens
+                dims = [7] + dims[1:] + [model.loops, model.pause_every, model.pause_tokens]
         elif arch == "hybrid":
             dims = [3, vocab, d, len(model.layers)] + _gts_dims(mix.tree) + _m2_dims(mix.trunk)
         else:
@@ -257,6 +286,8 @@ def export(model, arch, path, test_ids):
                 w(f, t)
         if getattr(model, "loops", 1) > 1:
             w(f, model.loop_embed); w(f, model.loop_gate)
+            if model.pause_tokens:
+                w(f, model.pause)
         f.write(struct.pack("i", len(test_ids)))
         f.write(test_ids.numpy().astype(np.int32).tobytes())
         w(f, model(test_ids.unsqueeze(0).to(model.head_bias.device))[0])

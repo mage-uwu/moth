@@ -56,3 +56,31 @@ def test_checkpointed_ar_passes_give_the_same_gradients():
         uni.hidden(ids, checkpoint_loops=ck, checkpoint_layers=ck).square().mean().backward()
         grads.append(uni.loop_gate.grad.clone())
     assert torch.allclose(grads[0], grads[1], atol=1e-6)
+
+
+def _build_pause(loops, every=4, m=2):
+    a = argparse.Namespace(d_model=64, ternary_group=128, gts_layers=2, gts_depth=3, gts_trees=1, gts_heads=1, gts_act="gelu",
+                           gts_state=16, gts_read=False, gts_write_key=False, gts_act_bits=8, gts_route_ste=True,
+                           gts_route_temp=1.0, bank_trees=8, bank_heads=8, bank_state=16, loops=loops, pause_every=every,
+                           pause_tokens=m)
+    return S.build("mixed", 300, a)
+
+
+def test_pause_tokens_start_inert_and_keep_causality():
+    torch.manual_seed(0)
+    plain = _build(1).eval()
+    uni = _build_pause(3).eval()
+    missing, unexpected = uni.load_state_dict(plain.state_dict(), strict=False)
+    assert set(missing) == {"loop_embed", "loop_gate", "pause"}
+    ids = torch.randint(0, 300, (2, 14))  # not a multiple of pause_every: padded internally
+    assert torch.equal(plain(ids), uni(ids))
+    with torch.no_grad():
+        uni.loop_gate.fill_(0.5)
+    ids2 = ids.clone()
+    ids2[:, 9] = (ids2[:, 9] + 1) % 300
+    a, b = uni(ids), uni(ids2)
+    assert torch.allclose(a[:, :9], b[:, :9], atol=1e-5) and not torch.allclose(a[:, 9:], b[:, 9:])
+    with torch.no_grad():  # the pause vectors matter once the gates are open
+        before = uni(ids)
+        uni.pause.add_(1.0)
+        assert not torch.allclose(before[:, 4:], uni(ids)[:, 4:])

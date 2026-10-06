@@ -540,10 +540,11 @@ static void m2_step(MLayer *m, const float *u, float *out) {
 // arch 7: arch 6 looped (GTS-Uni-AR): the stack runs `passes` times with shared weights; pass p > 0 has its own
 // recurrent states (lp1/lp2[p]), adds loop_embed[p - 1] and adds its update through the per-channel loop_gate[p - 1].
 #define IS_MIXED(a) ((a) == 6 || (a) == 7)
-typedef struct { int arch, V, d, n_layer, loops, passes; float *emb, *head_bias, *normf_w, **norm_w; void **layers, **layers2; void ***lp1, ***lp2;
+typedef struct { int arch, V, d, n_layer, loops, passes, pause_every, pause_tokens; long nreal; float *pause, *emb, *head_bias, *normf_w, **norm_w; void **layers, **layers2; void ***lp1, ***lp2;
                  float *loop_embed, *loop_gate, *xin, *y; float *u, *xn, *o, *o2; double t_mix; } Model;
 
 static void model_reset(Model *M) {
+    M->nreal = 0;
     for (int l = 0; l < M->n_layer; l++) {
         if (!IS_M2(M->arch)) gts_reset((GLayer *)M->layers[l]); else m2_reset((MLayer *)M->layers[l]);
         if (M->arch == 3) m2_reset((MLayer *)M->layers2[l]);
@@ -563,16 +564,28 @@ static void stack_step(Model *M, void **L1, void **L2, float *x) {
     }
 }
 
+// Passes 2.. of a looped model on the residual x, each with its own recurrent states.
+static void later_passes(Model *M, float *x) {
+    const int d = M->d;
+    for (int p = 1; p < M->passes; p++) {
+        const float *e = M->loop_embed + (size_t)(p - 1) * d, *g = M->loop_gate + (size_t)(p - 1) * d;
+        for (int i = 0; i < d; i++) M->xin[i] = M->y[i] = x[i] + e[i];
+        stack_step(M, M->lp1[p], M->lp2[p], M->y);
+        for (int i = 0; i < d; i++) x[i] += g[i] * (M->y[i] - M->xin[i]);
+    }
+}
+
 static void model_step(Model *M, int tok, float *logits) {
     const int d = M->d;
     memcpy(M->u, M->emb + (size_t)tok * d, d * sizeof(float));
     double t0 = now();
     stack_step(M, M->layers, M->layers2, M->u);
-    for (int p = 1; p < M->passes; p++) {
-        const float *e = M->loop_embed + (size_t)(p - 1) * d, *g = M->loop_gate + (size_t)(p - 1) * d;
-        for (int i = 0; i < d; i++) M->xin[i] = M->y[i] = M->u[i] + e[i];
-        stack_step(M, M->lp1[p], M->lp2[p], M->y);
-        for (int i = 0; i < d; i++) M->u[i] += g[i] * (M->y[i] - M->xin[i]);
+    later_passes(M, M->u);
+    // pause tokens: after every pause_every real tokens, pause_tokens learned vectors go through passes 2.. only
+    // (pass 1 never sees them), advancing those passes' states; their outputs are not used.
+    if (M->pause_tokens && M->passes > 1 && ++M->nreal % M->pause_every == 0) {
+        static float *buf = NULL; if (!buf) buf = (float *)xalloc(d * sizeof(float));
+        for (int j = 0; j < M->pause_tokens; j++) { memcpy(buf, M->pause + (size_t)j * d, d * sizeof(float)); later_passes(M, buf); }
     }
     M->t_mix += now() - t0;
     rmsnorm(M->u, M->normf_w, M->xn, d);
@@ -703,7 +716,7 @@ int main(int argc, char **argv) {
     g_f = fopen(argv[1], "rb"); if (!g_f) { perror("open"); return 1; }
     Model M; memset(&M, 0, sizeof(M));
     M.arch = rdi(); M.V = rdi(); M.d = rdi(); M.n_layer = rdi();
-    int dims[21] = {0, 0, 0, 0, 1, 1, 0, 1, 0}; const int n_dims = M.arch == 0 ? 3 : M.arch == 1 ? 5 : M.arch == 2 ? 8 : M.arch == 4 ? 9 : M.arch == 5 ? 6 : M.arch == 6 ? 20 : M.arch == 7 ? 21 : 13; // 6: two GTS mixers per layer // 4: GTS with act_bits, 5: Mamba-2 with act_bits // arch 0: GTS (first format), 1: Mamba-2, 2: GTS with flags
+    int dims[23] = {0, 0, 0, 0, 1, 1, 0, 1, 0}; const int n_dims = M.arch == 0 ? 3 : M.arch == 1 ? 5 : M.arch == 2 ? 8 : M.arch == 4 ? 9 : M.arch == 5 ? 6 : M.arch == 6 ? 20 : M.arch == 7 ? 23 : 13; // 6: two GTS mixers per layer // 4: GTS with act_bits, 5: Mamba-2 with act_bits // arch 0: GTS (first format), 1: Mamba-2, 2: GTS with flags
     for (int i = 0; i < n_dims; i++) dims[i] = rdi();
     M.emb = rdf((size_t)M.V * M.d); M.head_bias = rdf(M.V); M.normf_w = rdf(M.d);
     M.layers = (void **)xalloc(M.n_layer * sizeof(void *)); M.layers2 = (void **)xalloc(M.n_layer * sizeof(void *)); M.norm_w = (float **)xalloc(M.n_layer * sizeof(float *));
@@ -714,9 +727,11 @@ int main(int argc, char **argv) {
         if (IS_MIXED(M.arch)) M.layers2[l] = (void *)gts_load(M.d, dims[10], dims[11], dims[12], dims[13], dims[14], dims[15], dims[16], dims[17], dims[18], dims[19]);
     }
     M.loops = M.arch == 7 ? dims[20] : 1;
+    M.pause_every = M.arch == 7 ? dims[21] : 0; M.pause_tokens = M.arch == 7 ? dims[22] : 0;
     M.lp1 = (void ***)xalloc(M.loops * sizeof(void **)); M.lp2 = (void ***)xalloc(M.loops * sizeof(void **));
     if (M.loops > 1) {
         M.loop_embed = rdf((size_t)(M.loops - 1) * M.d); M.loop_gate = rdf((size_t)(M.loops - 1) * M.d);
+        if (M.pause_tokens) M.pause = rdf((size_t)M.pause_tokens * M.d);
         for (int p = 1; p < M.loops; p++) {
             M.lp1[p] = (void **)xalloc(M.n_layer * sizeof(void *)); M.lp2[p] = (void **)xalloc(M.n_layer * sizeof(void *));
             for (int l = 0; l < M.n_layer; l++) { M.lp1[p][l] = gts_clone_state((GLayer *)M.layers[l]); M.lp2[p][l] = gts_clone_state((GLayer *)M.layers2[l]); }
@@ -750,7 +765,8 @@ int main(int argc, char **argv) {
         }
     }
     printf("%s  %d layers, width %d\n", IS_M2(M.arch) ? "Mamba-2" : M.arch == 3 ? "GTS + trunk" : M.arch == 6 ? "GTS mixed" : M.arch == 7 ? "GTS-Uni-AR (mixed, looped)" : "GTS    ", M.n_layer, M.d);
-    if (M.loops > 1) printf("  %d passes of the stack with shared weights (the check runs all of them)\n", M.loops);
+    if (M.loops > 1) printf("  %d passes of the stack with shared weights (the check runs all of them)%s\n", M.loops, "");
+    if (M.pause_tokens) printf("  pause tokens: %d after every %d real tokens, in passes 2..%d\n", M.pause_tokens, M.pause_every, M.loops);
     printf("  weights: %d tensors packed ternary, %d float32\n", g_packed, g_float);
     printf("  check: max |logit - PyTorch logit| = %.2e over %d tokens, same top-1 on %d; loss on them %.4f (PyTorch %.4f)\n", worst, T, agree, nll_c / (T - 1), nll_ref / (T - 1));
 

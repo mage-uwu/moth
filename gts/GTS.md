@@ -510,9 +510,13 @@ pass at the one-pass model's speed, more for quality, chosen per query.
   learned scratch vectors sit after `[CLS]`; the bidirectional scan lets each pass write a summary into them and the
   next pass read it back. `kernel/enc_bench.c` format 8 runs the passes (4 threads, 512 tokens: 27K, 12.9K, 7.2K
   tokens/s at 1, 2, 3 passes).
-- Autoregressive (`TinyLM(loops=...)`, `scripts/ar_pretrain.py --loops`): no latent tokens (in a causal model, tokens
-  at the start see only the start). `kernel/ar_bench.c` format 7 keeps one recurrent state per pass and layer, sharing
-  the weights; checked against PyTorch to 1e-5 on the logits.
+- Autoregressive (`TinyLM(loops=...)`, `scripts/ar_pretrain.py --loops`): pause tokens instead of latents (scratch
+  tokens at the start of a causal sequence would see only the start). From pass 2, `pause_tokens` learned vectors sit
+  after every `pause_every` real tokens (default 2 after every 32): each reads everything before it and is read by
+  everything after it; no labels, outputs dropped; pass 1 never sees them, so a fresh model is still exact.
+  `kernel/ar_bench.c` format 7 keeps one recurrent state per pass and layer, sharing the weights, and runs the pause
+  steps through passes 2.. after every `pause_every` real tokens; checked against PyTorch (logits within 1e-6 to
+  6e-3, same top-1 on every test token).
 - Warm start: `--init-from` a one-pass checkpoint, with `--new-param-lr` for the pass embeddings, gates (and latents).
   A first masked-LM try with one learning rate of 3e-4 for everything, from a fresh optimizer, knocked GTS3 off its
   minimum (validation 2.615 -> 2.78); the run in progress uses 3e-5 for the shared weights and 1e-3 for the new ones.

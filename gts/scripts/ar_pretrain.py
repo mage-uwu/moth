@@ -7,7 +7,7 @@ path's conveniences (scripts/bert_pretrain.py).
 
 Model: scripts/shakespeare_ar.TinyLM with the mixed forest (a bank of depth-0 trees for context, deep stateless trees
 with the routing gradient), ternary weights, 8-bit activations; with ``--loops`` > 1 the whole stack runs that many times
-with shared weights, gated passes and per-pass embeddings (TinyLM's docstring); each step trains with a pass count
+with shared weights, gated passes, per-pass embeddings and pause tokens (TinyLM's docstring); each step trains with a pass count
 drawn from ``--loop-probs`` so every pass count works at run time.
 
 Training: bf16, torch.compile per block (static shapes), fused AdamW, the head padded to a multiple of 64 rows,
@@ -47,7 +47,8 @@ PROMPTS = ["The capital of France is", "In 1969, the first person to walk on the
 
 def model_config(a, vocab):
     return dict(vocab=vocab, width=a.width, layers=a.layers, bank_trees=a.bank_trees, bank_heads=a.bank_heads,
-                bank_state=a.bank_state, deep_trees=a.deep_trees, deep_depth=a.deep_depth, loops=a.loops)
+                bank_state=a.bank_state, deep_trees=a.deep_trees, deep_depth=a.deep_depth, loops=a.loops,
+                pause_every=a.pause_every if a.loops > 1 else 0, pause_tokens=a.pause_tokens if a.loops > 1 else 0)
 
 
 def build(cfg):
@@ -55,7 +56,7 @@ def build(cfg):
         d_model=cfg["width"], ternary_group=128, gts_layers=cfg["layers"], gts_depth=cfg["deep_depth"], gts_trees=cfg["deep_trees"],
         gts_heads=1, gts_act="gelu", gts_state=16, gts_read=False, gts_write_key=False, gts_act_bits=8, gts_route_ste=True,
         gts_route_temp=1.0, bank_trees=cfg["bank_trees"], bank_heads=cfg["bank_heads"], bank_state=cfg["bank_state"],
-        loops=cfg.get("loops", 1))
+        loops=cfg.get("loops", 1), pause_every=cfg.get("pause_every", 0), pause_tokens=cfg.get("pause_tokens", 0))
     return S.build("mixed", cfg["vocab"], ns)
 
 
@@ -137,7 +138,7 @@ def train(a):
         src = torch.load(a.init_from, map_location="cpu", weights_only=False)
         state = src["model"] if "model" in src else src  # checkpoint.pt, or lm_run.py's model.pt (a bare state dict)
         missing, unexpected = model.load_state_dict({k.replace("._orig_mod", ""): v for k, v in state.items()}, strict=False)
-        assert not unexpected and set(missing) <= {"loop_embed", "loop_gate"}, f"init-from mismatch: {missing}, {unexpected}"
+        assert not unexpected and set(missing) <= {"loop_embed", "loop_gate", "pause"}, f"init-from mismatch: {missing}, {unexpected}"
         print(f"weights from {a.init_from}; new parameters: {sorted(missing)}", flush=True)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"GTS{'-Uni-AR' if a.loops > 1 else ''} causal LM: {n_params / 1e6:.1f}M parameters, width {a.width}, {a.layers} layers"
@@ -145,7 +146,7 @@ def train(a):
     if a.compile and device == "cuda":
         for i in range(len(model.layers)):
             model.layers[i] = torch.compile(model.layers[i], dynamic=False)
-    uni = {"loop_embed", "loop_gate"}
+    uni = {"loop_embed", "loop_gate", "pause"}
     named = [(n.replace("._orig_mod", ""), p) for n, p in model.named_parameters()]
     new = [p for n, p in named if n in uni] if a.new_param_lr else []
     old = [p for n, p in named if all(p is not q for q in new)]
@@ -279,6 +280,9 @@ def main():
     p.add_argument("--deep-trees", type=int, default=4)
     p.add_argument("--deep-depth", type=int, default=9)
     p.add_argument("--loops", type=int, default=1, help="GTS-Uni-AR: passes of the whole stack with shared weights")
+    p.add_argument("--pause-every", type=int, default=32, help="GTS-Uni-AR: pause tokens after every this many real tokens "
+                   "(from pass 2; 0 for none)")
+    p.add_argument("--pause-tokens", type=int, default=2, help="GTS-Uni-AR: pause vectors at each such point")
     p.add_argument("--loop-probs", default="0.1,0.2,0.7", help="probability of training a step with 1, 2, ... passes")
     p.add_argument("--new-param-lr", type=float, help="peak learning rate of the pass embeddings and gates (default: --lr)")
     p.add_argument("--checkpoint-layers", action="store_true", help="recompute every block in the backward pass")
