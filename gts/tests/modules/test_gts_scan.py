@@ -48,22 +48,27 @@ def test_scan_reverse_is_gts_backward_context():
 
 @pytest.mark.parametrize("causal", [True, False])
 def test_gts_depth0_scan_matches_dense_and_reference(causal):
+    """Values and every gradient of a depth-0 GTS with the scan, against the dense path in float64 (the ground truth).
+    The scan's float32 error must stay within 10x the dense path's own float32 error. The log-decay gradients
+    (dt_bias, A_log) cancel heavily, so an absolute bound would be too tight on a GPU, whose exp is approximate."""
     torch.manual_seed(0)
     kw = dict(depth=0, n_trees=8, n_heads=4, d_state=16, act="split", d_conv=3, causal=causal)
-    a, b = GTS(32, scan_kernel=True, **kw).to(DEV), GTS(32, scan_kernel=False, **kw).to(DEV)
-    b.load_state_dict(a.state_dict())
-    u = torch.randn(2, 70, 32, device=DEV)
-    ua, ub = u.clone().requires_grad_(), u.clone().requires_grad_()
-    ya, yb = a(ua), b(ub)
-    assert torch.allclose(ya, yb, atol=1e-5)
-    assert torch.allclose(ya, a.forward_reference(u), atol=1e-4)
-    g = torch.randn_like(ya)
-    (ya * g).sum().backward()
-    (yb * g).sum().backward()
-    assert torch.allclose(ua.grad, ub.grad, atol=1e-5)
-    for (name, pa), pb in zip(a.named_parameters(), b.parameters()):
-        err = (pa.grad - pb.grad).abs().max().item()
-        assert err <= 1e-5 * (1 + pb.grad.abs().max().item()), f"{name}: max |diff| {err:.3e}, max |grad| {pb.grad.abs().max().item():.3e}"
+    scan, dense = GTS(32, scan_kernel=True, **kw).to(DEV), GTS(32, scan_kernel=False, **kw).to(DEV)
+    dense.load_state_dict(scan.state_dict())
+    truth = GTS(32, scan_kernel=False, **kw).to(DEV).double()
+    truth.load_state_dict(scan.state_dict())
+    u, g = torch.randn(2, 70, 32, device=DEV), torch.randn(2, 70, 32, device=DEV)
+    results = []
+    for m, dtype in ((scan, torch.float32), (dense, torch.float32), (truth, torch.float64)):
+        x = u.to(dtype).detach().clone().requires_grad_()
+        y = m(x)
+        (y * g.to(dtype)).sum().backward()
+        results.append([y.double(), x.grad.double()] + [p.grad.double() for p in m.parameters()])
+    assert torch.allclose(results[0][0].float(), scan.forward_reference(u), atol=1e-4)
+    names = ["output", "input"] + [n for n, _ in scan.named_parameters()]
+    for name, a, b, t in zip(names, *results):
+        err_scan, err_dense = (a - t).abs().max().item(), (b - t).abs().max().item()
+        assert err_scan <= 10 * err_dense + 1e-6 * (1 + t.abs().max().item()), f"{name}: scan error {err_scan:.2e}, dense float32 error {err_dense:.2e}"
 
 
 def test_mixed_bank_uses_scan():

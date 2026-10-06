@@ -5,22 +5,6 @@ O=/workspace/out; tag=$(git rev-parse --short HEAD)
 python3 -m pip install -q einops packaging 2>&1 | tail -1
 python3 -c "import torch, triton; print(torch.__version__, triton.__version__, torch.cuda.get_device_name(0))"
 python3 -m pytest tests/modules/test_gts_scan.py -q -rf --tb=line 2>&1 | tail -25 | tee $O/bench_$tag.log
-python3 - <<"PY" 2>&1 | tee -a $O/bench_$tag.log
-# the bidirectional depth-0 GTS, scan against dense, gradient by gradient, in float32 and with TF32 conv off
-import torch
-from mamba_ssm.modules.gts import GTS
-for conv_tf32 in (True, False):
-    torch.backends.cudnn.allow_tf32 = conv_tf32
-    torch.manual_seed(0)
-    kw = dict(depth=0, n_trees=8, n_heads=4, d_state=16, act="split", d_conv=3, causal=False)
-    a, b = GTS(32, scan_kernel=True, **kw).cuda(), GTS(32, scan_kernel=False, **kw).cuda()
-    b.load_state_dict(a.state_dict())
-    u = torch.randn(2, 70, 32, device="cuda")
-    g = torch.randn(2, 70, 32, device="cuda")
-    (a(u) * g).sum().backward(); (b(u) * g).sum().backward()
-    for (name, pa), pb in zip(a.named_parameters(), b.parameters()):
-        print(f"cudnn tf32 {conv_tf32}: {name:12s} max|diff| {(pa.grad - pb.grad).abs().max().item():.3e}  max|grad| {pb.grad.abs().max().item():.3e}")
-PY
 python3 scripts/bench_scan.py --layer --profile 2>&1 | tee -a $O/bench_$tag.log
 echo "=== BENCH DONE $(date -u +%T) ===" | tee -a $O/bench_$tag.log
 # End to end: training steps of the 0.5B mixed forest with the scan and with the quadratic context, at equal tokens.
