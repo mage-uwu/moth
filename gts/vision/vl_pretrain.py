@@ -492,8 +492,16 @@ def train(a):
     print(f"{data.n:,} pairs ({', '.join(s.meta.get('source', '?')[:40] + f': {s.n:,}' for s in data.sets)}); "
           f"{a.held_out} held out", flush=True)
     t0 = time.time()
-    temb = text_embeddings(lm, data.caps, device)
-    print(f"caption embeddings from the frozen LM: {tuple(temb.shape)} in {time.time() - t0:.0f} s", flush=True)
+    cache = a.temb_cache
+    if cache and os.path.exists(cache):
+        temb = torch.load(cache, map_location=device)
+        print(f"caption embeddings from {cache}: {tuple(temb.shape)}", flush=True)
+    else:
+        temb = text_embeddings(lm, data.caps, device)
+        print(f"caption embeddings from the frozen LM: {tuple(temb.shape)} in {time.time() - t0:.0f} s", flush=True)
+        if cache:
+            torch.save(temb, cache)
+    print(f"  finite: {bool(torch.isfinite(temb.float()).all())}, largest |x| {temb.float().abs().max().item():.1f}", flush=True)
 
     vcfg = GTSVisionConfig(image_size=a.image_size, d_model=a.width, n_layer=a.layers, deep_depth=a.deep_depth,
                            deep_trees=a.deep_trees, bank_trees=a.bank_trees)
@@ -591,6 +599,7 @@ def train(a):
         return idx, data.jpegs(idx)
 
     np.random.seed(a.seed)
+    skipped, bad_run = 0, 0
     nxt = [sample()]
     reader = None
     t_rate = None
@@ -612,9 +621,22 @@ def train(a):
         clip, cap, _, _ = losses(idx, x)
         loss = clip + a.cap_weight * cap
         opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(params, 1.0)
-        opt.step()
+        if torch.isfinite(loss):
+            loss.backward()
+            gnorm = torch.nn.utils.clip_grad_norm_(params, 1.0)
+        else:
+            gnorm = loss
+        if torch.isfinite(gnorm):
+            opt.step()
+            bad_run = 0
+        else:  # skip the step rather than let one non-finite gradient reach every weight through the clipping
+            skipped += 1
+            bad_run += 1
+            if skipped <= 10:
+                print(f"  step {step}: non-finite (clip {clip.item():.4f}, cap {cap.item():.4f}, grad norm {gnorm.item()}); "
+                      f"skipped", flush=True)
+            if bad_run >= 50:
+                raise RuntimeError(f"{bad_run} non-finite steps in a row at step {step}")
         with torch.no_grad():
             heads.logit_scale.clamp_(0, math.log(100))
         step += 1
@@ -745,6 +767,7 @@ def main():
     t.add_argument("--crop-min", type=float, default=0.4)
     t.add_argument("--cap-mask-prob", type=float, default=0.4)
     t.add_argument("--cap-weight", type=float, default=1.0)
+    t.add_argument("--temb-cache", help="file for the caption embeddings (reused when it exists)")
     t.add_argument("--held-out", type=int, default=2048, help="a multiple of --batch-size; recall is among 1,000")
     t.add_argument("--eval-every", type=int, default=2000)
     t.add_argument("--log-every", type=int, default=100)
