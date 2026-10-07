@@ -159,6 +159,12 @@ class Teacher:
 
 
 # ------------------------------------------------------------------------------------------------------- training
+def clean_state(sd):
+    """A state_dict without torch.compile's ``_orig_mod.`` wrapper prefix (checkpoints saved before the in-place
+    compile carry it)."""
+    return {k.replace("_orig_mod.", ""): v for k, v in sd.items()}
+
+
 def rel(a, b):
     """Relative squared error ||a - b||^2 / ||b||^2, in float32."""
     a, b = a.float(), b.float()
@@ -218,17 +224,17 @@ def train(a):
     student = GTSLForMaskedLM(cfg).to(device)
     st = torch.load(state_path, map_location="cpu", weights_only=False) if os.path.exists(state_path) else None
     if st is not None:
-        student.load_state_dict(st["model"])
+        student.load_state_dict(clean_state(st["model"]))
         print(f"resuming: stage {st['stage']}, step {st['step']}, {st['tokens'] / 1e6:.1f}M tokens into it; done {st['done']}", flush=True)
     elif a.init:
-        student.load_state_dict(torch.load(a.init, map_location="cpu", weights_only=False)["model"])
+        student.load_state_dict(clean_state(torch.load(a.init, map_location="cpu", weights_only=False)["model"]))
         print(f"weights from {a.init}", flush=True)
     else:
         student.init_from_modernbert(teacher.m)
     deep_mods = [layer.deep for layer in student.layers]
     if a.compile and device == "cuda":
         for layer in student.layers:
-            layer.deep = torch.compile(layer.deep, dynamic=False)
+            layer.deep.compile(dynamic=False)  # in place: state_dict keys stay unprefixed
     n_params = sum(p.numel() for p in student.parameters())
     print(f"teacher {TEACHER}; student GTS-L {n_params / 1e6:.1f}M parameters ({cfg}); data {len(tr):,} training tokens; "
           f"budgets {a.stage1_tokens / 1e6:.0f}M / {a.stage2_tokens / 1e6:.0f}M / {a.stage3_tokens / 1e6:.0f}M tokens", flush=True)
