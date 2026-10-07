@@ -38,29 +38,41 @@ if HAVE_TRITON:
     @triton.jit
     def _sparse_fwd(X, WI, BIAS, WO, OUT, NODES, LOGITS, n_tok, d, s_x, s_o,
                     N_TREES: tl.constexpr, N_NODES: tl.constexpr, DEPTH: tl.constexpr, ACT: tl.constexpr,
-                    HAS_BIAS: tl.constexpr, ROUND_BF16: tl.constexpr, BM: tl.constexpr, BD: tl.constexpr):
+                    HAS_BIAS: tl.constexpr, ROUND_BF16: tl.constexpr, BM: tl.constexpr, BD: tl.constexpr,
+                    PHASES: tl.constexpr, X_RES: tl.constexpr, DP: tl.constexpr):
         tok = tl.program_id(0) * BM + tl.arange(0, BM)
         ok = tok < n_tok
         cols = tl.arange(0, BD)
         P: tl.constexpr = N_TREES * (DEPTH + 1)
         # phase 1: walk every tree, keeping the path's node ids and logits
-        for t in range(N_TREES):
-            cur = tl.zeros((BM,), dtype=tl.int32)
-            for k in range(DEPTH + 1):
-                node = t * N_NODES + cur
-                acc = tl.zeros((BM,), dtype=tl.float32)
-                for c in range(0, d, BD):
-                    cm = (c + cols) < d
-                    xv = tl.load(X + tok[:, None] * s_x + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
-                    wv = tl.load(WI + node[:, None] * d + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
-                    acc += tl.sum(xv.to(tl.float32) * wv.to(tl.float32), axis=1)
-                if HAS_BIAS:
-                    acc += tl.load(BIAS + node, mask=ok, other=0.0).to(tl.float32)
-                if ROUND_BF16:  # the dense path's bf16 GEMM hands back bf16 logits: branch on the same value
-                    acc = acc.to(tl.bfloat16).to(tl.float32)
-                tl.store(NODES + tok * P + t * (DEPTH + 1) + k, node, mask=ok)
-                tl.store(LOGITS + tok * P + t * (DEPTH + 1) + k, acc, mask=ok)
-                cur = 2 * cur + 1 + (acc > 0).to(tl.int32)
+        if PHASES & 1:
+            if X_RES:  # the block's inputs, loaded once for all trees and levels (DP: d_model rounded up to a power of 2)
+                full = tl.arange(0, DP)
+                fm = full < d
+                xr = tl.load(X + tok[:, None] * s_x + full[None, :], mask=ok[:, None] & fm[None, :], other=0.0).to(tl.float32)
+            for t in range(N_TREES):
+                cur = tl.zeros((BM,), dtype=tl.int32)
+                for k in range(DEPTH + 1):
+                    node = t * N_NODES + cur
+                    if X_RES:
+                        wv = tl.load(WI + node[:, None] * d + full[None, :], mask=ok[:, None] & fm[None, :], other=0.0)
+                        acc = tl.sum(xr * wv.to(tl.float32), axis=1)
+                    else:
+                        acc = tl.zeros((BM,), dtype=tl.float32)
+                        for c in range(0, d, BD):
+                            cm = (c + cols) < d
+                            xv = tl.load(X + tok[:, None] * s_x + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+                            wv = tl.load(WI + node[:, None] * d + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+                            acc += tl.sum(xv.to(tl.float32) * wv.to(tl.float32), axis=1)
+                    if HAS_BIAS:
+                        acc += tl.load(BIAS + node, mask=ok, other=0.0).to(tl.float32)
+                    if ROUND_BF16:  # the dense path's bf16 GEMM hands back bf16 logits: branch on the same value
+                        acc = acc.to(tl.bfloat16).to(tl.float32)
+                    tl.store(NODES + tok * P + t * (DEPTH + 1) + k, node, mask=ok)
+                    tl.store(LOGITS + tok * P + t * (DEPTH + 1) + k, acc, mask=ok)
+                    cur = 2 * cur + 1 + (acc > 0).to(tl.int32)
+        if not (PHASES & 2):
+            return
         # phase 2: the output, a chunk of d_model at a time
         for c in range(0, d, BD):
             cm = (c + cols) < d
@@ -73,7 +85,8 @@ if HAVE_TRITON:
             tl.store(OUT + tok[:, None] * s_o + (c + cols)[None, :], out, mask=ok[:, None] & cm[None, :])
 
 
-def sparse_route_fwd(x, w_in, bias, w_out, n_trees, n_nodes, depth, act="gelu", block_m=32, block_d=64, num_warps=4):
+def sparse_route_fwd(x, w_in, bias, w_out, n_trees, n_nodes, depth, act="gelu", block_m=16, block_d=128, num_warps=2,
+                     x_resident=False, phases=3, buffers=None):
     """x: (tokens, d); w_in, w_out: (>= trees * nodes, d) node rows (padding rows after the trees are never read);
     bias: (>= trees * nodes,) or None. Returns (out, nodes, logits): out (tokens, d) float32, nodes (tokens, trees,
     depth + 1) int32 global node ids along each path, logits the same shape in float32. ``act`` is "gelu", "split"
@@ -86,11 +99,15 @@ def sparse_route_fwd(x, w_in, bias, w_out, n_trees, n_nodes, depth, act="gelu", 
     w_in = w_in.to(x.dtype).contiguous()
     w_out = w_out.to(x.dtype).contiguous()
     out = torch.empty(n_tok, d, device=x.device, dtype=torch.float32)
-    nodes = torch.empty(n_tok, n_trees, depth + 1, device=x.device, dtype=torch.int32)
-    logits = torch.empty(n_tok, n_trees, depth + 1, device=x.device, dtype=torch.float32)
+    if buffers is None:  # (benchmarking) phase 2 alone reuses a walk's nodes and logits
+        nodes = torch.empty(n_tok, n_trees, depth + 1, device=x.device, dtype=torch.int32)
+        logits = torch.empty(n_tok, n_trees, depth + 1, device=x.device, dtype=torch.float32)
+    else:
+        nodes, logits = buffers
     b = bias.contiguous() if bias is not None else out
     _sparse_fwd[(triton.cdiv(n_tok, block_m),)](
         x, w_in, b, w_out, out, nodes, logits, n_tok, d, x.stride(0), out.stride(0),
         N_TREES=n_trees, N_NODES=n_nodes, DEPTH=depth, ACT=code, HAS_BIAS=bias is not None,
-        ROUND_BF16=x.dtype == torch.bfloat16, BM=block_m, BD=block_d, num_warps=num_warps)
+        ROUND_BF16=x.dtype == torch.bfloat16, BM=block_m, BD=block_d, PHASES=phases, X_RES=x_resident,
+        DP=triton.next_power_of_2(d), num_warps=num_warps)
     return out, nodes, logits

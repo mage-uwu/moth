@@ -9,6 +9,8 @@ import torch
 
 from mamba_ssm.modules.gts import GTS
 
+KERNEL_ARGS = {}  # tile sizes for the sparse kernel (bench_sparse.py sets the fastest it found)
+
 
 class GTSSparse(GTS):
     sparse = True
@@ -32,7 +34,7 @@ class GTSSparse(GTS):
         if torch.is_autocast_enabled():
             x = x.to(torch.get_autocast_gpu_dtype())
         out, nodes, _ = sparse_route_fwd(x.reshape(batch * length, d), w_in, bias, w_out, self.n_trees, self.n_nodes,
-                                         self.depth, self.act)
+                                         self.depth, self.act, **KERNEL_ARGS)
         out = out.view(batch, length, d).to(x.dtype) * mask.unsqueeze(-1)
         if return_paths:
             return out, nodes.view(batch, length, -1).long()
