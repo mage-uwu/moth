@@ -53,18 +53,21 @@ def _unpack2(packed, shape):
 
 
 @torch.no_grad()
-def save_binarized(model, config, path):
+def save_binarized(model, config, path, extra=None):
+    """``extra``: more entries for the blob (a fine-tuned model's task, labels, temperatures, ...). Names are stored
+    without torch.compile's ``_orig_mod.``, so a compiled model saves the same as an uncompiled one."""
     tern = ternary_tensors(model)
-    blob = {"format": "gts-ternary-v1", "config": dict(config), "ternary": {}, "float": {}}
+    clean = lambda n: n.replace("_orig_mod.", "")  # noqa: E731
+    blob = {"format": "gts-ternary-v1", "config": dict(config), "ternary": {}, "float": {}, **(extra or {})}
     for name, (w, g) in tern.items():
         codes, scales = pack_ternary(w.float().cpu(), g)
-        blob["ternary"][name] = {"packed": _pack2(codes), "shape": list(w.shape), "group": g, "scales": scales.float()}
+        blob["ternary"][clean(name)] = {"packed": _pack2(codes), "shape": list(w.shape), "group": g, "scales": scales.float()}
     seen = set()
     for name, t in model.state_dict().items():
         if name in tern or t.data_ptr() in seen:  # tied weights (embedding and head) are stored once
             continue
         seen.add(t.data_ptr())
-        blob["float"][name] = t.detach().float().cpu() if t.is_floating_point() else t.detach().cpu()
+        blob["float"][clean(name)] = t.detach().float().cpu() if t.is_floating_point() else t.detach().cpu()
     torch.save(blob, path)
     return blob
 

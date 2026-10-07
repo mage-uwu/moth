@@ -7,7 +7,7 @@ compared under the same data, budget and schedule.
 
 GTS: the masked-LM encoder (GTSForMaskedLM's backbone, a GTS-Uni too: ``--loops`` passes) fully fine-tuned with its
 ternary weights trained through the straight-through estimator as in pretraining; classification head on [CLS]'s and
-the mean final state, dropout 0.1. Pairs are "[CLS] a [SEP] b [SEP]" (GTS has no segment embeddings). Baselines:
+the mean final state, dropout 0.1; ``--save-dir`` keeps each task's best epoch (GTSClassifier.load). Pairs are "[CLS] a [SEP] b [SEP]" (GTS has no segment embeddings). Baselines:
 AutoModelForSequenceClassification. Both: AdamW, linear warmup over 10% then linear decay, bf16 on a GPU, inputs padded
 to --max-len (static shapes), the dev set scored after every epoch and the best epoch reported, as is usual for GLUE
 dev numbers. Metrics: accuracy (MNLI matched, QNLI, RTE, SST-2), F1 and accuracy (MRPC, QQP), Matthews correlation
@@ -45,16 +45,24 @@ TASKS = {  # name: (glue config, text fields, labels (1 = regression), dev split
 class GTSClassifier(torch.nn.Module):
     def __init__(self, path, n_labels, loops=None):
         super().__init__()
-        blob = torch.load(path, map_location="cpu", weights_only=False)
+        blob = torch.load(path, map_location="cpu", weights_only=False) if isinstance(path, str) else path
         lm = GTSForMaskedLM(GTSConfig(**blob["config"]))
         if "model" in blob:
             lm.load_state_dict(blob["model"])
-        else:
+        elif blob.get("kind") != "gts-glue":  # a saved classifier is loaded whole by load()
             load_binarized(blob, lm)
+        self.config = blob["config"]
         self.backbone, self.loops = lm.backbone, loops
         d = blob["config"]["d_model"]
         self.drop = torch.nn.Dropout(0.1)
         self.head = torch.nn.Linear(2 * d, n_labels)
+
+    @classmethod
+    def load(cls, path):
+        """A fine-tuned classifier saved by --save-dir (binarized: ternary codes plus float head)."""
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+        model = cls(blob, blob["n_labels"], blob["loops"])
+        return load_binarized(blob, model)
 
     def forward(self, ids, mask):
         h = self.backbone(ids, attention_mask=mask, loops=self.loops)
@@ -176,6 +184,13 @@ def run_task(a, task, device):
         history.append(m)
         if best is None or headline(task, m) > headline(task, best):
             best = m
+            if a.save_dir and a.gts:  # keep the best epoch's weights
+                os.makedirs(a.save_dir, exist_ok=True)
+                from mamba_ssm.utils.ternary_pack import save_binarized
+
+                save_binarized(model, model.config, os.path.join(a.save_dir, f"{task}.pt"),
+                               {"kind": "gts-glue", "task": task, "n_labels": n_labels, "loops": a.loops,
+                                "epoch": ep + 1, "dev": m, "max_len": a.max_len})
         print(f"  {task} epoch {ep + 1}: " + "  ".join(f"{k} {v:.4f}" for k, v in m.items()) + f"  ({(time.time() - t0) / 60:.1f} min)", flush=True)
     return {"best": best, "epochs": history, "train_examples": len(xtr), "dev_examples": len(xva), "minutes": (time.time() - t0) / 60}
 
@@ -196,6 +211,8 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-compile", dest="compile", action="store_false")
     p.add_argument("--out", required=True)
+    p.add_argument("--save-dir", help="GTS: save each task's best-epoch classifier here as <task>.pt (binarized, "
+                   "about 120 MB; GTSClassifier.load reads it back)")
     a = p.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":

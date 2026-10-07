@@ -12,10 +12,10 @@ cat checkpoints/bert110m/phase3/binarized.pt.part* > /root/ck/gts3.pt
 [ -d checkpoints/bert110m/uni ] && cat checkpoints/bert110m/uni/binarized.pt.part* > /root/ck/uni.pt
 T="sst2 mrpc rte qnli mnli cola stsb"
 COMMON="--tasks $T --epochs 3 --max-train 100000 --batch-size 32 --max-len 128"
-python3 scripts/glue_finetune.py --gts /root/ck/gts3.pt $COMMON --lr 1e-4 --out $O/glue_gts3.json
+python3 scripts/glue_finetune.py --gts /root/ck/gts3.pt $COMMON --lr 1e-4 --out $O/glue_gts3.json --save-dir $O/models/glue_gts3
 if [ -f /root/ck/uni.pt ]; then
-  python3 scripts/glue_finetune.py --gts /root/ck/uni.pt --loops 1 $COMMON --lr 1e-4 --out $O/glue_uni_1pass.json
-  python3 scripts/glue_finetune.py --gts /root/ck/uni.pt --loops 3 $COMMON --lr 1e-4 --out $O/glue_uni_3pass.json
+  python3 scripts/glue_finetune.py --gts /root/ck/uni.pt --loops 1 $COMMON --lr 1e-4 --out $O/glue_uni_1pass.json --save-dir $O/models/glue_uni_1pass
+  python3 scripts/glue_finetune.py --gts /root/ck/uni.pt --loops 3 $COMMON --lr 1e-4 --out $O/glue_uni_3pass.json --save-dir $O/models/glue_uni_3pass
 fi
 for m in google-bert/bert-base-uncased distilbert/distilbert-base-uncased huawei-noah/TinyBERT_General_4L_312D; do
   python3 scripts/glue_finetune.py --hf $m $COMMON --lr 3e-5 --out $O/glue_$(basename $m).json

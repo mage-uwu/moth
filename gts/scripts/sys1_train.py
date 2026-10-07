@@ -42,19 +42,45 @@ from mamba_ssm.models.gts_encoder import GTSBlock, GTSConfig, GTSForMaskedLM, RM
 from mamba_ssm.utils.ternary_pack import load_binarized  # noqa: E402
 
 
+def save_sys1(model, path, a, temps):
+    """GTS: binarized (ternary codes, float heads, about 125 MB); a Hugging Face backbone: the whole state in bf16.
+    Either way with the fitted temperatures, so Sys1.load gives back a calibrated decision model."""
+    extra = {"kind": "gts-sys1" if model.hf is None else "hf-sys1", "hf": model.hf, "loops": model.loops,
+             "head_layers": len(model.layers), "temperatures": temps}
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    if model.hf is None:
+        from mamba_ssm.utils.ternary_pack import save_binarized
+
+        save_binarized(model, model.config, path, extra)
+    else:
+        torch.save({**extra, "state": {k: v.detach().to(torch.bfloat16).cpu() if v.is_floating_point() else v.cpu()
+                                       for k, v in model.state_dict().items()}}, path)
+
+
 class Sys1(torch.nn.Module):
+    @classmethod
+    def load(cls, path):
+        """A decision model saved by --save; returns (model, temperatures)."""
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+        if blob["kind"] == "gts-sys1":
+            model = load_binarized(blob, cls(blob, None, blob["loops"], blob["head_layers"]))
+        else:
+            model = cls(None, blob["hf"], blob["loops"], blob["head_layers"])
+            model.load_state_dict({k: v.float() if v.is_floating_point() else v for k, v in blob["state"].items()})
+        return model, blob["temperatures"]
+
     def __init__(self, gts=None, hf=None, loops=None, head_layers=2, head_deep_depth=6):
         super().__init__()
         self.loops = loops
         if gts:
-            blob = torch.load(gts, map_location="cpu", weights_only=False)
+            blob = torch.load(gts, map_location="cpu", weights_only=False) if isinstance(gts, str) else gts
             cfg = blob["config"]
             lm = GTSForMaskedLM(GTSConfig(**cfg))
             if "model" in blob:
                 lm.load_state_dict(blob["model"])
-            else:
+            elif blob.get("kind") != "gts-sys1":  # a saved Sys1 is loaded whole by Sys1.load
                 load_binarized(blob, lm)
-            self.backbone, self.hf, d = lm.backbone, None, cfg["d_model"]
+            self.backbone, self.hf, d, self.config = lm.backbone, None, cfg["d_model"], cfg
             self.max_loops = cfg.get("loops", 1)
             from bert_pretrain import _tokenizer
 
@@ -322,6 +348,8 @@ def main():
     p.add_argument("--max-test", type=int)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", required=True)
+    p.add_argument("--save", help="save the fitted decision model here (and the general, zero-shot one as "
+                   "<name>_general.pt); Sys1.load reads them back")
     a = p.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(a.seed)
@@ -337,12 +365,16 @@ def main():
         print(f"general typed decisions: {len(gen):,}", flush=True)
         train(model, gen[:-2000], a, device, a.epochs, a.lr)
         res["zero_shot"] = evaluate(model, test, gen[-2000:], a, device)
+        if a.save:
+            save_sys1(model, a.save.replace(".pt", "_general.pt"), a, res["zero_shot"]["temperatures"])
         r = res["zero_shot"]["scores"]["all"]
         print(f"zero-shot: accuracy {r['accuracy']:.3f}  KL {r['kl']:.3f}  Brier {r['brier']:.3f}  ECE {r['ece']:.3f}  "
               f"escalate AUROC {res['zero_shot']['escalate']['auroc']:.3f}", flush=True)
     train(model, bench_train[:cut], a, device, a.fit_epochs, a.lr)
     res["fitted"] = evaluate(model, test, bench_train[cut:], a, device)
     res["minutes"] = (time.time() - t0) / 60
+    if a.save:
+        save_sys1(model, a.save, a, res["fitted"]["temperatures"])
     json.dump(res, open(a.out, "w"), indent=1)
     for n, rr in res["fitted"]["by_depth"].items():
         print(f"fitted at {n}: accuracy {rr['scores']['all']['accuracy']:.3f}  KL {rr['scores']['all']['kl']:.3f}", flush=True)
