@@ -274,43 +274,62 @@ if HAVE_TRITON:
                 acc += dl[:, None] * wv.to(tl.float32)
             tl.store(DX + tok[:, None] * s_dx + (c + cols)[None, :], acc, mask=ok[:, None] & cm[None, :])
 
+
+if HAVE_TRITON:
+
     @triton.jit
-    def _seg_rows(SRC, s_src, NODE, TOK, VAL, DW, DB, n_ent, d,
-                  HAS_DB: tl.constexpr, BE: tl.constexpr, BD: tl.constexpr):
-        """DW[node] += VAL * SRC[tok] over entries sorted by node: the block's first and last node runs are summed
-        in registers (one atomic row each); any node strictly inside the block gets per-entry atomics."""
-        e = tl.program_id(0) * BE + tl.arange(0, BE)
-        ok = e < n_ent
-        cols = tl.program_id(1) * BD + tl.arange(0, BD)
-        cm = cols < d
-        node = tl.load(NODE + e, mask=ok, other=0)
-        tok = tl.load(TOK + e, mask=ok, other=0)
-        val = tl.load(VAL + e, mask=ok, other=0.0)
-        rows = tl.load(SRC + tok[:, None] * s_src + cols[None, :], mask=ok[:, None] & cm[None, :], other=0.0).to(tl.float32)
-        rows = rows * val[:, None]
-        n0 = tl.min(tl.where(ok, node, 2147483647), axis=0)
-        n1 = tl.max(tl.where(ok, node, -1), axis=0)
-        first = ok & (node == n0)
-        last = ok & (node == n1) & (n1 != n0)
-        mid = ok & (node != n0) & (node != n1)
-        tl.atomic_add(DW + n0 * d + cols, tl.sum(tl.where(first[:, None], rows, 0.0), axis=0), mask=cm)
-        tl.atomic_add(DW + n1 * d + cols, tl.sum(tl.where(last[:, None], rows, 0.0), axis=0), mask=cm & (n1 != n0))
-        tl.atomic_add(DW + node[:, None] * d + cols[None, :], rows, mask=mid[:, None] & cm[None, :])
-        if HAS_DB:
-            if tl.program_id(1) == 0:
-                tl.atomic_add(DB + n0, tl.sum(tl.where(first, val, 0.0), axis=0))
-                tl.atomic_add(DB + n1, tl.sum(tl.where(last, val, 0.0), axis=0), mask=n1 != n0)
-                tl.atomic_add(DB + node, val, mask=mid)
+    def _seg_own(SRC, s_src, OFF, TOK, VAL, DW, d, BE: tl.constexpr, BD: tl.constexpr):
+        """DW[r] = sum over r's run of the node-sorted entries of VAL * SRC[tok]: one program per (row, column chunk)
+        owns its output, so no atomics."""
+        r = tl.program_id(0)
+        start = tl.load(OFF + r)
+        end = tl.load(OFF + r + 1)
+        if end > start:
+            cols = tl.program_id(1) * BD + tl.arange(0, BD)
+            cm = cols < d
+            acc = tl.zeros((BD,), dtype=tl.float32)
+            for e0 in range(start, end, BE):
+                e = e0 + tl.arange(0, BE)
+                ok = e < end
+                tok = tl.load(TOK + e, mask=ok, other=0)
+                val = tl.load(VAL + e, mask=ok, other=0.0)
+                v = tl.load(SRC + tok[:, None] * s_src + cols[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+                acc += tl.sum(v.to(tl.float32) * val[:, None], axis=0)
+            tl.store(DW + r * d + cols, acc, mask=cm)
 
 
-def _wgrad(src, nodes_sorted, tok_sorted, val_sorted, rows, d, want_bias, block_e=64, block_d=128):
+WGRAD_TOP = 6  # tree levels whose weight gradients come from one small dense GEMM (shared by many tokens)
+
+
+def _wgrad_levels(src, nodes, vals, rows, n_nodes, top, want_bias, block_e=32, block_d=128):
+    """dW[m] = sum over path entries at node m of vals * src[token], and (want_bias) db[m] = sum of vals.
+    nodes, vals: (tokens, trees, depth + 1). The first ``top`` levels by a dense (tokens x trees * (2^top - 1)) GEMM,
+    the deeper ones by node-sorted runs, each owned by one program."""
+    n_tok, n_trees, n_lv = nodes.shape
+    d = src.shape[1]
+    top = min(top, n_lv)
     dw = torch.zeros(rows, d, device=src.device, dtype=torch.float32)
-    db = torch.zeros(rows, device=src.device, dtype=torch.float32) if want_bias else dw
-    n_ent = nodes_sorted.numel()
-    _seg_rows[(triton.cdiv(n_ent, block_e), triton.cdiv(d, block_d))](
-        src, src.stride(0), nodes_sorted, tok_sorted, val_sorted, dw, db, n_ent, d,
-        HAS_DB=want_bias, BE=block_e, BD=block_d)
-    return dw, (db if want_bias else None)
+    if top:
+        nt = 2 ** top - 1
+        col = (torch.arange(n_trees, device=src.device, dtype=torch.int64)[None, :, None] * nt
+               + (nodes[:, :, :top].long() - torch.arange(n_trees, device=src.device)[None, :, None] * n_nodes))
+        a = torch.zeros(n_tok, n_trees * nt, device=src.device, dtype=src.dtype)
+        a.scatter_(1, col.reshape(n_tok, -1), vals[:, :, :top].reshape(n_tok, -1).to(src.dtype))
+        dw[top_rows(n_trees, n_nodes, top, src.device)] = (a.t() @ src).float()
+    if top < n_lv:
+        nd = nodes[:, :, top:].reshape(-1)
+        vd = vals[:, :, top:].reshape(-1)
+        sorted_nodes, perm = torch.sort(nd)
+        tok = (perm // (n_trees * (n_lv - top))).to(torch.int32)
+        off = torch.zeros(rows + 1, device=src.device, dtype=torch.int32)
+        off[1:] = torch.cumsum(torch.bincount(sorted_nodes.long(), minlength=rows)[:rows], 0)
+        _seg_own[(rows, triton.cdiv(d, block_d))](src, src.stride(0), off, tok, vd[perm].contiguous(), dw, d,
+                                                  BE=block_e, BD=block_d)
+    db = None
+    if want_bias:
+        db = torch.zeros(rows, device=src.device, dtype=torch.float32)
+        db.index_add_(0, nodes.reshape(-1).long(), vals.reshape(-1).float())
+    return dw, db
 
 
 def _path_bwd_impl(dout, x, w_in, w_out, nodes, logits, act, rows, has_bias, kw, want_x, want_w_in, want_w_out):
@@ -326,14 +345,12 @@ def _path_bwd_impl(dout, x, w_in, w_out, nodes, logits, act, rows, has_bias, kw,
     _path_bwd[(triton.cdiv(n_tok, bm),)](dout, wi, wo, nodes, logits, dl, dx, n_tok, d, dout.stride(0), dx.stride(0),
                                          P=P, ACT=code, BM=bm, BD=kw.get("block_d", 128), num_warps=kw.get("num_warps", 2))
     dw_in = db = dw_out = None
-    if want_w_in or want_w_out:
-        sorted_nodes, perm = torch.sort(nodes.reshape(-1))
-        tok = (perm // P).to(torch.int32)
-        if want_w_out:
-            coef = torch.nn.functional.gelu(logits) if code == 0 else logits
-            dw_out, _ = _wgrad(dout, sorted_nodes, tok, coef.reshape(-1)[perm].contiguous(), rows, d, False)
-        if want_w_in:
-            dw_in, db = _wgrad(x, sorted_nodes, tok, dl.reshape(-1)[perm].contiguous(), rows, d, has_bias)
+    n_nodes = kw.get("n_nodes")
+    if want_w_out:
+        coef = torch.nn.functional.gelu(logits) if code == 0 else logits
+        dw_out, _ = _wgrad_levels(dout, nodes, coef, rows, n_nodes, kw.get("wgrad_top", WGRAD_TOP), False)
+    if want_w_in:
+        dw_in, db = _wgrad_levels(x, nodes, dl.view(nodes.shape), rows, n_nodes, kw.get("wgrad_top", WGRAD_TOP), has_bias)
     return dx, dw_in, db, dw_out
 
 
@@ -349,6 +366,7 @@ class SparsePathRoute(torch.autograd.Function):
                                               n_nodes, depth, act, **kw)
         ctx.save_for_backward(x, w_in, w_out, nodes, logits)
         ctx.cfg = (act, bias, kw)
+        ctx.n_nodes = n_nodes
         return out
 
     @staticmethod
@@ -356,7 +374,7 @@ class SparsePathRoute(torch.autograd.Function):
         x, w_in, w_out, nodes, logits = ctx.saved_tensors
         act, bias, kw = ctx.cfg
         dx, dw_in, db, dw_out = _path_bwd_impl(dout, x, w_in, w_out, nodes, logits, act, w_in.shape[0], bias is not None,
-                                               kw, True, ctx.needs_input_grad[1] or ctx.needs_input_grad[2],
+                                               dict(kw, n_nodes=ctx.n_nodes), True, ctx.needs_input_grad[1] or ctx.needs_input_grad[2],
                                                ctx.needs_input_grad[3])
         return (dx.to(x.dtype), dw_in.to(w_in.dtype) if dw_in is not None else None,
                 db.to(bias.dtype) if db is not None else None, dw_out.to(w_out.dtype) if dw_out is not None else None,
@@ -385,9 +403,9 @@ def _(x, w_in, bias, w_out, n_trees, n_nodes, depth, act, block_m, block_d, num_
 
 @torch.library.custom_op("gts_sparse::path_bwd", mutates_args=())
 def _path_bwd_op(dout: torch.Tensor, x: torch.Tensor, w_in: torch.Tensor, w_out: torch.Tensor, nodes: torch.Tensor,
-                 logits: torch.Tensor, has_bias: bool, act: int, block_m: int, block_d: int, num_warps: int
+                 logits: torch.Tensor, has_bias: bool, act: int, n_nodes: int, block_m: int, block_d: int, num_warps: int
                  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    kw = dict(block_m=block_m, block_d=block_d, num_warps=num_warps)
+    kw = dict(block_m=block_m, block_d=block_d, num_warps=num_warps, n_nodes=n_nodes)
     dx, dw_in, db, dw_out = _path_bwd_impl(dout, x, w_in, w_out, nodes, logits, act, w_in.shape[0], has_bias, kw,
                                            True, True, True)
     db = db if db is not None else dx.new_zeros(0)
@@ -395,7 +413,7 @@ def _path_bwd_op(dout: torch.Tensor, x: torch.Tensor, w_in: torch.Tensor, w_out:
 
 
 @_path_bwd_op.register_fake
-def _(dout, x, w_in, w_out, nodes, logits, has_bias, act, block_m, block_d, num_warps):
+def _(dout, x, w_in, w_out, nodes, logits, has_bias, act, n_nodes, block_m, block_d, num_warps):
     return (torch.empty_like(x), torch.empty_like(w_in),
             x.new_empty((w_in.shape[0],) if has_bias else (0,), dtype=torch.float32), torch.empty_like(w_out))
 
@@ -404,13 +422,13 @@ def _path_setup(ctx, inputs, output):
     x, w_in, bias, w_out, n_trees, n_nodes, depth, act, block_m, block_d, num_warps = inputs
     _, nodes, logits = output
     ctx.save_for_backward(x, w_in, w_out, nodes, logits)
-    ctx.cfg = (bias is not None, bias.dtype if bias is not None else None, act, block_m, block_d, num_warps)
+    ctx.cfg = (bias is not None, bias.dtype if bias is not None else None, act, n_nodes, block_m, block_d, num_warps)
 
 
 def _path_backward(ctx, dout, _dnodes, _dlogits):
     x, w_in, w_out, nodes, logits = ctx.saved_tensors
-    has_bias, b_dt, act, block_m, block_d, num_warps = ctx.cfg
-    dx, dw_in, db, dw_out = _path_bwd_op(dout, x, w_in, w_out, nodes, logits, has_bias, act, block_m, block_d, num_warps)
+    has_bias, b_dt, act, n_nodes, block_m, block_d, num_warps = ctx.cfg
+    dx, dw_in, db, dw_out = _path_bwd_op(dout, x, w_in, w_out, nodes, logits, has_bias, act, n_nodes, block_m, block_d, num_warps)
     return dx, dw_in, (db.to(b_dt) if has_bias else None), dw_out, None, None, None, None, None, None, None
 
 

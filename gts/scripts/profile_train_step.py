@@ -92,7 +92,7 @@ def main():
     n = a.batch * a.seq
     print(f"{torch.cuda.get_device_name(0)}: training step of the 110M masked LM, {a.batch} x {a.seq} tokens", flush=True)
     base = None
-    for variant in ("as trained", "no deep trees", "deep trees, no side-branch (route_ste) gradient", "sparse deep trees, path-only gradient"):
+    for variant in ("as trained", "deep trees, no side-branch (route_ste) gradient", "sparse deep trees, path-only gradient"):
         m = build(blob, variant)
         ms = run(m, a.batch, a.seq, a.steps, prof=variant in ("as trained", "sparse deep trees, path-only gradient"))
         base = base or ms

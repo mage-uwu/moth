@@ -103,12 +103,15 @@ def test_prepare_inference_matches_dense():
     torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-4)
 
 
+@pytest.mark.parametrize("wtop", [0, 2, 6])
 @pytest.mark.parametrize("n_tok,d,n_trees,depth,bias", [(70, 96, 2, 3, True), (33, 64, 3, 5, False), (130, 32, 1, 2, True)])
-def test_path_gradients_match_dense(n_tok, d, n_trees, depth, bias):
+def test_path_gradients_match_dense(n_tok, d, n_trees, depth, bias, wtop, monkeypatch):
     """sparse_path_route: values and every gradient against an autograd reference with the hard walk and no
     gradient through the branches (route_ste=False), in float64."""
+    import mamba_ssm.ops.gts_sparse as ops
     from mamba_ssm.ops.gts_sparse import sparse_path_route
 
+    monkeypatch.setattr(ops, "WGRAD_TOP", wtop)
     torch.manual_seed(0)
     n_nodes = 2 ** (depth + 1) - 1
     rows = n_trees * n_nodes
