@@ -520,3 +520,16 @@ pass at the one-pass model's speed, more for quality, chosen per query.
 - Warm start: `--init-from` a one-pass checkpoint, with `--new-param-lr` for the pass embeddings, gates (and latents).
   A first masked-LM try with one learning rate of 3e-4 for everything, from a fresh optimizer, knocked GTS3 off its
   minimum (validation 2.615 -> 2.78); the run in progress uses 3e-5 for the shared weights and 1e-3 for the new ones.
+
+## GTS-Uni-Sys1: System One decisions with Laya's technique
+
+`scripts/sys1_train.py` turns a GTS or GTS-Uni encoder into a typed-decision model following Laya's model cards: every
+option scored at its own `[MASK]`, softmax over the question's options; a decision head trained from scratch (2 GTS
+blocks here, keeping the model attention-free, where Laya uses 2 transformer layers; an option-marker scorer; an
+act/escalate head predicting whether the top answer is right); RLCD (zero-mean Gaussian noise on the logits, reward
+log + spherical scores plus the ranked probability score for ordinal questions, REINFORCE with a group-mean baseline)
+alongside soft cross-entropy on the teacher's distributions; one temperature per (question type, option count), fitted
+on held-out decisions. RLCD alone drives a reported distribution to the gold one (tested: [0.655, 0.209, 0.095, 0.04]
+for gold [0.6, 0.25, 0.1, 0.05]). Benchmark: LocalLLaMA typed-decisions (zero-shot after 500K general decisions from
+tasksource-jev-typed-decisions, then fitted on its train); `scripts/decide_probe.py` holds the data, metrics (KL and
+Brier reproduce the README's Uniform row) and a cross-entropy-only ablation. `pod/decide_job.sh` runs it.
