@@ -117,6 +117,7 @@ class Teacher:
             p.requires_grad_(False)
         self.rec, self.want = {}, set()
         for i, layer in enumerate(self.m.model.layers):
+            layer.register_forward_hook(lambda mod, args, out, i=i: self._hid(i, out))
             layer.attn.register_forward_hook(lambda mod, args, kw, out, i=i: self._attn(i, args, kw, out), with_kwargs=True)
             layer.mlp.register_forward_hook(lambda mod, args, out, i=i: self._mlp(i, args, out))
 
@@ -126,6 +127,10 @@ class Teacher:
             self.rec[("a_out", i)] = out[0]
         if "probs" in self.want:
             self.rec[("probs", i)] = out[1]
+
+    def _hid(self, i, out):
+        if "hid" in self.want:
+            self.rec[("hid", i)] = out[0] if isinstance(out, tuple) else out
 
     def _mlp(self, i, args, out):
         if "mlp" in self.want:
@@ -175,62 +180,96 @@ def evaluate(student, teacher, val, a, device):
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
             sl = student(inp, sel).float()
         y = lab[sel]
-        n = y.numel()
         tot["s_ce"] += F.cross_entropy(sl, y, reduction="sum").item()
         tot["t_ce"] += F.cross_entropy(tl, y, reduction="sum").item()
         tot["kl"] += F.kl_div(F.log_softmax(sl, -1), F.log_softmax(tl, -1), log_target=True, reduction="sum").item()
         tot["agree"] += (sl.argmax(-1) == tl.argmax(-1)).sum().item()
-        tot["n"] += n
+        tot["n"] += y.numel()
     n = tot.pop("n")
     return {k: v / n for k, v in tot.items()}
 
 
+def quant_at(frac, a):
+    """Stage 3's ternary blend: 0 (full precision) until --quant-start, a linear ramp over --quant-len, then 1."""
+    if a.quant_len <= 0:
+        return 1.0 if frac >= a.quant_start else 0.0
+    return min(1.0, max(0.0, (frac - a.quant_start) / a.quant_len))
+
+
 def train(a):
+    """The three stages with token budgets, resumable: a state file in --out (weights, optimizer, stage, step,
+    tokens, sampler, log) is written every --ckpt-minutes and at every stage end, and a restarted job continues
+    from it (a spot VM being reclaimed costs at most --ckpt-minutes)."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.manual_seed(a.seed)
     tr = np.memmap(os.path.join(a.data, "train.bin"), dtype=np.uint16, mode="r")
     val = np.memmap(os.path.join(a.data, "val.bin"), dtype=np.uint16, mode="r")
     os.makedirs(a.out, exist_ok=True)
+    state_path = os.path.join(a.out, "state.pt")
     teacher = Teacher(device)
     cfg = GTSLConfig(**json.loads(a.config)) if a.config else GTSLConfig()
     student = GTSLForMaskedLM(cfg).to(device)
-    if a.resume:
-        student.load_state_dict(torch.load(a.resume, map_location="cpu", weights_only=False)["model"])
-        print(f"resumed from {a.resume}", flush=True)
+    st = torch.load(state_path, map_location="cpu", weights_only=False) if os.path.exists(state_path) else None
+    if st is not None:
+        student.load_state_dict(st["model"])
+        print(f"resuming: stage {st['stage']}, step {st['step']}, {st['tokens'] / 1e6:.1f}M tokens into it; done {st['done']}", flush=True)
+    elif a.init:
+        student.load_state_dict(torch.load(a.init, map_location="cpu", weights_only=False)["model"])
+        print(f"weights from {a.init}", flush=True)
     else:
         student.init_from_modernbert(teacher.m)
+    deep_mods = [layer.deep for layer in student.layers]
     if a.compile and device == "cuda":
         for layer in student.layers:
             layer.deep = torch.compile(layer.deep, dynamic=False)
     n_params = sum(p.numel() for p in student.parameters())
-    print(f"teacher {TEACHER}; student GTS-L {n_params / 1e6:.1f}M parameters ({cfg}); data {len(tr):,} training tokens", flush=True)
-    log = {"config": config_dict(cfg), "args": vars(a), "stages": {}}
+    print(f"teacher {TEACHER}; student GTS-L {n_params / 1e6:.1f}M parameters ({cfg}); data {len(tr):,} training tokens; "
+          f"budgets {a.stage1_tokens / 1e6:.0f}M / {a.stage2_tokens / 1e6:.0f}M / {a.stage3_tokens / 1e6:.0f}M tokens", flush=True)
+    log = st["log"] if st else {"config": config_dict(cfg), "args": vars(a), "stages": {}}
+    done = st["done"] if st else []
     g = torch.Generator().manual_seed(a.seed)
+    if st:
+        g.set_state(st["gen"])
     amp = dict(device_type="cuda", dtype=torch.bfloat16, enabled=device == "cuda")
-    tok_per_step = a.batch_size * a.seq_len
+    publish = a.publish_cmd
 
-    def report(name, step, t0, n_tok, parts):
+    def save_state(stage, step, n_tok, opt, extra=None):
+        tmp = state_path + ".tmp"
+        torch.save({"model": student.state_dict(), "opt": opt.state_dict() if opt else None, "stage": stage, "step": step,
+                    "tokens": n_tok, "gen": g.get_state(), "done": list(done), "log": log, **(extra or {})}, tmp)
+        os.replace(tmp, state_path)
+        json.dump(log, open(os.path.join(a.out, "log.json"), "w"), indent=1)
+        if publish:
+            os.system(publish)
+
+    def report(name, step, t0, n_tok0, n_tok, budget, parts):
         el = time.time() - t0
-        rate = n_tok / max(el, 1e-9)
+        rate = (n_tok - n_tok0) / max(el, 1e-9)
         usd = a.price_per_hour / (rate * 3600) * 1e9 if rate else float("nan")
-        print(f"  [{name}] step {step:6d}  {n_tok / 1e6:8.1f}M tokens  {rate:9,.0f} tokens/s  ${usd:.2f} per 1B tokens  "
-              + "  ".join(f"{k} {v:.4f}" for k, v in parts.items()) + f"  {el / 60:.1f} min", flush=True)
+        left = (budget - n_tok) / max(rate, 1e-9) / 3600
+        print(f"  [{name}] step {step:6d}  {n_tok / 1e6:8.1f}M / {budget / 1e6:.0f}M tokens  {rate:9,.0f} tokens/s  "
+              f"${usd:.2f} per 1B tokens  " + "  ".join(f"{k} {v:.4f}" for k, v in parts.items())
+              + f"  {el / 60:.1f} min, ~{left:.1f} h left in stage", flush=True)
         return rate, usd
 
-    def run_stage(name, minutes, params, lr, step_fn, bsz):
-        if minutes <= 0:
+    def run_stage(name, budget, params, lr, step_fn, bsz, warm, decay):
+        if budget <= 0 or name in done:
             return
         opt = torch.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=0.1, fused=device == "cuda")
-        t0, step, n_tok, rate, usd = time.time(), 0, 0, 0.0, 0.0
-        budget = minutes * 60
-        curve = []
-        while True:
-            frac = (time.time() - t0) / budget
-            if frac >= 1:
-                break
+        step, n_tok = 0, 0
+        if st is not None and st["stage"] == name:
+            step, n_tok = st["step"], st["tokens"]
+            if st.get("opt") is not None:
+                opt.load_state_dict(st["opt"])
+        print(f"== {name}: {budget / 1e6:.0f}M tokens, from {n_tok / 1e6:.1f}M", flush=True)
+        t0, n_tok0, last_ck = time.time(), n_tok, time.time()
+        curve = log["stages"].setdefault(name, {}).setdefault("curve", [])
+        parts, rate, usd = {}, 0.0, 0.0
+        while n_tok < budget:
+            frac = n_tok / budget
             for gr in opt.param_groups:
-                gr["lr"] = lr * wsd(frac)
+                gr["lr"] = lr * wsd(frac, warm, decay)
             loss, parts = step_fn(frac)
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -239,37 +278,39 @@ def train(a):
             step += 1
             n_tok += bsz * a.seq_len
             if step % a.log_every == 0 or step == 3:
-                rate, usd = report(name, step, t0, n_tok, {k: float(v) for k, v in parts.items()})
-                curve.append({"step": step, "tokens": n_tok, "minutes": (time.time() - t0) / 60, **{k: float(v) for k, v in parts.items()}})
-        rate, usd = report(name, step, t0, n_tok, {k: float(v) for k, v in parts.items()})
-        log["stages"][name] = {"steps": step, "tokens": n_tok, "minutes": (time.time() - t0) / 60, "tokens_per_s": rate,
-                               "usd_per_1B_tokens": usd, "curve": curve}
+                rate, usd = report(name, step, t0, n_tok0, n_tok, budget, parts)
+                curve.append({"step": step, "tokens": n_tok, **{k: float(v) for k, v in parts.items()}})
+            if time.time() - last_ck > a.ckpt_minutes * 60:
+                last_ck = time.time()
+                save_state(name, step, n_tok, opt)
+        rate, usd = report(name, step, t0, n_tok0, n_tok, budget, parts)
+        log["stages"][name].update({"steps": step, "tokens": n_tok, "tokens_per_s": rate, "usd_per_1B_tokens": usd})
+        done.append(name)
         torch.save({"model": student.state_dict(), "config": config_dict(cfg), "stage": name}, os.path.join(a.out, f"{name}.pt"))
-        json.dump(log, open(os.path.join(a.out, "log.json"), "w"), indent=1)
+        save_state(name, step, n_tok, None)
 
     mixers = [p for layer in student.layers for p in layer.mixer.parameters()]
-    trees = [p for layer in student.layers for p in layer.deep.parameters()]
+    trees = [p for m in deep_mods for p in m.parameters()]
 
-    # Stage 1: matrix orientation (teacher attention probabilities need the eager attention path)
+    # Stage 1: matrix orientation (the teacher's attention probabilities need its eager attention path)
     def stage1(frac):
         x = batch(tr, a.s1_batch, a.seq_len, g, device)
         teacher.run(x, want=("attn", "probs"))
-        loss, n = 0.0, 0
+        loss = 0.0
         for i, layer in enumerate(student.layers):
             with torch.autocast(**amp):
                 M = layer.mixer.matrix(teacher.rec[("a_in", i)].detach().float())
             loss = loss + rel(M, teacher.rec[("probs", i)])
-            n += 1
-        return loss / n, {"matrix_rel": (loss / n).item()}
+        loss = loss / len(student.layers)
+        return loss, {"matrix_rel": loss.item()}
 
-    if a.stage1_minutes > 0:
+    if a.stage1_tokens > 0 and "stage1" not in done:
         teacher.set_attn("eager")
-        print("== Stage 1: matrix orientation", flush=True)
-        run_stage("stage1", a.stage1_minutes, mixers, a.lr1, stage1, a.s1_batch)
+        run_stage("stage1", a.stage1_tokens, mixers, a.lr1, stage1, a.s1_batch, 0.1, 0.1)
         teacher.set_attn("sdpa")
         torch.cuda.empty_cache()
 
-    # Stage 2: hidden-state alignment, every sub-block on the teacher's input
+    # Stage 2: hidden-state alignment, every sub-block on the teacher's input (the trees' term weighted --mlp-weight)
     def stage2(frac):
         x = batch(tr, a.batch_size, a.seq_len, g, device)
         teacher.run(x, want=("attn", "mlp"))
@@ -281,17 +322,17 @@ def train(a):
             la = la + rel(ya, teacher.rec[("a_out", i)])
             lm = lm + rel(ym, teacher.rec[("m_out", i)])
         L = len(student.layers)
-        return (la + lm) / L, {"attn_rel": (la / L).item(), "mlp_rel": (lm / L).item()}
+        return (la + a.mlp_weight * lm) / L, {"attn_rel": (la / L).item(), "mlp_rel": (lm / L).item()}
 
-    if a.stage2_minutes > 0:
-        print("== Stage 2: hidden-state alignment", flush=True)
-        run_stage("stage2", a.stage2_minutes, mixers + trees, a.lr2, stage2, a.batch_size)
+    run_stage("stage2", a.stage2_tokens, mixers + trees, a.lr2, stage2, a.batch_size, 0.1, 0.1)
 
-    ev = evaluate(student, teacher, val, a, device)
-    print("  eval before stage 3: " + "  ".join(f"{k} {v:.4f}" for k, v in ev.items()), flush=True)
-    log["eval_after_stage2"] = ev
+    if "eval_after_stage2" not in log:
+        ev = evaluate(student, teacher, val, a, device)
+        print("  eval before stage 3: " + "  ".join(f"{k} {v:.4f}" for k, v in ev.items()), flush=True)
+        log["eval_after_stage2"] = ev
 
-    # Stage 3: end-to-end distillation on masked text, ternary ramped in
+    # Stage 3: end-to-end distillation on masked text, in full precision until --quant-start, then ternary ramped in;
+    # for its first --hidden-frac, a decaying layer-by-layer hidden-state term pulls the chained student back on track
     frozen = {id(p) for p in student.transferred_parameters()}
     for p in student.transferred_parameters():
         p.requires_grad_(False)
@@ -299,33 +340,46 @@ def train(a):
     last_eval = [time.time()]
 
     def stage3(frac):
-        student.set_quant(min(1.0, frac / a.quant_ramp) if a.quant_ramp > 0 else 1.0)
+        lam = quant_at(frac, a)
+        student.set_quant(lam)
         x = batch(tr, a.batch_size, a.seq_len, g, device)
         inp, lab = mask_tokens(x, a.mask_prob, g)
         sel = lab != -100
-        tl = teacher.run(inp, sel=sel).float()
+        hw = a.hidden_weight * max(0.0, 1.0 - frac / a.hidden_frac) if a.hidden_frac > 0 else 0.0
+        tl = teacher.run(inp, sel=sel, want=("hid",) if hw > 0 else ()).float()
         with torch.autocast(**amp):
-            sl = student(inp, sel).float()
+            if hw > 0:
+                hs, hfin = student.hidden(inp, all_layers=True)
+                sl = student.logits_at(hfin[sel]).float()
+            else:
+                sl = student(inp, sel).float()
         kl = F.kl_div(F.log_softmax(sl, -1), F.log_softmax(tl, -1), log_target=True, reduction="batchmean")
         ce = F.cross_entropy(sl, lab[sel])
+        loss = kl + a.ce_weight * ce
+        parts = {"kl": kl.item(), "ce": ce.item(), "quant": lam}
+        if hw > 0:
+            hl = sum(rel(hs[i], teacher.rec[("hid", i)]) for i in range(len(student.layers))) / len(student.layers)
+            loss = loss + hw * hl
+            parts["hid_rel"] = hl.item()
         if time.time() - last_eval[0] > a.eval_minutes * 60:
             last_eval[0] = time.time()
             student.eval()
             e = evaluate(student, teacher, val, a, device)
             student.train()
-            print(f"  eval (quant {min(1.0, frac / a.quant_ramp):.2f}): " + "  ".join(f"{k} {v:.4f}" for k, v in e.items()), flush=True)
-            log.setdefault("evals", []).append({"frac": frac, **e})
-        return kl + a.ce_weight * ce, {"kl": kl.item(), "ce": ce.item()}
+            print(f"  eval (quant {lam:.2f}): " + "  ".join(f"{k} {v:.4f}" for k, v in e.items()), flush=True)
+            log.setdefault("evals", []).append({"frac": frac, "quant": lam, **e})
+        return loss, parts
 
-    if a.stage3_minutes > 0:
-        print("== Stage 3: end-to-end distillation", flush=True)
-        run_stage("stage3", a.stage3_minutes, body, a.lr3, stage3, a.batch_size)
+    run_stage("stage3", a.stage3_tokens, body, a.lr3, stage3, a.batch_size, a.warm3, a.decay3)
     student.set_quant(1.0)
     student.eval()
     ev = evaluate(student, teacher, val, a, device)
     print("  final eval (ternary): " + "  ".join(f"{k} {v:.4f}" for k, v in ev.items()), flush=True)
     log["final_eval"] = ev
+    torch.save({"model": student.state_dict(), "config": config_dict(cfg), "stage": "final"}, os.path.join(a.out, "final.pt"))
     json.dump(log, open(os.path.join(a.out, "log.json"), "w"), indent=1)
+    if publish:
+        os.system(publish)
 
 
 def main():
@@ -340,22 +394,30 @@ def main():
     t.add_argument("--data", required=True)
     t.add_argument("--out", required=True)
     t.add_argument("--config", help="GTSLConfig overrides as JSON (tests use a tiny model)")
-    t.add_argument("--resume", help="a stage checkpoint to start from instead of the teacher's weights")
-    t.add_argument("--stage1-minutes", type=float, default=15)
-    t.add_argument("--stage2-minutes", type=float, default=35)
-    t.add_argument("--stage3-minutes", type=float, default=110)
+    t.add_argument("--init", help="a stage checkpoint (.pt with 'model') to start from instead of the teacher's weights")
+    t.add_argument("--stage1-tokens", type=float, default=80e6)
+    t.add_argument("--stage2-tokens", type=float, default=300e6)
+    t.add_argument("--stage3-tokens", type=float, default=2.62e9)
     t.add_argument("--lr1", type=float, default=5e-4)
     t.add_argument("--lr2", type=float, default=2e-3)
     t.add_argument("--lr3", type=float, default=3e-4)
+    t.add_argument("--warm3", type=float, default=0.05, help="Stage 3 warmup fraction")
+    t.add_argument("--decay3", type=float, default=0.07, help="Stage 3 final decay fraction (the ternary hold)")
+    t.add_argument("--mlp-weight", type=float, default=2.0, help="Stage 2: weight of the trees' alignment term")
+    t.add_argument("--quant-start", type=float, default=0.86, help="Stage 3 fraction where the ternary ramp starts")
+    t.add_argument("--quant-len", type=float, default=0.07, help="Stage 3 fraction the ramp takes (then held at 1)")
+    t.add_argument("--hidden-weight", type=float, default=1.0, help="Stage 3: initial weight of the layer-by-layer term")
+    t.add_argument("--hidden-frac", type=float, default=0.05, help="Stage 3 fraction over which that term decays to 0")
     t.add_argument("--batch-size", type=int, default=32)
     t.add_argument("--s1-batch", type=int, default=8, help="Stage 1 batch (it holds every layer's attention matrices)")
     t.add_argument("--seq-len", type=int, default=512)
     t.add_argument("--mask-prob", type=float, default=0.3)
     t.add_argument("--ce-weight", type=float, default=0.1)
-    t.add_argument("--quant-ramp", type=float, default=0.4, help="fraction of Stage 3 over which ternary ramps 0 -> 1")
-    t.add_argument("--eval-minutes", type=float, default=20)
+    t.add_argument("--eval-minutes", type=float, default=30)
     t.add_argument("--eval-batches", type=int, default=10)
-    t.add_argument("--log-every", type=int, default=50)
+    t.add_argument("--log-every", type=int, default=100)
+    t.add_argument("--ckpt-minutes", type=float, default=30)
+    t.add_argument("--publish-cmd", help="shell command run after every checkpoint (e.g. copy log.json somewhere readable)")
     t.add_argument("--price-per-hour", type=float, default=1.59)
     t.add_argument("--no-compile", dest="compile", action="store_false")
     t.add_argument("--seed", type=int, default=0)

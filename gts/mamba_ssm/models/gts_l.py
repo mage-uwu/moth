@@ -161,10 +161,15 @@ class GTSLForMaskedLM(nn.Module):
             elif isinstance(m, GTS):
                 m.quant_lambda = lam
 
-    def hidden(self, input_ids):
+    def hidden(self, input_ids, all_layers=False):
+        """Final hidden states; with ``all_layers``, (every layer's raw output, the final-normed last one)."""
         h = self.emb_norm(self.tok_embeddings(input_ids))
+        hs = []
         for layer in self.layers:
             h = layer(h)
+            hs.append(h)
+        if all_layers:
+            return hs, self.final_norm(h)
         return self.final_norm(h)
 
     def logits_at(self, h):
