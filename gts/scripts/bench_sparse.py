@@ -118,48 +118,85 @@ def main():
     import mamba_ssm.modules.gts_sparse as gs
     gs.KERNEL_ARGS = kw
 
-    # where dense inference spends its time
-    def enc_d():
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            return model.backbone(ids)
+    # 2-bit node tables
+    from mamba_ssm.modules.ternary import pack_ternary
+    from mamba_ssm.ops.gts_sparse import pack_rows, sparse_route_fwd_packed
 
-    from torch.profiler import ProfilerActivity, profile
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:
-        enc_d()
-        torch.cuda.synchronize()
-    print("\ndense encoder inference, GPU time by operation (top 15):")
-    print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=15, max_name_column_width=60))
+    G = deep.node_in.shape[-1] // pack_ternary(deep.node_in[:1].detach(), deep.ternary_group)[1].shape[-1]
+    ci, si = pack_ternary(deep.node_in.detach(), deep.ternary_group)
+    co, so = pack_ternary(deep.node_out.detach(), deep.ternary_group)
+    pin, pout = pack_rows(ci, si), pack_rows(co, so)
+    bestp = None
+    for bm in (4, 8, 16, 32):
+        for bd in (32, 64, 128):
+            for nw in (1, 2, 4):
+                if G % bd:
+                    continue
+                kwp = dict(block_m=bm, block_d=bd, num_warps=nw)
+                f = lambda kwp=kwp: sparse_route_fwd_packed(x, pin, pout, bias, deep.n_trees, deep.n_nodes, deep.depth, G, deep.act, **kwp)  # noqa: E731
+                try:
+                    out, nodes, _ = f()
+                    t = timed(f)
+                except Exception as e:
+                    print(f"  packed {kwp}: failed ({type(e).__name__}: {str(e)[:80]})")
+                    continue
+                agree = (nodes.long() == ref_nodes.long()).all(-1).float().mean().item()
+                print(f"  packed BM {bm:2d} BD {bd:3d} warps {nw}: {t:.3f} ms ({t_dense / t:.2f}x)  paths equal {agree:.4f}", flush=True)
+                if bestp is None or t < bestp[0]:
+                    bestp = (t, kwp)
+    tp, kwp = bestp
+    _, nodes, logits = sparse_route_fwd_packed(x, pin, pout, bias, deep.n_trees, deep.n_nodes, deep.depth, G, deep.act, **kwp)
+    t1 = timed(lambda: sparse_route_fwd_packed(x, pin, pout, bias, deep.n_trees, deep.n_nodes, deep.depth, G, deep.act, phases=1, **kwp))
+    t2 = timed(lambda: sparse_route_fwd_packed(x, pin, pout, bias, deep.n_trees, deep.n_nodes, deep.depth, G, deep.act, phases=2,
+                                               buffers=(nodes, logits), **kwp))
+    print(f"best packed: {tp:.3f} ms = {t_dense / tp:.2f}x the dense layer ({kwp}); walk {t1:.3f} ms, output {t2:.3f} ms", flush=True)
+    gs.PACKED_ARGS = kwp
 
-    # the whole encoder, inference
-    def enc():
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            return model.backbone(ids)
+    # the whole encoder, inference, five ways
+    from mamba_ssm.modules.gts_sparse import prepare_inference
 
-    ref_h = enc().float()
-    t_d = timed(enc, 10)
-    sparsify(model)
-    out_h = enc().float()
-    t_s = timed(enc, 10)
-    rel = ((out_h - ref_h).norm() / ref_h.norm()).item()
-    n = ids.numel()
-    # same masked-LM loss? (hard routing turns last-bit differences into different paths, so states are compared by loss)
+    def build(sparse, freeze, comp):
+        m = GTSForMaskedLM(GTSConfig(**cfg))
+        load_binarized(blob, m, allow_missing=[n for n, _ in m.named_parameters() if "loop" in n or "latent" in n])
+        m = m.cuda().eval()
+        if freeze:
+            prepare_inference(m, torch.bfloat16, sparse=sparse)
+        elif sparse:
+            sparsify(m)
+        if comp:
+            for i in range(len(m.backbone.layers)):
+                m.backbone.layers[i] = torch.compile(m.backbone.layers[i], dynamic=False)
+        return m
+
     g = torch.Generator(device="cpu").manual_seed(0)
     sel = (torch.rand(ids.shape, generator=g) < 0.15).cuda()
     inp, lab = ids.masked_fill(sel, 103), ids.masked_fill(~sel, -100)
+    n = ids.numel()
+    print(f"\nencoder inference, {n} tokens (bf16 autocast; masked-LM loss / accuracy on the same masked batch):")
+    base = None
+    for name, sp, fr, cp in [("dense, as trained", False, False, False), ("dense, weights quantised once", False, True, False),
+                             ("dense, quantised once, compiled", False, True, True), ("sparse 2-bit, quantised once", True, True, False),
+                             ("sparse 2-bit, quantised once, compiled", True, True, True)]:
+        try:
+            m = build(sp, fr, cp)
 
-    def mlm():
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            o = model(inp, labels=lab, labelled_only=True)
-        return o.loss.item(), (o.logits.argmax(-1) == lab[lab != -100]).float().mean().item()
+            def enc(m=m):
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    return m.backbone(ids)
 
-    sparsify(model, enable=False)
-    ld = mlm()
-    sparsify(model)
-    ls = mlm()
-    print(f"masked-LM loss / accuracy on this batch: dense {ld[0]:.4f} / {ld[1]:.4f}, sparse {ls[0]:.4f} / {ls[1]:.4f}")
-    print(f"\nencoder inference, {n} tokens: dense {t_d:.1f} ms ({n / t_d * 1e3:,.0f} tokens/s), sparse {t_s:.1f} ms "
-          f"({n / t_s * 1e3:,.0f} tokens/s) = {t_d / t_s:.2f}x; relative difference of the final states {rel:.2e}", flush=True)
-    sparsify(model, enable=False)
+            t = timed(enc, 10)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                o = m(inp, labels=lab, labelled_only=True)
+            acc = (o.logits.argmax(-1) == lab[lab != -100]).float().mean().item()
+            base = base or t
+            print(f"  {name:40s} {t:7.1f} ms  {n / t * 1e3:>10,.0f} tokens/s  {base / t:5.2f}x   loss {o.loss.item():.4f}  acc {acc:.4f}", flush=True)
+            del m
+            torch.cuda.empty_cache()
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            print(f"  {name}: failed ({type(e).__name__}: {str(e)[:120]})", flush=True)
 
 
 if __name__ == "__main__":

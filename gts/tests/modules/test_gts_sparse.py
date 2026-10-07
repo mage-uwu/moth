@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from mamba_ssm.modules.gts import GTS, GTSMixed
-from mamba_ssm.ops.gts_sparse import HAVE_TRITON, sparse_route_fwd
+from mamba_ssm.ops.gts_sparse import HAVE_TRITON, pack_rows, sparse_route_fwd, sparse_route_fwd_packed
 
 DEVICE = "cuda" if torch.cuda.is_available() else ("cpu" if os.environ.get("TRITON_INTERPRET") == "1" else None)
 pytestmark = pytest.mark.skipif(not HAVE_TRITON or DEVICE is None, reason="needs CUDA, or TRITON_INTERPRET=1 on CPU")
@@ -48,6 +48,25 @@ def test_kernel_matches_dense(n_tok, d, n_trees, depth, bias, pad, xres):
     torch.testing.assert_close(out.double(), ref, rtol=1e-4, atol=1e-4)
 
 
+@pytest.mark.parametrize("n_tok,d,n_trees,depth,group,bias", [(70, 128, 2, 3, 64, True), (33, 256, 4, 5, 128, False)])
+def test_packed_kernel_matches_dense(n_tok, d, n_trees, depth, group, bias):
+    """2-bit tables: the same paths and output as the dense reference on the dequantised weights."""
+    torch.manual_seed(0)
+    n_nodes = 2 ** (depth + 1) - 1
+    rows = n_trees * n_nodes
+    codes_in, codes_out = torch.randint(-1, 2, (rows, d), device=DEVICE), torch.randint(-1, 2, (rows, d), device=DEVICE)
+    s_in, s_out = torch.rand(rows, d // group, device=DEVICE) * 0.1, torch.rand(rows, d // group, device=DEVICE)
+    pin, pout = pack_rows(codes_in, s_in, torch.float32), pack_rows(codes_out, s_out, torch.float32)
+    w_in = codes_in.float() * s_in.repeat_interleave(group, 1)
+    w_out = codes_out.float() * s_out.repeat_interleave(group, 1)
+    x = torch.randn(n_tok, d, device=DEVICE)
+    b = torch.randn(rows, device=DEVICE) * 0.1 if bias else None
+    out, nodes, _ = sparse_route_fwd_packed(x, pin, pout, b, n_trees, n_nodes, depth, group, block_m=16, block_d=32)
+    ref, ref_nodes = _dense(x, w_in, b, w_out, n_trees, n_nodes, depth)
+    assert torch.equal(nodes.long(), ref_nodes)
+    torch.testing.assert_close(out.double(), ref, rtol=1e-4, atol=1e-4)
+
+
 def test_module_matches_dense_path():
     """A GTSMixed layer: deep trees switched to GTSSparse give the dense module's output under no_grad."""
     from mamba_ssm.modules.gts_sparse import sparsify
@@ -64,4 +83,21 @@ def test_module_matches_dense_path():
         if DEVICE == "cpu":  # the module only takes the sparse path on CUDA; call it directly here
             layer.deep._sparse_ok = lambda x, r: True
         out = layer.deep(u, attention_mask=mask)
+    torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-4)
+
+
+def test_prepare_inference_matches_dense():
+    """prepare_inference (frozen quantisation, 2-bit tables) gives the dense module's output in float32."""
+    from mamba_ssm.modules.gts_sparse import prepare_inference
+
+    torch.manual_seed(0)
+    layer = GTSMixed(128, bank_trees=4, bank_heads=2, bank_state=4, deep_trees=2, deep_depth=4, route_ste=True,
+                     ternary=True, act_bits=8).to(DEVICE).eval()
+    u = torch.randn(2, 40, 128, device=DEVICE)
+    with torch.no_grad():
+        ref = layer(u)
+        prepare_inference(layer, dtype=torch.float32)
+        if DEVICE == "cpu":
+            layer.deep._sparse_ok = lambda x, r: True
+        out = layer(u)
     torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-4)
