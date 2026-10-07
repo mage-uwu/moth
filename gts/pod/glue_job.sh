@@ -20,4 +20,4 @@ fi
 for m in google-bert/bert-base-uncased distilbert/distilbert-base-uncased huawei-noah/TinyBERT_General_4L_312D; do
   python3 scripts/glue_finetune.py --hf $m $COMMON --lr 3e-5 --out $O/glue_$(basename $m).json
 done
-echo "=== ALL DONE $(date -u +%T) ==="
+echo "=== GLUE DONE $(date -u +%T) ==="
