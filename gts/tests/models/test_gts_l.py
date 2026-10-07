@@ -39,6 +39,32 @@ def test_gpu_scan_equals_matrix():
     torch.testing.assert_close(y, ref, rtol=2e-3, atol=2e-3)
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_padding_mask_hides_padding(device):
+    """A padded batch with ``mask``: every real token's hidden state equals the unpadded sequence's (padding at the end
+    of one row and in the middle of another, which the reversed scan would otherwise carry into earlier tokens)."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    torch.manual_seed(0)
+    c = GTSLConfig(vocab_size=64, d_model=64, n_heads=2, d_state=8, n_layer=2, deep_trees=2, deep_depth=3, ternary_group=32,
+                   pad_token_id=3, chunk_size=16)
+    m = GTSLForMaskedLM(c).to(device).eval()
+    with torch.no_grad():
+        for blk in m.layers:  # dt larger than at init, so a leak through the padding would show
+            blk.mixer.dt_proj.bias.fill_(0.5)
+        ids = torch.randint(4, 64, (2, 40), device=device)
+        mask = torch.ones(2, 40, device=device)
+        mask[0, 29:] = 0
+        mask[1, 10:17] = 0
+        padded = torch.where(mask.bool(), ids, torch.full_like(ids, 3))
+        h = m.hidden(padded, mask=mask)
+        for r in range(2):
+            keep = mask[r].bool()
+            ref = m.hidden(ids[r : r + 1, keep])[0]
+            torch.testing.assert_close(h[r, keep], ref, rtol=1e-4, atol=1e-4)
+        assert not torch.allclose(m.hidden(padded)[0, :29], h[0, :29], atol=1e-3)  # without the mask, padding leaks
+
+
 def test_init_from_modernbert():
     from transformers import ModernBertConfig, ModernBertForMaskedLM
 

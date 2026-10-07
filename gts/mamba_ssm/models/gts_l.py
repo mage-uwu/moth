@@ -74,7 +74,7 @@ class BiSSD(nn.Module):
             self.dt_proj.weight.mul_(0.01)
             self.dt_proj.bias.fill_(math.log(math.expm1(0.05)))
 
-    def _parts(self, u):
+    def _parts(self, u, mask=None):
         b, L, _ = u.shape
         z = self.in_proj(u)
         HN = self.H * self.N
@@ -82,6 +82,8 @@ class BiSSD(nn.Module):
         B = z[..., HN:2 * HN].view(b, L, self.H, self.N)
         x = z[..., 2 * HN:].view(b, L, self.H, self.P)
         dt = F.softplus(self.dt_proj(u).float())  # (b, L, H)
+        if mask is not None:  # dt = 0 at padding: no input and no decay there, so real tokens never see it
+            dt = dt * mask[..., None].to(dt.dtype)
         A = -torch.exp(self.A_log.float())  # (H,)
         return x, B, C, dt, A
 
@@ -106,9 +108,9 @@ class BiSSD(nn.Module):
         x, B, C, dt, A = self._parts(u)
         return self.mixing_matrix(B, C, dt, A)
 
-    def forward(self, u):
+    def forward(self, u, mask=None):
         b, L, d = u.shape
-        x, B, C, dt, A = self._parts(u)
+        x, B, C, dt, A = self._parts(u, mask)
         if u.is_cuda:
             from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 
@@ -134,9 +136,12 @@ class GTSLBlock(nn.Module):
         self.deep = GTS(d, depth=cfg.deep_depth, n_trees=cfg.deep_trees, use_context=False, d_conv=0, route_ste=True, dense_walk=True,
                         ternary=True, ternary_group=cfg.ternary_group, act_bits=cfg.act_bits, layer_idx=idx)
 
-    def forward(self, h):
-        h = h + self.mixer(self.norm1(h))
-        return h + self.deep(self.norm2(h))
+    def forward(self, h, mask=None):
+        if mask is None:
+            h = h + self.mixer(self.norm1(h))
+            return h + self.deep(self.norm2(h))
+        h = h + self.mixer(self.norm1(h), mask)
+        return h + self.deep(self.norm2(h), attention_mask=mask)
 
 
 class GTSLForMaskedLM(nn.Module):
@@ -161,12 +166,13 @@ class GTSLForMaskedLM(nn.Module):
             elif isinstance(m, GTS):
                 m.quant_lambda = lam
 
-    def hidden(self, input_ids, all_layers=False):
-        """Final hidden states; with ``all_layers``, (every layer's raw output, the final-normed last one)."""
+    def hidden(self, input_ids, all_layers=False, mask=None):
+        """Final hidden states; with ``all_layers``, (every layer's raw output, the final-normed last one). ``mask``
+        (batch, length; 1 = real token) makes padding invisible to the real tokens, for padded batches."""
         h = self.emb_norm(self.tok_embeddings(input_ids))
         hs = []
         for layer in self.layers:
-            h = layer(h)
+            h = layer(h) if mask is None else layer(h, mask)
             hs.append(h)
         if all_layers:
             return hs, self.final_norm(h)

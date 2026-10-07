@@ -10,14 +10,16 @@
            output; relative squared L2; mixers and trees train.
   Stage 3, end-to-end knowledge distillation: the whole student on masked text (30% masking, as ModernBERT), loss
            KL(teacher || student) on the masked positions plus 0.1 x cross-entropy with the true tokens; the
-           transferred embeddings and head stay frozen; the ternary quantisation ramps from 0 to 1 over the first
-           40% of the stage.
-Optimizer as MOHAWK: AdamW (0.9, 0.95), weight decay 0.1, clipping 1.0, warmup-stable-decay (10% / 10%); learning
-rates 5e-4 / 2e-3 / 3e-4 here (MOHAWK: 5e-4 / 2e-3 / 2e-4..5e-4). Each stage runs for a wall-clock budget; the log
-reports tokens/s and the cost per billion tokens at --price-per-hour.
+           transferred embeddings and head stay frozen; a decaying layer-by-layer hidden-state term for the first
+           --hidden-frac; full precision until --quant-start, then the ternary quantisation ramps in and is held.
+Optimizer as MOHAWK: AdamW (0.9, 0.95), weight decay 0.1, clipping 1.0, warmup-stable-decay; learning rates
+5e-4 / 2e-3 / 3e-4 here (MOHAWK: 5e-4 / 2e-3 / 2e-4..5e-4). Each stage runs for a token budget; the log reports tokens/s
+and the cost per billion tokens at --price-per-hour. Downstream check (scripts/downstream_check.py: short SST-2, MNLI
+and STS-B fine-tunes of a copy of the student) at the middle of Stage 3 and at the end, and once on the teacher for
+reference; ~5 minutes each on an A100, not counted in tokens/s.
 
     python scripts/mohawk_distill.py prep --out /root/fwe
-    python scripts/mohawk_distill.py train --data /root/fwe --out /root/run --stage1-minutes 15 --stage2-minutes 35 --stage3-minutes 110
+    python scripts/mohawk_distill.py train --data /root/fwe --out /root/run
 """
 import argparse
 import json
@@ -255,8 +257,32 @@ def train(a):
         if publish:
             os.system(publish)
 
+    paused = [0.0]  # seconds of the current stage spent in downstream checks, left out of its tokens/s
+
+    def downstream(point):
+        """The downstream check on a copy of the student (and the teacher once), into log["downstream"][point]."""
+        ds = log.setdefault("downstream", {})
+        if not a.downstream or point in ds:
+            return
+        t = time.time()
+        try:
+            from downstream_check import student_check, summary, teacher_check
+
+            with torch.random.fork_rng(devices=[torch.cuda.current_device()] if device == "cuda" else []):
+                if a.downstream_teacher and "teacher" not in ds:
+                    ds["teacher"] = teacher_check(TEACHER, device, a.downstream_teacher_lr)
+                    print(f"  downstream, teacher: {summary(ds['teacher'])}", flush=True)
+                ds[point] = student_check(student, device, a.downstream_lr)
+                print(f"  downstream, student {point} (quant {ds[point]['quant']:.2f}): {summary(ds[point])}", flush=True)
+        except Exception as e:  # a failed check (no network, say) must not stop the run
+            print(f"  downstream check {point} failed: {e!r}", flush=True)
+            ds[point] = {"error": repr(e)}
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        paused[0] += time.time() - t
+
     def report(name, step, t0, n_tok0, n_tok, budget, parts):
-        el = time.time() - t0
+        el = time.time() - t0 - paused[0]
         rate = (n_tok - n_tok0) / max(el, 1e-9)
         usd = a.price_per_hour / (rate * 3600) * 1e9 if rate else float("nan")
         left = (budget - n_tok) / max(rate, 1e-9) / 3600
@@ -276,6 +302,7 @@ def train(a):
                 opt.load_state_dict(st["opt"])
         print(f"== {name}: {budget / 1e6:.0f}M tokens, from {n_tok / 1e6:.1f}M", flush=True)
         t0, n_tok0, last_ck = time.time(), n_tok, time.time()
+        paused[0] = 0.0
         curve = log["stages"].setdefault(name, {}).setdefault("curve", [])
         parts, rate, usd = {}, 0.0, 0.0
         while n_tok < budget:
@@ -352,6 +379,8 @@ def train(a):
     last_eval = [time.time()]
 
     def stage3(frac):
+        if frac >= 0.5 and "mid" not in log.get("downstream", {}):
+            downstream("mid")
         lam = quant_at(frac, a)
         student.set_quant(lam)
         x = batch(tr, a.batch_size, a.seq_len, g, device)
@@ -388,6 +417,7 @@ def train(a):
     ev = evaluate(student, teacher, val, a, device)
     print("  final eval (ternary): " + "  ".join(f"{k} {v:.4f}" for k, v in ev.items()), flush=True)
     log["final_eval"] = ev
+    downstream("final")
     torch.save({"model": student.state_dict(), "config": config_dict(cfg), "stage": "final"}, os.path.join(a.out, "final.pt"))
     json.dump(log, open(os.path.join(a.out, "log.json"), "w"), indent=1)
     if publish:
@@ -431,6 +461,11 @@ def main():
     t.add_argument("--ckpt-minutes", type=float, default=30)
     t.add_argument("--publish-cmd", help="shell command run after every checkpoint (e.g. copy log.json somewhere readable)")
     t.add_argument("--price-per-hour", type=float, default=1.59)
+    t.add_argument("--no-downstream", dest="downstream", action="store_false", help="skip the downstream checks")
+    t.add_argument("--no-downstream-teacher", dest="downstream_teacher", action="store_false",
+                   help="skip the teacher's reference check")
+    t.add_argument("--downstream-lr", type=float, default=5e-5)
+    t.add_argument("--downstream-teacher-lr", type=float, default=2e-5)
     t.add_argument("--no-compile", dest="compile", action="store_false")
     t.add_argument("--seed", type=int, default=0)
     a = p.parse_args()
