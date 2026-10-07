@@ -1,0 +1,41 @@
+35 passed in 19.03s
+  first step: loss 12.09679  gradient norm 15.64377
+as trained                                             172.2 ms/step    190,242 tokens/s  (1.00 of the step as trained)
+  first step: loss 12.09679  gradient norm 14.50019
+deep trees, no side-branch (route_ste) gradient        162.5 ms/step    201,624 tokens/s  (0.94 of the step as trained)
+  first step: loss 12.09673  gradient norm 14.44781
+  GPU kernel time 145.2 ms in the profiled step; top kernels:
+      26.39 ms  18.2%  x  28  _seg_own
+      19.36 ms  13.3%  x  14  _sparse_fwd
+      17.57 ms  12.1%  x  14  _path_bwd
+       2.03 ms   1.4%  x  14  triton_poi_fused__to_copy_mul_path_bwd_0
+sparse, path-only gradient, fused kernels              146.3 ms/step    223,930 tokens/s  (0.85 of the step as trained)
+  first step: loss 12.09673  gradient norm 14.44781
+  GPU kernel time 161.6 ms in the profiled step; top kernels:
+      26.29 ms  16.3%  x  28  _seg_own
+      20.40 ms  12.6%  x  14  _path_grad_tree
+      18.58 ms  11.5%  x  14  _walk_tree
+      14.30 ms   8.8%  x  28  _gather_rows
+       2.04 ms   1.3%  x  14  triton_poi_fused__to_copy_mul_path_bwd_0
+sparse, path-only gradient, split kernels              163.5 ms/step    200,356 tokens/s  (0.95 of the step as trained)
+  top 7  BE  32 BD 128 warps 4: 1.524 ms
+  top 7  BE  64 BD 128 warps 4: 1.261 ms
+  top 7  BE  16 BD 256 warps 4: 2.619 ms
+  top 7  BE  32 BD 256 warps 8: 2.670 ms
+  top 7  BE  64 BD  64 warps 2: 1.222 ms
+  top 7  BE 128 BD 128 warps 8: 1.693 ms
+  top 8  BE  32 BD 128 warps 4: 1.741 ms
+  top 8  BE  64 BD 128 warps 4: 1.499 ms
+  top 8  BE  16 BD 256 warps 4: 2.222 ms
+  top 8  BE  32 BD 256 warps 8: 2.284 ms
+  top 8  BE  64 BD  64 warps 2: 1.285 ms
+  top 8  BE 128 BD 128 warps 8: 1.648 ms
+  top 9  BE  32 BD 128 warps 4: 1.757 ms
+  top 9  BE  64 BD 128 warps 4: 1.640 ms
+  top 9  BE  16 BD 256 warps 4: 2.012 ms
+  top 9  BE  32 BD 256 warps 8: 2.053 ms
+  top 9  BE  64 BD  64 warps 2: 1.521 ms
+  top 9  BE 128 BD 128 warps 8: 1.469 ms
+  (dense equivalent, one (tokens x nodes)^T GEMM: 1.338 ms)
+
+[exited with code 0]

@@ -149,7 +149,7 @@ if HAVE_TRITON:
 # The fused kernels above walk all trees of a token block in one program, a chain of trees x levels dependent loads.
 # These split the work: the walk and the path gradients with one program per (token block, tree), and the gathers
 # (output, input gradient) with one program per (token block, column chunk).
-SPLIT_KERNELS = os.environ.get("GTS_SPARSE_SPLIT", "1") == "1"  # GTS_SPARSE_SPLIT=0: the fused kernels
+SPLIT_KERNELS = os.environ.get("GTS_SPARSE_SPLIT", "0") == "1"  # slower than the fused kernels on an A100 (200K vs 224K tokens/s)
 
 if HAVE_TRITON:
 
@@ -396,10 +396,10 @@ if HAVE_TRITON:
                     tl.store(DB + r, tl.sum(vs, axis=0))
 
 
-WGRAD_TOP = 8  # tree levels whose weight gradients come from one small dense GEMM (shared by many tokens)
+WGRAD_TOP = 7  # tree levels whose weight gradients come from one small dense GEMM (shared by many tokens)
 
 
-SEG_ARGS = {"block_e": 32, "block_d": 128, "num_warps": 4}  # _seg_own tiles (profile_train_step.py sweeps them)
+SEG_ARGS = {"block_e": 64, "block_d": 64, "num_warps": 2}  # _seg_own tiles (profile_train_step.py sweeps them)
 
 
 def _wgrad_levels(src, nodes, vals, rows, n_nodes, top, want_bias, block_e=None, block_d=None, num_warps=None):
