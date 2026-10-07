@@ -40,6 +40,8 @@ CLS, SEP, PAD, MASK = 50281, 50282, 50283, 50284
 
 # ----------------------------------------------------------------------------------------------------------- data
 def _tok_worker(args):
+    """Tokenise row groups [start, stop) of a parquet file: each worker reads only its own row groups (reading the whole
+    file per worker and slicing it ran a 117 GB host out of memory)."""
     path, start, stop = args
     import pyarrow.parquet as pq
     from huggingface_hub import hf_hub_download
@@ -48,7 +50,8 @@ def _tok_worker(args):
     tok = Tokenizer.from_file(hf_hub_download(TEACHER, "tokenizer.json"))
     tok.no_padding()
     tok.no_truncation()
-    texts = pq.read_table(path, columns=["text"]).slice(start, stop - start).column("text").to_pylist()
+    pf = pq.ParquetFile(path)
+    texts = pf.read_row_groups(list(range(start, stop)), columns=["text"]).column("text").to_pylist()
     out = []
     for enc in tok.encode_batch(texts, add_special_tokens=False):
         out.extend(enc.ids)
@@ -69,11 +72,12 @@ def prep(a):
     for name in a.files:
         print(f"downloading {name} ...", flush=True)
         path = hf_hub_download("HuggingFaceFW/fineweb-edu", name, repo_type="dataset")
-        n = pq.ParquetFile(path).metadata.num_rows
-        print(f"  {n:,} documents; tokenising with {a.workers} workers ({time.time() - t0:.0f} s)", flush=True)
-        step = math.ceil(n / (a.workers * 4))
-        with mp.get_context("spawn").Pool(a.workers) as pool:  # spawn: no forked tokenizer threads to deadlock
-            parts += pool.map(_tok_worker, [(path, s, min(n, s + step)) for s in range(0, n, step)])
+        meta = pq.ParquetFile(path).metadata
+        n, groups = meta.num_rows, meta.num_row_groups
+        print(f"  {n:,} documents in {groups} row groups; tokenising with {a.workers} workers ({time.time() - t0:.0f} s)", flush=True)
+        step = max(1, math.ceil(groups / (a.workers * 4)))
+        with mp.get_context("spawn").Pool(a.workers, maxtasksperchild=4) as pool:  # spawn: no forked tokenizer threads
+            parts += pool.map(_tok_worker, [(path, g0, min(groups, g0 + step)) for g0 in range(0, groups, step)], chunksize=1)
         print(f"{name}: {n:,} documents, {sum(p.size for p in parts):,} tokens so far ({time.time() - t0:.0f} s)", flush=True)
     stream = np.concatenate(parts)
     val = stream[-a.val_tokens:]
