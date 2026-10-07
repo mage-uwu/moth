@@ -62,6 +62,13 @@ class GTSSparse(GTS):
         return (self.sparse and HAVE_TRITON and x.is_cuda and not torch.is_grad_enabled() and not self.use_context
                 and not self.read_state and not self.capture_paths and self.dense_walk)
 
+    def _sparse_train_ok(self, x):
+        """Training (gradients wanted) with the plain FFF routing gradient: the fully sparse forward and backward."""
+        from mamba_ssm.ops.gts_sparse import HAVE_TRITON
+
+        return (self.sparse and HAVE_TRITON and x.is_cuda and torch.is_grad_enabled() and not self.route_ste
+                and not self.use_context and not self.read_state and not self.capture_paths and self.dense_walk)
+
     def freeze_quantized(self, dtype=None, packed=False):
         """GTS.freeze_quantized, plus (``packed``) the deep trees' node tables packed to 2 bits (scales in ``dtype``,
         default bfloat16: the dense path's weights under bf16 autocast are bf16(scale) * code, which these
@@ -77,6 +84,16 @@ class GTSSparse(GTS):
             self._frozen_q["packed"] = (pack_rows(ci, si, sd), pack_rows(co, so, sd), self.node_in.shape[-1] // si.shape[-1])
 
     def _forward_route_ste(self, x, mask, return_paths):
+        if not return_paths and self._sparse_train_ok(x):
+            from mamba_ssm.ops.gts_sparse import sparse_path_route
+
+            batch, length, d = x.shape
+            if torch.is_autocast_enabled():
+                x = x.to(torch.get_autocast_gpu_dtype())
+            kw = {k: v for k, v in KERNEL_ARGS.items() if k in ("block_m", "block_d", "num_warps")}
+            out = sparse_path_route(x.reshape(batch * length, d), self._w_in(), self.node_bias, self._w_out(),
+                                    self.n_trees, self.n_nodes, self.depth, self.act, **kw)
+            return out.view(batch, length, d).to(x.dtype) * mask.unsqueeze(-1)
         if not self._sparse_ok(x, return_paths):
             return super()._forward_route_ste(x, mask, return_paths)
         batch, length, d = x.shape

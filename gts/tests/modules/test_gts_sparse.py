@@ -101,3 +101,71 @@ def test_prepare_inference_matches_dense():
             layer.deep._sparse_ok = lambda x, r: True
         out = layer(u)
     torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("n_tok,d,n_trees,depth,bias", [(70, 96, 2, 3, True), (33, 64, 3, 5, False), (130, 32, 1, 2, True)])
+def test_path_gradients_match_dense(n_tok, d, n_trees, depth, bias):
+    """sparse_path_route: values and every gradient against an autograd reference with the hard walk and no
+    gradient through the branches (route_ste=False), in float64."""
+    from mamba_ssm.ops.gts_sparse import sparse_path_route
+
+    torch.manual_seed(0)
+    n_nodes = 2 ** (depth + 1) - 1
+    rows = n_trees * n_nodes
+    x = torch.randn(n_tok, d, device=DEVICE)
+    w_in, w_out = torch.randn(rows, d, device=DEVICE) / d ** 0.5, torch.randn(rows, d, device=DEVICE)
+    b = torch.randn(rows, device=DEVICE) * 0.1 if bias else None
+    dout = torch.randn(n_tok, d, device=DEVICE)
+    leaves = [x, w_in, w_out] + ([b] if bias else [])
+    ins = [t.clone().requires_grad_() for t in leaves]
+    xs, wis, wos = ins[:3]
+    bs = ins[3] if bias else None
+    out = sparse_path_route(xs, wis, bs, wos, n_trees, n_nodes, depth, block_m=16, block_d=32)
+    (out * dout).sum().backward()
+    ref_ins = [t.double().clone().requires_grad_() for t in leaves]
+    xr, wir, wor = ref_ins[:3]
+    br = ref_ins[3] if bias else None
+    L = xr @ wir.t() + (br if bias else 0)
+    ref = torch.zeros(n_tok, d, dtype=torch.float64, device=DEVICE)
+    for t in range(n_trees):
+        cur = torch.zeros(n_tok, dtype=torch.long, device=DEVICE)
+        for k in range(depth + 1):
+            node = t * n_nodes + cur
+            lg = L.gather(1, node[:, None]).squeeze(1)
+            ref = ref + torch.nn.functional.gelu(lg)[:, None] * wor[node]
+            cur = 2 * cur + 1 + (lg.detach() > 0).long()
+    (ref * dout.double()).sum().backward()
+    torch.testing.assert_close(out.double(), ref.detach(), rtol=1e-4, atol=1e-4)
+    for a, r in zip(ins, ref_ins):
+        torch.testing.assert_close(a.grad.double(), r.grad, rtol=1e-3, atol=1e-3)
+
+
+def test_module_training_matches_dense():
+    """A GTSMixed layer with route_ste=False: the sparse training path (forward and backward) against the dense one,
+    every parameter's gradient included (ternary weights through the straight-through estimator, 8-bit activations)."""
+    import copy
+
+    from mamba_ssm.modules.gts_sparse import sparsify
+
+    torch.manual_seed(0)
+    ref = GTSMixed(64, bank_trees=4, bank_heads=2, bank_state=4, deep_trees=2, deep_depth=4, route_ste=False,
+                   ternary=True, act_bits=8).to(DEVICE).double()
+    sp = copy.deepcopy(ref)
+    sparsify(sp)
+    if DEVICE == "cpu":  # the sparse path only switches on on CUDA; force it here
+        sp.deep._sparse_train_ok = lambda x: True
+        sp.deep._use_route_kernel = lambda x: True
+    u = torch.randn(2, 40, 64, device=DEVICE, dtype=torch.float64)
+    mask = torch.ones(2, 40, device=DEVICE, dtype=torch.float64)
+    mask[1, 33:] = 0
+    g = torch.randn(2, 40, 64, device=DEVICE, dtype=torch.float64)
+    ua, ub = u.clone().requires_grad_(), u.clone().requires_grad_()
+    (ref.deep(ua, attention_mask=mask) * g).sum().backward()
+    (sp.deep(ub, attention_mask=mask) * g).sum().backward()
+    torch.testing.assert_close(ub.grad, ua.grad, rtol=1e-6, atol=1e-6)
+    for (n, a), (_, b) in zip(ref.deep.named_parameters(), sp.deep.named_parameters()):
+        if a.grad is None:
+            assert b.grad is None or not b.grad.any(), n
+            continue
+        err = ((b.grad - a.grad).abs().max() / a.grad.abs().max()).item()
+        assert err < 1e-5, n

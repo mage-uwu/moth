@@ -26,8 +26,12 @@ def build(blob, variant):
         if isinstance(mod, GTSMixed):
             if variant == "no deep trees":
                 mod.forward = types.MethodType(lambda self, u, attention_mask=None: self.bank(u, attention_mask=attention_mask), mod)
-            elif variant == "deep trees, no side-branch (route_ste) gradient":
+            elif variant in ("deep trees, no side-branch (route_ste) gradient", "sparse deep trees, path-only gradient"):
                 mod.deep.route_ste = False
+    if variant.startswith("sparse"):
+        from mamba_ssm.modules.gts_sparse import sparsify
+
+        sparsify(m)
     m = m.cuda().train()
     for i in range(len(m.backbone.layers)):
         m.backbone.layers[i] = torch.compile(m.backbone.layers[i], dynamic=False)
@@ -47,10 +51,13 @@ def run(m, batch, seq, steps, prof=False):
             loss = m(x, labels=y, labelled_only=True).loss
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
+        gn = torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
         opt.step()
+        return loss, gn
 
-    for _ in range(5):
+    loss, gn = step()
+    print(f"  first step: loss {loss.item():.5f}  gradient norm {gn.item():.5f}", flush=True)
+    for _ in range(4):
         step()
     torch.cuda.synchronize()
     a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
@@ -85,7 +92,7 @@ def main():
     n = a.batch * a.seq
     print(f"{torch.cuda.get_device_name(0)}: training step of the 110M masked LM, {a.batch} x {a.seq} tokens", flush=True)
     base = None
-    for variant in ("as trained", "no deep trees", "deep trees, no side-branch (route_ste) gradient"):
+    for variant in ("as trained", "no deep trees", "deep trees, no side-branch (route_ste) gradient", "sparse deep trees, path-only gradient"):
         m = build(blob, variant)
         ms = run(m, a.batch, a.seq, a.steps, prof=variant == "as trained")
         base = base or ms

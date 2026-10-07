@@ -23,7 +23,7 @@ try:
 except ImportError:  # pragma: no cover
     triton = None
 
-__all__ = ["sparse_route_fwd", "top_rows", "sparse_route_fwd_packed", "pack_rows", "HAVE_TRITON"]
+__all__ = ["sparse_path_route", "sparse_route_fwd", "top_rows", "sparse_route_fwd_packed", "pack_rows", "HAVE_TRITON"]
 HAVE_TRITON = triton is not None
 
 if HAVE_TRITON:
@@ -226,3 +226,137 @@ def sparse_route_fwd_packed(x, packed_in, packed_out, bias, n_trees, n_nodes, de
         N_TREES=n_trees, N_NODES=n_nodes, DEPTH=depth, ACT=code, HAS_BIAS=bias is not None,
         ROUND_BF16=x.dtype == torch.bfloat16, BM=block_m, BD=block_d, G=group, PHASES=phases, num_warps=num_warps)
     return out, nodes, logits
+
+
+# ---------------------------------------------------------------------------------------------- training (backward)
+#
+# With the plain FFF routing gradient (route_ste=False) every gradient of the deep trees lives on the tokens' paths:
+#     g[n, j]  = dout[n] . W_out[node(n, j)]           (j over the trees x levels of token n's path)
+#     dL[n, j] = coef'(L[n, j]) * g[n, j]
+#     dx[n]    = sum_j dL[n, j] * W_in[node(n, j)]
+#     dW_in[m] = sum over path entries at node m of dL * x[n];   dbias[m] = sum of dL
+#     dW_out[m] = sum over path entries at node m of coef(L) * dout[n]
+# which is exactly what the dense route path computes with route_ste=False, without any (tokens x nodes) tensor.
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _dcoef(x, ACT: tl.constexpr):
+        if ACT == 0:
+            return 0.5 * (1.0 + tl.math.erf(x * 0.7071067811865476)) + x * tl.exp(-0.5 * x * x) * 0.3989422804014327
+        return tl.full(x.shape, 1.0, tl.float32)
+
+    @triton.jit
+    def _path_bwd(DOUT, WI, WO, NODES, LOGITS, DL, DX, n_tok, d, s_do, s_dx,
+                  P: tl.constexpr, ACT: tl.constexpr, BM: tl.constexpr, BD: tl.constexpr):
+        tok = tl.program_id(0) * BM + tl.arange(0, BM)
+        ok = tok < n_tok
+        cols = tl.arange(0, BD)
+        # the logit gradient of every path node (independent of each other: the path is known)
+        for j in range(P):
+            node = tl.load(NODES + tok * P + j, mask=ok, other=0)
+            g = tl.zeros((BM,), dtype=tl.float32)
+            for c in range(0, d, BD):
+                cm = (c + cols) < d
+                dv = tl.load(DOUT + tok[:, None] * s_do + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+                wv = tl.load(WO + node[:, None] * d + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+                g += tl.sum(dv.to(tl.float32) * wv.to(tl.float32), axis=1)
+            lg = tl.load(LOGITS + tok * P + j, mask=ok, other=0.0)
+            tl.store(DL + tok * P + j, _dcoef(lg, ACT) * g, mask=ok)
+        # the input gradient
+        for c in range(0, d, BD):
+            cm = (c + cols) < d
+            acc = tl.zeros((BM, BD), dtype=tl.float32)
+            for j in range(P):
+                node = tl.load(NODES + tok * P + j, mask=ok, other=0)
+                dl = tl.load(DL + tok * P + j, mask=ok, other=0.0)
+                wv = tl.load(WI + node[:, None] * d + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+                acc += dl[:, None] * wv.to(tl.float32)
+            tl.store(DX + tok[:, None] * s_dx + (c + cols)[None, :], acc, mask=ok[:, None] & cm[None, :])
+
+    @triton.jit
+    def _seg_rows(SRC, s_src, NODE, TOK, VAL, DW, DB, n_ent, d,
+                  HAS_DB: tl.constexpr, BE: tl.constexpr, BD: tl.constexpr):
+        """DW[node] += VAL * SRC[tok] over entries sorted by node: the block's first and last node runs are summed
+        in registers (one atomic row each); any node strictly inside the block gets per-entry atomics."""
+        e = tl.program_id(0) * BE + tl.arange(0, BE)
+        ok = e < n_ent
+        cols = tl.program_id(1) * BD + tl.arange(0, BD)
+        cm = cols < d
+        node = tl.load(NODE + e, mask=ok, other=0)
+        tok = tl.load(TOK + e, mask=ok, other=0)
+        val = tl.load(VAL + e, mask=ok, other=0.0)
+        rows = tl.load(SRC + tok[:, None] * s_src + cols[None, :], mask=ok[:, None] & cm[None, :], other=0.0).to(tl.float32)
+        rows = rows * val[:, None]
+        n0 = tl.min(tl.where(ok, node, 2147483647), axis=0)
+        n1 = tl.max(tl.where(ok, node, -1), axis=0)
+        first = ok & (node == n0)
+        last = ok & (node == n1) & (n1 != n0)
+        mid = ok & (node != n0) & (node != n1)
+        tl.atomic_add(DW + n0 * d + cols, tl.sum(tl.where(first[:, None], rows, 0.0), axis=0), mask=cm)
+        tl.atomic_add(DW + n1 * d + cols, tl.sum(tl.where(last[:, None], rows, 0.0), axis=0), mask=cm & (n1 != n0))
+        tl.atomic_add(DW + node[:, None] * d + cols[None, :], rows, mask=mid[:, None] & cm[None, :])
+        if HAS_DB:
+            if tl.program_id(1) == 0:
+                tl.atomic_add(DB + n0, tl.sum(tl.where(first, val, 0.0), axis=0))
+                tl.atomic_add(DB + n1, tl.sum(tl.where(last, val, 0.0), axis=0), mask=n1 != n0)
+                tl.atomic_add(DB + node, val, mask=mid)
+
+
+def _wgrad(src, nodes_sorted, tok_sorted, val_sorted, rows, d, want_bias, block_e=64, block_d=128):
+    dw = torch.zeros(rows, d, device=src.device, dtype=torch.float32)
+    db = torch.zeros(rows, device=src.device, dtype=torch.float32) if want_bias else dw
+    n_ent = nodes_sorted.numel()
+    _seg_rows[(triton.cdiv(n_ent, block_e), triton.cdiv(d, block_d))](
+        src, src.stride(0), nodes_sorted, tok_sorted, val_sorted, dw, db, n_ent, d,
+        HAS_DB=want_bias, BE=block_e, BD=block_d)
+    return dw, (db if want_bias else None)
+
+
+class SparsePathRoute(torch.autograd.Function):
+    """out = the deep trees' output, sparse forward and backward, with the plain FFF routing gradient (no gradient
+    through the hard branches): GTS._forward_route_ste with route_ste=False, as a sparse computation."""
+
+    @staticmethod
+    def forward(ctx, x, w_in, bias, w_out, n_trees, n_nodes, depth, act, kw):
+        dt = x.dtype
+        wi, wo = w_in.to(dt).contiguous(), w_out.to(dt).contiguous()
+        out, nodes, logits = sparse_route_fwd(x, wi, bias, wo, n_trees, n_nodes, depth, act, **kw)
+        ctx.save_for_backward(x, wi, wo, nodes, logits)
+        ctx.cfg = (act, bias is not None, w_in.shape[0], w_in.dtype, w_out.dtype, bias.dtype if bias is not None else None, kw)
+        return out
+
+    @staticmethod
+    def backward(ctx, dout):
+        x, wi, wo, nodes, logits = ctx.saved_tensors
+        act, has_bias, rows, wi_dt, wo_dt, b_dt, kw = ctx.cfg
+        code = {"gelu": 0, "split": 0, "linear": 1}[act]
+        n_tok, d = x.shape
+        P = nodes.shape[1] * nodes.shape[2]
+        dout = dout.to(x.dtype).contiguous()
+        dl = torch.empty(n_tok, P, device=x.device, dtype=torch.float32)
+        dx = torch.empty(n_tok, d, device=x.device, dtype=torch.float32)
+        bm = kw.get("block_m", 8)
+        _path_bwd[(triton.cdiv(n_tok, bm),)](dout, wi, wo, nodes, logits, dl, dx, n_tok, d, dout.stride(0), dx.stride(0),
+                                             P=P, ACT=code, BM=bm, BD=kw.get("block_d", 128), num_warps=kw.get("num_warps", 2))
+        dw_in = db = dw_out = None
+        if ctx.needs_input_grad[1] or ctx.needs_input_grad[2] or ctx.needs_input_grad[3]:
+            flat = nodes.reshape(-1)
+            sorted_nodes, perm = torch.sort(flat)
+            tok = (perm // P).to(torch.int32)
+            if ctx.needs_input_grad[3]:
+                coef = torch.nn.functional.gelu(logits) if code == 0 else logits
+                dw_out, _ = _wgrad(dout, sorted_nodes, tok, coef.reshape(-1)[perm].contiguous(), rows, d, False)
+                dw_out = dw_out.to(wo_dt)
+            if ctx.needs_input_grad[1] or ctx.needs_input_grad[2]:
+                dw_in, db = _wgrad(x, sorted_nodes, tok, dl.reshape(-1)[perm].contiguous(), rows, d, has_bias)
+                dw_in = dw_in.to(wi_dt)
+                db = db.to(b_dt) if db is not None else None
+        return dx.to(x.dtype), dw_in, db, dw_out, None, None, None, None, None
+
+
+def sparse_path_route(x, w_in, bias, w_out, n_trees, n_nodes, depth, act="gelu", **kw):
+    """Differentiable sparse deep trees with the plain FFF routing gradient (route_ste=False). x: (tokens, d); returns
+    (tokens, d) float32. ``kw``: tile sizes for the kernels (block_m, block_d, num_warps)."""
+    kw = {k: v for k, v in kw.items() if k in ("block_m", "block_d", "num_warps")}
+    return SparsePathRoute.apply(x, w_in, bias, w_out, n_trees, n_nodes, depth, act, kw)
