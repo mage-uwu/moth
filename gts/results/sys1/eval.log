@@ -1,0 +1,909 @@
++ O=/workspace/out
++ mkdir -p /workspace/out /root/ck
++ python3 -m pip install -q einops packaging tokenizers huggingface_hub datasets transformers
++ tail -1
++ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+NVIDIA A100-SXM4-80GB, 81920 MiB
++ '[' -f /root/ck/gts3_float.pt ']'
++ cat checkpoints/bert110m/phase3/checkpoint.pt.part00 checkpoints/bert110m/phase3/checkpoint.pt.part01 checkpoints/bert110m/phase3/checkpoint.pt.part02 checkpoints/bert110m/phase3/checkpoint.pt.part03 checkpoints/bert110m/phase3/checkpoint.pt.part04 checkpoints/bert110m/phase3/checkpoint.pt.part05 checkpoints/bert110m/phase3/checkpoint.pt.part06 checkpoints/bert110m/phase3/checkpoint.pt.part07 checkpoints/bert110m/phase3/checkpoint.pt.part08 checkpoints/bert110m/phase3/checkpoint.pt.part09 checkpoints/bert110m/phase3/checkpoint.pt.part10 checkpoints/bert110m/phase3/checkpoint.pt.part11 checkpoints/bert110m/phase3/checkpoint.pt.part12 checkpoints/bert110m/phase3/checkpoint.pt.part13 checkpoints/bert110m/phase3/checkpoint.pt.part14
++ '[' -d checkpoints/bert110m/uni ']'
++ '[' '!' -f /root/ck/uni_float.pt ']'
++ cat checkpoints/bert110m/uni/checkpoint.pt.part00 checkpoints/bert110m/uni/checkpoint.pt.part01 checkpoints/bert110m/uni/checkpoint.pt.part02 checkpoints/bert110m/uni/checkpoint.pt.part03 checkpoints/bert110m/uni/checkpoint.pt.part04 checkpoints/bert110m/uni/checkpoint.pt.part05 checkpoints/bert110m/uni/checkpoint.pt.part06 checkpoints/bert110m/uni/checkpoint.pt.part07 checkpoints/bert110m/uni/checkpoint.pt.part08 checkpoints/bert110m/uni/checkpoint.pt.part09 checkpoints/bert110m/uni/checkpoint.pt.part10 checkpoints/bert110m/uni/checkpoint.pt.part11 checkpoints/bert110m/uni/checkpoint.pt.part12 checkpoints/bert110m/uni/checkpoint.pt.part13 checkpoints/bert110m/uni/checkpoint.pt.part14
++ T='sst2 mrpc rte qnli mnli cola stsb'
++ COMMON='--epochs 3 --max-train 100000 --batch-size 32 --max-len 128'
++ '[' -z '' ']'
++ for t in 3e-4 1e-3
++ python3 scripts/glue_finetune.py --gts /root/ck/gts3_float.pt --tasks rte mrpc stsb cola --epochs 3 --max-train 100000 --batch-size 32 --max-len 128 --lr 1e-4 --ternary-lr 3e-4 --out /workspace/out/glue_sweep_gts3_tlr3e-4.json
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Generating train split:   0%|          | 0/2490 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 2490/2490 [00:00<00:00, 334469.72 examples/s]
+Generating validation split:   0%|          | 0/277 [00:00<?, ? examples/s]Generating validation split: 100%|██████████| 277/277 [00:00<00:00, 142084.16 examples/s]
+Generating test split:   0%|          | 0/3000 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 3000/3000 [00:00<00:00, 678031.68 examples/s]
+  rte epoch 1: accuracy 0.5162  (0.8 min)
+  rte epoch 2: accuracy 0.5126  (0.9 min)
+  rte epoch 3: accuracy 0.5271  (1.0 min)
+Generating train split:   0%|          | 0/3668 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 3668/3668 [00:00<00:00, 527704.85 examples/s]
+Generating validation split:   0%|          | 0/408 [00:00<?, ? examples/s]Generating validation split: 100%|██████████| 408/408 [00:00<00:00, 199124.51 examples/s]
+Generating test split:   0%|          | 0/1725 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 1725/1725 [00:00<00:00, 588800.00 examples/s]
+  mrpc epoch 1: accuracy 0.6838  f1 0.7923  (0.4 min)
+  mrpc epoch 2: accuracy 0.7010  f1 0.8146  (0.5 min)
+  mrpc epoch 3: accuracy 0.6569  f1 0.7586  (0.6 min)
+Generating train split:   0%|          | 0/5749 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 5749/5749 [00:00<00:00, 988564.02 examples/s]
+Generating validation split:   0%|          | 0/1500 [00:00<?, ? examples/s]Generating validation split: 100%|██████████| 1500/1500 [00:00<00:00, 611652.34 examples/s]
+Generating test split:   0%|          | 0/1379 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 1379/1379 [00:00<00:00, 663677.02 examples/s]
+  stsb epoch 1: pearson 0.3284  spearman 0.3039  (0.5 min)
+  stsb epoch 2: pearson 0.5265  spearman 0.5204  (0.7 min)
+  stsb epoch 3: pearson 0.5806  spearman 0.5781  (0.8 min)
+Generating train split:   0%|          | 0/8551 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 8551/8551 [00:00<00:00, 1469596.13 examples/s]
+Generating validation split:   0%|          | 0/1043 [00:00<?, ? examples/s]Generating validation split: 100%|██████████| 1043/1043 [00:00<00:00, 512435.17 examples/s]
+Generating test split:   0%|          | 0/1063 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 1063/1063 [00:00<00:00, 543592.44 examples/s]
+W1007 07:33:13.358000 138 torch/_dynamo/convert_frame.py:1016] [0/8] torch._dynamo hit config.recompile_limit (8)
+W1007 07:33:13.358000 138 torch/_dynamo/convert_frame.py:1016] [0/8]    function: 'forward' (/root/moth/gts/mamba_ssm/models/gts_encoder.py:87)
+W1007 07:33:13.358000 138 torch/_dynamo/convert_frame.py:1016] [0/8]    last reason: 0/0: tensor 'x' size mismatch at index 0. expected 32, actual 7
+W1007 07:33:13.358000 138 torch/_dynamo/convert_frame.py:1016] [0/8] To log all recompilation reasons, use TORCH_LOGS="recompiles".
+W1007 07:33:13.358000 138 torch/_dynamo/convert_frame.py:1016] [0/8] To diagnose recompilation issues, see https://pytorch.org/docs/main/torch.compiler_troubleshooting.html.
+  cola epoch 1: mcc 0.0562  (0.3 min)
+  cola epoch 2: mcc 0.1001  (0.5 min)
+  cola epoch 3: mcc 0.1713  (0.8 min)
+GLUE dev: rte 0.5271  mrpc 0.8146  stsb 0.5781  cola 0.1713  average 0.5228
++ for t in 3e-4 1e-3
++ python3 scripts/glue_finetune.py --gts /root/ck/gts3_float.pt --tasks rte mrpc stsb cola --epochs 3 --max-train 100000 --batch-size 32 --max-len 128 --lr 1e-4 --ternary-lr 1e-3 --out /workspace/out/glue_sweep_gts3_tlr1e-3.json
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  rte epoch 1: accuracy 0.4874  (0.2 min)
+  rte epoch 2: accuracy 0.5271  (0.3 min)
+  rte epoch 3: accuracy 0.4838  (0.4 min)
+  mrpc epoch 1: accuracy 0.6912  f1 0.8013  (0.2 min)
+  mrpc epoch 2: accuracy 0.6985  f1 0.8161  (0.3 min)
+  mrpc epoch 3: accuracy 0.6642  f1 0.7584  (0.4 min)
+  stsb epoch 1: pearson 0.2432  spearman 0.2285  (0.2 min)
+  stsb epoch 2: pearson 0.4496  spearman 0.4369  (0.4 min)
+  stsb epoch 3: pearson 0.5406  spearman 0.5380  (0.6 min)
+W1007 07:35:38.281000 7375 torch/_dynamo/convert_frame.py:1016] [0/8] torch._dynamo hit config.recompile_limit (8)
+W1007 07:35:38.281000 7375 torch/_dynamo/convert_frame.py:1016] [0/8]    function: 'forward' (/root/moth/gts/mamba_ssm/models/gts_encoder.py:87)
+W1007 07:35:38.281000 7375 torch/_dynamo/convert_frame.py:1016] [0/8]    last reason: 0/0: tensor 'x' size mismatch at index 0. expected 32, actual 7
+W1007 07:35:38.281000 7375 torch/_dynamo/convert_frame.py:1016] [0/8] To log all recompilation reasons, use TORCH_LOGS="recompiles".
+W1007 07:35:38.281000 7375 torch/_dynamo/convert_frame.py:1016] [0/8] To diagnose recompilation issues, see https://pytorch.org/docs/main/torch.compiler_troubleshooting.html.
+  cola epoch 1: mcc 0.0529  (0.2 min)
+  cola epoch 2: mcc 0.1600  (0.5 min)
+  cola epoch 3: mcc 0.1998  (0.7 min)
+GLUE dev: rte 0.5271  mrpc 0.8161  stsb 0.5380  cola 0.1998  average 0.5202
+++ python3 -c '
+import json
+r = {t: json.load(open('\''/workspace/out/glue_sweep_gts3_tlr%s.json'\'' % t))['\''average'\''] for t in ('\''3e-4'\'', '\''1e-3'\'')}
+print(max(r, key=r.get))'
++ TLR=3e-4
++ echo 'ternary learning rate: 3e-4'
++ tee /workspace/out/ternary_lr.txt
+ternary learning rate: 3e-4
++ python3 scripts/glue_finetune.py --gts /root/ck/gts3_float.pt --tasks sst2 mrpc rte qnli mnli cola stsb --epochs 3 --max-train 100000 --batch-size 32 --max-len 128 --lr 1e-4 --ternary-lr 3e-4 --out /workspace/out/glue_gts3.json --save-dir /workspace/out/models/glue_gts3
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Generating train split:   0%|          | 0/67349 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 67349/67349 [00:00<00:00, 2168602.64 examples/s]
+Generating validation split:   0%|          | 0/872 [00:00<?, ? examples/s]Generating validation split: 100%|██████████| 872/872 [00:00<00:00, 417944.59 examples/s]
+Generating test split:   0%|          | 0/1821 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 1821/1821 [00:00<00:00, 836747.11 examples/s]
+  sst2 epoch 1: accuracy 0.8486  (2.1 min)
+  sst2 epoch 2: accuracy 0.8589  (4.0 min)
+  sst2 epoch 3: accuracy 0.8635  (6.0 min)
+  mrpc epoch 1: accuracy 0.6838  f1 0.7923  (0.2 min)
+  mrpc epoch 2: accuracy 0.7010  f1 0.8146  (0.3 min)
+  mrpc epoch 3: accuracy 0.6569  f1 0.7586  (0.4 min)
+  rte epoch 1: accuracy 0.5162  (0.1 min)
+  rte epoch 2: accuracy 0.5126  (0.2 min)
+  rte epoch 3: accuracy 0.5271  (0.3 min)
+Generating train split:   0%|          | 0/104743 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 104743/104743 [00:00<00:00, 1301924.43 examples/s]
+Generating validation split:   0%|          | 0/5463 [00:00<?, ? examples/s]Generating validation split: 100%|██████████| 5463/5463 [00:00<00:00, 939000.19 examples/s]
+Generating test split:   0%|          | 0/5463 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 5463/5463 [00:00<00:00, 1046421.10 examples/s]
+W1007 07:46:22.361000 7921 torch/_dynamo/convert_frame.py:1016] [0/8] torch._dynamo hit config.recompile_limit (8)
+W1007 07:46:22.361000 7921 torch/_dynamo/convert_frame.py:1016] [0/8]    function: 'forward' (/root/moth/gts/mamba_ssm/models/gts_encoder.py:87)
+W1007 07:46:22.361000 7921 torch/_dynamo/convert_frame.py:1016] [0/8]    last reason: 0/2: tensor 'x' size mismatch at index 0. expected 256, actual 87
+W1007 07:46:22.361000 7921 torch/_dynamo/convert_frame.py:1016] [0/8] To log all recompilation reasons, use TORCH_LOGS="recompiles".
+W1007 07:46:22.361000 7921 torch/_dynamo/convert_frame.py:1016] [0/8] To diagnose recompilation issues, see https://pytorch.org/docs/main/torch.compiler_troubleshooting.html.
+  qnli epoch 1: accuracy 0.6927  (2.8 min)
+  qnli epoch 2: accuracy 0.7342  (5.6 min)
+  qnli epoch 3: accuracy 0.7348  (8.4 min)
+Generating train split:   0%|          | 0/392702 [00:00<?, ? examples/s]Generating train split:  40%|████      | 158000/392702 [00:00<00:00, 1565915.25 examples/s]Generating train split:  91%|█████████▏| 359000/392702 [00:00<00:00, 1792518.49 examples/s]Generating train split: 100%|██████████| 392702/392702 [00:00<00:00, 1745309.67 examples/s]
+Generating validation_matched split:   0%|          | 0/9815 [00:00<?, ? examples/s]Generating validation_matched split: 100%|██████████| 9815/9815 [00:00<00:00, 1530773.58 examples/s]
+Generating validation_mismatched split:   0%|          | 0/9832 [00:00<?, ? examples/s]Generating validation_mismatched split: 100%|██████████| 9832/9832 [00:00<00:00, 1660829.52 examples/s]
+Generating test_matched split:   0%|          | 0/9796 [00:00<?, ? examples/s]Generating test_matched split: 100%|██████████| 9796/9796 [00:00<00:00, 1659560.63 examples/s]
+Generating test_mismatched split:   0%|          | 0/9847 [00:00<?, ? examples/s]Generating test_mismatched split: 100%|██████████| 9847/9847 [00:00<00:00, 1637771.10 examples/s]
+  mnli epoch 1: accuracy 0.5927  (2.8 min)
+  mnli epoch 2: accuracy 0.6289  (5.6 min)
+  mnli epoch 3: accuracy 0.6276  (8.4 min)
+  cola epoch 1: mcc 0.0562  (0.2 min)
+  cola epoch 2: mcc 0.1001  (0.5 min)
+  cola epoch 3: mcc 0.1713  (0.7 min)
+  stsb epoch 1: pearson 0.3290  spearman 0.3052  (0.2 min)
+  stsb epoch 2: pearson 0.5266  spearman 0.5205  (0.4 min)
+  stsb epoch 3: pearson 0.5814  spearman 0.5791  (0.5 min)
+GLUE dev: sst2 0.8635  mrpc 0.8146  rte 0.5271  qnli 0.7348  mnli 0.6289  cola 0.1713  stsb 0.5791  average 0.6170
++ '[' -f /root/ck/uni_float.pt ']'
++ python3 scripts/glue_finetune.py --gts /root/ck/uni_float.pt --loops 3 --tasks sst2 mrpc rte qnli mnli cola stsb --epochs 3 --max-train 100000 --batch-size 32 --max-len 128 --lr 1e-4 --ternary-lr 3e-4 --out /workspace/out/glue_uni_3pass.json --save-dir /workspace/out/models/glue_uni_3pass
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  sst2 epoch 1: accuracy 0.8498  (6.2 min)
+  sst2 epoch 2: accuracy 0.8773  (11.6 min)
+  sst2 epoch 3: accuracy 0.8589  (17.1 min)
+W1007 08:19:49.866000 9118 torch/_dynamo/convert_frame.py:1016] [0/8] torch._dynamo hit config.recompile_limit (8)
+W1007 08:19:49.866000 9118 torch/_dynamo/convert_frame.py:1016] [0/8]    function: 'forward' (/root/moth/gts/mamba_ssm/models/gts_encoder.py:87)
+W1007 08:19:49.866000 9118 torch/_dynamo/convert_frame.py:1016] [0/8]    last reason: 0/1: tensor 'x' size mismatch at index 0. expected 32, actual 20
+W1007 08:19:49.866000 9118 torch/_dynamo/convert_frame.py:1016] [0/8] To log all recompilation reasons, use TORCH_LOGS="recompiles".
+W1007 08:19:49.866000 9118 torch/_dynamo/convert_frame.py:1016] [0/8] To diagnose recompilation issues, see https://pytorch.org/docs/main/torch.compiler_troubleshooting.html.
+  mrpc epoch 1: accuracy 0.6765  f1 0.8012  (0.3 min)
+  mrpc epoch 2: accuracy 0.7059  f1 0.8125  (0.7 min)
+  mrpc epoch 3: accuracy 0.6814  f1 0.7703  (1.0 min)
+  rte epoch 1: accuracy 0.5307  (0.2 min)
+  rte epoch 2: accuracy 0.4657  (0.4 min)
+  rte epoch 3: accuracy 0.4440  (0.6 min)
+  qnli epoch 1: accuracy 0.6690  (8.1 min)
+  qnli epoch 2: accuracy 0.6884  (16.2 min)
+  qnli epoch 3: accuracy 0.7102  (24.4 min)
+  mnli epoch 1: accuracy 0.5932  (8.1 min)
+  mnli epoch 2: accuracy 0.6228  (16.3 min)
+  mnli epoch 3: accuracy 0.6249  (24.5 min)
+  cola epoch 1: mcc 0.0464  (0.7 min)
+  cola epoch 2: mcc 0.0899  (1.4 min)
+  cola epoch 3: mcc 0.1982  (2.1 min)
+  stsb epoch 1: pearson 0.3278  spearman 0.3061  (0.5 min)
+  stsb epoch 2: pearson 0.5096  spearman 0.5045  (1.0 min)
+  stsb epoch 3: pearson 0.5452  spearman 0.5325  (1.4 min)
+GLUE dev: sst2 0.8773  mrpc 0.8125  rte 0.5307  qnli 0.7102  mnli 0.6249  cola 0.1982  stsb 0.5325  average 0.6123
++ python3 scripts/glue_finetune.py --gts /root/ck/uni_float.pt --loops 1 --tasks sst2 mrpc rte qnli mnli cola stsb --epochs 3 --max-train 100000 --batch-size 32 --max-len 128 --lr 1e-4 --ternary-lr 3e-4 --out /workspace/out/glue_uni_1pass.json --save-dir /workspace/out/models/glue_uni_1pass
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  sst2 epoch 1: accuracy 0.8532  (2.0 min)
+  sst2 epoch 2: accuracy 0.8544  (3.9 min)
+  sst2 epoch 3: accuracy 0.8555  (5.8 min)
+  mrpc epoch 1: accuracy 0.6961  f1 0.8121  (0.2 min)
+  mrpc epoch 2: accuracy 0.6985  f1 0.8128  (0.3 min)
+  mrpc epoch 3: accuracy 0.6373  f1 0.7348  (0.4 min)
+  rte epoch 1: accuracy 0.4657  (0.1 min)
+  rte epoch 2: accuracy 0.4621  (0.2 min)
+  rte epoch 3: accuracy 0.5090  (0.3 min)
+W1007 09:24:37.486000 13022 torch/_dynamo/convert_frame.py:1016] [0/8] torch._dynamo hit config.recompile_limit (8)
+W1007 09:24:37.486000 13022 torch/_dynamo/convert_frame.py:1016] [0/8]    function: 'forward' (/root/moth/gts/mamba_ssm/models/gts_encoder.py:87)
+W1007 09:24:37.486000 13022 torch/_dynamo/convert_frame.py:1016] [0/8]    last reason: 0/2: tensor 'x' size mismatch at index 0. expected 256, actual 87
+W1007 09:24:37.486000 13022 torch/_dynamo/convert_frame.py:1016] [0/8] To log all recompilation reasons, use TORCH_LOGS="recompiles".
+W1007 09:24:37.486000 13022 torch/_dynamo/convert_frame.py:1016] [0/8] To diagnose recompilation issues, see https://pytorch.org/docs/main/torch.compiler_troubleshooting.html.
+  qnli epoch 1: accuracy 0.6998  (2.8 min)
+  qnli epoch 2: accuracy 0.7245  (5.7 min)
+  qnli epoch 3: accuracy 0.7333  (8.5 min)
+  mnli epoch 1: accuracy 0.5932  (2.8 min)
+  mnli epoch 2: accuracy 0.6264  (5.7 min)
+  mnli epoch 3: accuracy 0.6265  (8.5 min)
+  cola epoch 1: mcc 0.0000  (0.3 min)
+  cola epoch 2: mcc 0.1032  (0.5 min)
+  cola epoch 3: mcc 0.1833  (0.8 min)
+  stsb epoch 1: pearson 0.3692  spearman 0.3619  (0.2 min)
+  stsb epoch 2: pearson 0.5281  spearman 0.5173  (0.4 min)
+  stsb epoch 3: pearson 0.5751  spearman 0.5678  (0.5 min)
+GLUE dev: sst2 0.8555  mrpc 0.8128  rte 0.5090  qnli 0.7333  mnli 0.6265  cola 0.1833  stsb 0.5678  average 0.6126
++ for m in google-bert/bert-base-uncased distilbert/distilbert-base-uncased huawei-noah/TinyBERT_General_4L_312D
+++ basename google-bert/bert-base-uncased
++ python3 scripts/glue_finetune.py --hf google-bert/bert-base-uncased --tasks sst2 mrpc rte qnli mnli cola stsb --epochs 3 --max-train 100000 --batch-size 32 --max-len 128 --lr 3e-5 --out /workspace/out/glue_bert-base-uncased.json
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|██████████| 199/199 [00:00<00:00, 8245.09it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: google-bert/bert-base-uncased
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.seq_relationship.weight                | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  sst2 epoch 1: accuracy 0.9163  (1.2 min)
+  sst2 epoch 2: accuracy 0.9255  (2.3 min)
+  sst2 epoch 3: accuracy 0.9300  (3.5 min)
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|██████████| 199/199 [00:00<00:00, 8384.06it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: google-bert/bert-base-uncased
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.seq_relationship.weight                | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  mrpc epoch 1: accuracy 0.7696  f1 0.8484  (0.1 min)
+  mrpc epoch 2: accuracy 0.8627  f1 0.9011  (0.1 min)
+  mrpc epoch 3: accuracy 0.8676  f1 0.9088  (0.2 min)
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|██████████| 199/199 [00:00<00:00, 8287.99it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: google-bert/bert-base-uncased
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.seq_relationship.weight                | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  rte epoch 1: accuracy 0.5740  (0.0 min)
+  rte epoch 2: accuracy 0.5523  (0.1 min)
+  rte epoch 3: accuracy 0.5560  (0.1 min)
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|██████████| 199/199 [00:00<00:00, 8306.96it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: google-bert/bert-base-uncased
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.seq_relationship.weight                | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  qnli epoch 1: accuracy 0.9013  (1.7 min)
+  qnli epoch 2: accuracy 0.9110  (3.3 min)
+  qnli epoch 3: accuracy 0.9105  (5.0 min)
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|██████████| 199/199 [00:00<00:00, 8088.01it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: google-bert/bert-base-uncased
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.seq_relationship.weight                | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  mnli epoch 1: accuracy 0.7961  (1.7 min)
+  mnli epoch 2: accuracy 0.8104  (3.5 min)
+  mnli epoch 3: accuracy 0.8116  (5.2 min)
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|██████████| 199/199 [00:00<00:00, 8348.59it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: google-bert/bert-base-uncased
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.seq_relationship.weight                | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  cola epoch 1: mcc 0.5028  (0.2 min)
+  cola epoch 2: mcc 0.5722  (0.3 min)
+  cola epoch 3: mcc 0.5779  (0.4 min)
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|██████████| 199/199 [00:00<00:00, 8192.00it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: google-bert/bert-base-uncased
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.seq_relationship.weight                | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  stsb epoch 1: pearson 0.8553  spearman 0.8582  (0.1 min)
+  stsb epoch 2: pearson 0.8740  spearman 0.8716  (0.2 min)
+  stsb epoch 3: pearson 0.8744  spearman 0.8719  (0.3 min)
+GLUE dev: sst2 0.9300  mrpc 0.9088  rte 0.5740  qnli 0.9110  mnli 0.8116  cola 0.5779  stsb 0.8719  average 0.7979
++ for m in google-bert/bert-base-uncased distilbert/distilbert-base-uncased huawei-noah/TinyBERT_General_4L_312D
+++ basename distilbert/distilbert-base-uncased
++ python3 scripts/glue_finetune.py --hf distilbert/distilbert-base-uncased --tasks sst2 mrpc rte qnli mnli cola stsb --epochs 3 --max-train 100000 --batch-size 32 --max-len 128 --lr 3e-5 --out /workspace/out/glue_distilbert-base-uncased.json
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/100 [00:00<?, ?it/s]Loading weights: 100%|██████████| 100/100 [00:00<00:00, 8638.43it/s]
+[transformers] [1mDistilBertForSequenceClassification LOAD REPORT[0m from: distilbert/distilbert-base-uncased
+Key                     | Status     | 
+------------------------+------------+-
+vocab_layer_norm.bias   | UNEXPECTED | 
+vocab_layer_norm.weight | UNEXPECTED | 
+vocab_transform.bias    | UNEXPECTED | 
+vocab_projector.bias    | UNEXPECTED | 
+vocab_transform.weight  | UNEXPECTED | 
+pre_classifier.bias     | MISSING    | 
+pre_classifier.weight   | MISSING    | 
+classifier.weight       | MISSING    | 
+classifier.bias         | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  sst2 epoch 1: accuracy 0.9037  (0.6 min)
+  sst2 epoch 2: accuracy 0.9014  (1.2 min)
+  sst2 epoch 3: accuracy 0.9060  (1.8 min)
+Loading weights:   0%|          | 0/100 [00:00<?, ?it/s]Loading weights: 100%|██████████| 100/100 [00:00<00:00, 8019.09it/s]
+[transformers] [1mDistilBertForSequenceClassification LOAD REPORT[0m from: distilbert/distilbert-base-uncased
+Key                     | Status     | 
+------------------------+------------+-
+vocab_layer_norm.bias   | UNEXPECTED | 
+vocab_layer_norm.weight | UNEXPECTED | 
+vocab_transform.bias    | UNEXPECTED | 
+vocab_projector.bias    | UNEXPECTED | 
+vocab_transform.weight  | UNEXPECTED | 
+pre_classifier.bias     | MISSING    | 
+pre_classifier.weight   | MISSING    | 
+classifier.weight       | MISSING    | 
+classifier.bias         | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  mrpc epoch 1: accuracy 0.7721  f1 0.8535  (0.0 min)
+  mrpc epoch 2: accuracy 0.8382  f1 0.8796  (0.1 min)
+  mrpc epoch 3: accuracy 0.8480  f1 0.8942  (0.1 min)
+Loading weights:   0%|          | 0/100 [00:00<?, ?it/s]Loading weights: 100%|██████████| 100/100 [00:00<00:00, 8311.64it/s]
+[transformers] [1mDistilBertForSequenceClassification LOAD REPORT[0m from: distilbert/distilbert-base-uncased
+Key                     | Status     | 
+------------------------+------------+-
+vocab_layer_norm.bias   | UNEXPECTED | 
+vocab_layer_norm.weight | UNEXPECTED | 
+vocab_transform.bias    | UNEXPECTED | 
+vocab_projector.bias    | UNEXPECTED | 
+vocab_transform.weight  | UNEXPECTED | 
+pre_classifier.bias     | MISSING    | 
+pre_classifier.weight   | MISSING    | 
+classifier.weight       | MISSING    | 
+classifier.bias         | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  rte epoch 1: accuracy 0.5632  (0.0 min)
+  rte epoch 2: accuracy 0.6137  (0.0 min)
+  rte epoch 3: accuracy 0.6209  (0.1 min)
+Loading weights:   0%|          | 0/100 [00:00<?, ?it/s]Loading weights: 100%|██████████| 100/100 [00:00<00:00, 8017.10it/s]
+[transformers] [1mDistilBertForSequenceClassification LOAD REPORT[0m from: distilbert/distilbert-base-uncased
+Key                     | Status     | 
+------------------------+------------+-
+vocab_layer_norm.bias   | UNEXPECTED | 
+vocab_layer_norm.weight | UNEXPECTED | 
+vocab_transform.bias    | UNEXPECTED | 
+vocab_projector.bias    | UNEXPECTED | 
+vocab_transform.weight  | UNEXPECTED | 
+pre_classifier.bias     | MISSING    | 
+pre_classifier.weight   | MISSING    | 
+classifier.weight       | MISSING    | 
+classifier.bias         | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  qnli epoch 1: accuracy 0.8720  (0.9 min)
+  qnli epoch 2: accuracy 0.8688  (1.8 min)
+  qnli epoch 3: accuracy 0.8796  (2.7 min)
+Loading weights:   0%|          | 0/100 [00:00<?, ?it/s]Loading weights: 100%|██████████| 100/100 [00:00<00:00, 8177.63it/s]
+[transformers] [1mDistilBertForSequenceClassification LOAD REPORT[0m from: distilbert/distilbert-base-uncased
+Key                     | Status     | 
+------------------------+------------+-
+vocab_layer_norm.bias   | UNEXPECTED | 
+vocab_layer_norm.weight | UNEXPECTED | 
+vocab_transform.bias    | UNEXPECTED | 
+vocab_projector.bias    | UNEXPECTED | 
+vocab_transform.weight  | UNEXPECTED | 
+pre_classifier.bias     | MISSING    | 
+pre_classifier.weight   | MISSING    | 
+classifier.weight       | MISSING    | 
+classifier.bias         | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  mnli epoch 1: accuracy 0.7647  (0.9 min)
+  mnli epoch 2: accuracy 0.7872  (1.8 min)
+  mnli epoch 3: accuracy 0.7890  (2.6 min)
+Loading weights:   0%|          | 0/100 [00:00<?, ?it/s]Loading weights: 100%|██████████| 100/100 [00:00<00:00, 8373.03it/s]
+[transformers] [1mDistilBertForSequenceClassification LOAD REPORT[0m from: distilbert/distilbert-base-uncased
+Key                     | Status     | 
+------------------------+------------+-
+vocab_layer_norm.bias   | UNEXPECTED | 
+vocab_layer_norm.weight | UNEXPECTED | 
+vocab_transform.bias    | UNEXPECTED | 
+vocab_projector.bias    | UNEXPECTED | 
+vocab_transform.weight  | UNEXPECTED | 
+pre_classifier.bias     | MISSING    | 
+pre_classifier.weight   | MISSING    | 
+classifier.weight       | MISSING    | 
+classifier.bias         | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  cola epoch 1: mcc 0.4752  (0.1 min)
+  cola epoch 2: mcc 0.4863  (0.2 min)
+  cola epoch 3: mcc 0.4952  (0.2 min)
+Loading weights:   0%|          | 0/100 [00:00<?, ?it/s]Loading weights: 100%|██████████| 100/100 [00:00<00:00, 8353.36it/s]
+[transformers] [1mDistilBertForSequenceClassification LOAD REPORT[0m from: distilbert/distilbert-base-uncased
+Key                     | Status     | 
+------------------------+------------+-
+vocab_layer_norm.bias   | UNEXPECTED | 
+vocab_layer_norm.weight | UNEXPECTED | 
+vocab_transform.bias    | UNEXPECTED | 
+vocab_projector.bias    | UNEXPECTED | 
+vocab_transform.weight  | UNEXPECTED | 
+pre_classifier.bias     | MISSING    | 
+pre_classifier.weight   | MISSING    | 
+classifier.weight       | MISSING    | 
+classifier.bias         | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  stsb epoch 1: pearson 0.8636  spearman 0.8606  (0.1 min)
+  stsb epoch 2: pearson 0.8715  spearman 0.8687  (0.1 min)
+  stsb epoch 3: pearson 0.8720  spearman 0.8686  (0.2 min)
+GLUE dev: sst2 0.9060  mrpc 0.8942  rte 0.6209  qnli 0.8796  mnli 0.7890  cola 0.4952  stsb 0.8687  average 0.7791
++ for m in google-bert/bert-base-uncased distilbert/distilbert-base-uncased huawei-noah/TinyBERT_General_4L_312D
+++ basename huawei-noah/TinyBERT_General_4L_312D
++ python3 scripts/glue_finetune.py --hf huawei-noah/TinyBERT_General_4L_312D --tasks sst2 mrpc rte qnli mnli cola stsb --epochs 3 --max-train 100000 --batch-size 32 --max-len 128 --lr 3e-5 --out /workspace/out/glue_TinyBERT_General_4L_312D.json
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|██████████| 71/71 [00:00<00:00, 26017.44it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: huawei-noah/TinyBERT_General_4L_312D
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.seq_relationship.weight                | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.bias            | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.weight          | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.decoder.weight             | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  sst2 epoch 1: accuracy 0.8670  (0.5 min)
+  sst2 epoch 2: accuracy 0.9002  (1.1 min)
+  sst2 epoch 3: accuracy 0.9037  (1.6 min)
+Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|██████████| 71/71 [00:00<00:00, 22958.57it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: huawei-noah/TinyBERT_General_4L_312D
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.seq_relationship.weight                | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.bias            | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.weight          | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.decoder.weight             | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  mrpc epoch 1: accuracy 0.7525  f1 0.8389  (0.0 min)
+  mrpc epoch 2: accuracy 0.7941  f1 0.8467  (0.1 min)
+  mrpc epoch 3: accuracy 0.8088  f1 0.8646  (0.1 min)
+Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|██████████| 71/71 [00:00<00:00, 22362.06it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: huawei-noah/TinyBERT_General_4L_312D
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.seq_relationship.weight                | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.bias            | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.weight          | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.decoder.weight             | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  rte epoch 1: accuracy 0.5704  (0.0 min)
+  rte epoch 2: accuracy 0.6968  (0.0 min)
+  rte epoch 3: accuracy 0.6859  (0.1 min)
+Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|██████████| 71/71 [00:00<00:00, 22014.90it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: huawei-noah/TinyBERT_General_4L_312D
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.seq_relationship.weight                | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.bias            | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.weight          | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.decoder.weight             | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  qnli epoch 1: accuracy 0.8204  (0.8 min)
+  qnli epoch 2: accuracy 0.8120  (1.6 min)
+  qnli epoch 3: accuracy 0.8407  (2.3 min)
+Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|██████████| 71/71 [00:00<00:00, 25474.39it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: huawei-noah/TinyBERT_General_4L_312D
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.seq_relationship.weight                | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.bias            | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.weight          | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.decoder.weight             | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  mnli epoch 1: accuracy 0.7590  (0.8 min)
+  mnli epoch 2: accuracy 0.7747  (1.6 min)
+  mnli epoch 3: accuracy 0.7786  (2.3 min)
+Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|██████████| 71/71 [00:00<00:00, 23218.12it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: huawei-noah/TinyBERT_General_4L_312D
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.seq_relationship.weight                | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.bias            | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.weight          | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.decoder.weight             | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  cola epoch 1: mcc 0.0000  (0.1 min)
+  cola epoch 2: mcc 0.0000  (0.1 min)
+  cola epoch 3: mcc 0.0000  (0.2 min)
+Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|██████████| 71/71 [00:00<00:00, 23129.75it/s]
+[transformers] [1mBertForSequenceClassification LOAD REPORT[0m from: huawei-noah/TinyBERT_General_4L_312D
+Key                                        | Status     | 
+-------------------------------------------+------------+-
+cls.seq_relationship.weight                | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.bias            | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED | 
+fit_denses.{0, 1, 2, 3, 4}.weight          | UNEXPECTED | 
+cls.predictions.transform.dense.bias       | UNEXPECTED | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED | 
+cls.predictions.decoder.weight             | UNEXPECTED | 
+cls.seq_relationship.bias                  | UNEXPECTED | 
+cls.predictions.transform.dense.weight     | UNEXPECTED | 
+cls.predictions.bias                       | UNEXPECTED | 
+classifier.weight                          | MISSING    | 
+classifier.bias                            | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  stsb epoch 1: pearson 0.7418  spearman 0.7458  (0.0 min)
+  stsb epoch 2: pearson 0.8160  spearman 0.8230  (0.1 min)
+  stsb epoch 3: pearson 0.8405  spearman 0.8433  (0.1 min)
+GLUE dev: sst2 0.9037  mrpc 0.8646  rte 0.6968  qnli 0.8407  mnli 0.7786  cola 0.0000  stsb 0.8433  average 0.7040
+++ date -u +%T
++ echo '=== GLUE DONE 10:13:28 ==='
+=== GLUE DONE 10:13:28 ===
++ O=/workspace/out
++ mkdir -p /workspace/out /root/ck
++ python3 -m pip install -q einops packaging tokenizers huggingface_hub datasets transformers
++ tail -1
++ '[' -f /root/ck/gts3_float.pt ']'
++ '[' -d checkpoints/bert110m/uni ']'
++ '[' '!' -f /root/ck/uni_float.pt ']'
+++ sed -n 's/ternary learning rate: //p' /workspace/out/ternary_lr.txt
++ TLR=3e-4
++ TLR=3e-4
++ C='--general 500000 --fit-epochs 5 --batch-size 32 --max-len 512'
++ '[' -f /root/ck/uni_float.pt ']'
++ python3 scripts/sys1_train.py --gts /root/ck/uni_float.pt --loops 3 --general 500000 --fit-epochs 5 --batch-size 32 --max-len 512 --lr 1e-4 --ternary-lr 3e-4 --out /workspace/out/sys1_uni_3pass.json --save /workspace/out/models/sys1_uni_3pass.pt
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Generating train split:   0%|          | 0/1200 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 1200/1200 [00:00<00:00, 151191.49 examples/s]
+Generating test split:   0%|          | 0/400 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 400/400 [00:00<00:00, 126182.43 examples/s]
+Generating train split:   0%|          | 0/1028298 [00:00<?, ? examples/s]Generating train split:   8%|▊         | 78600/1028298 [00:00<00:03, 250018.42 examples/s]Generating train split:  27%|██▋       | 278572/1028298 [00:00<00:01, 423034.37 examples/s]Generating train split:  47%|████▋     | 478544/1028298 [00:01<00:01, 460984.91 examples/s]Generating train split:  66%|██████▌   | 678516/1028298 [00:01<00:00, 481678.91 examples/s]Generating train split:  85%|████████▌ | 878487/1028298 [00:01<00:00, 506216.89 examples/s]Generating train split: 100%|██████████| 1028298/1028298 [00:01<00:00, 619165.09 examples/s]Generating train split: 100%|██████████| 1028298/1028298 [00:01<00:00, 524996.00 examples/s]
+Generating validation split:   0%|          | 0/15000 [00:00<?, ? examples/s]Generating validation split: 100%|██████████| 15000/15000 [00:00<00:00, 511550.40 examples/s]
+Generating test split:   0%|          | 0/15122 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 15122/15122 [00:00<00:00, 486319.42 examples/s]
+Filter:   0%|          | 0/1028298 [00:00<?, ? examples/s]Filter:   2%|▏         | 19000/1028298 [00:00<00:05, 178938.29 examples/s]Filter:   4%|▍         | 40000/1028298 [00:00<00:05, 191506.63 examples/s]Filter:   6%|▌         | 60000/1028298 [00:00<00:04, 194932.34 examples/s]Filter:   8%|▊         | 81000/1028298 [00:00<00:04, 196888.85 examples/s]Filter:  10%|▉         | 101000/1028298 [00:00<00:04, 197335.35 examples/s]Filter:  12%|█▏        | 121000/1028298 [00:00<00:06, 131132.95 examples/s]Filter:  14%|█▎        | 141000/1028298 [00:00<00:06, 147175.10 examples/s]Filter:  16%|█▌        | 161000/1028298 [00:00<00:05, 159910.56 examples/s]Filter:  18%|█▊        | 181000/1028298 [00:01<00:04, 170006.22 examples/s]Filter:  20%|█▉        | 201000/1028298 [00:01<00:04, 177698.77 examples/s]Filter:  21%|██▏       | 221000/1028298 [00:01<00:04, 183828.50 examples/s]Filter:  23%|██▎       | 241000/1028298 [00:01<00:04, 187817.63 examples/s]Filter:  25%|██▌       | 261000/1028298 [00:01<00:04, 190629.64 examples/s]Filter:  28%|██▊       | 290000/1028298 [00:01<00:03, 190376.29 examples/s]Filter:  30%|███       | 310000/1028298 [00:01<00:03, 191848.56 examples/s]Filter:  32%|███▏      | 330000/1028298 [00:01<00:03, 193206.31 examples/s]Filter:  34%|███▍      | 350000/1028298 [00:01<00:03, 194620.13 examples/s]Filter:  36%|███▌      | 370000/1028298 [00:02<00:03, 195514.80 examples/s]Filter:  38%|███▊      | 390000/1028298 [00:02<00:03, 196110.11 examples/s]Filter:  40%|███▉      | 410000/1028298 [00:02<00:03, 196135.44 examples/s]Filter:  42%|████▏     | 430000/1028298 [00:02<00:03, 196366.14 examples/s]Filter:  44%|████▍     | 450000/1028298 [00:02<00:02, 196870.78 examples/s]Filter:  46%|████▌     | 470000/1028298 [00:02<00:02, 196742.64 examples/s]Filter:  48%|████▊     | 490000/1028298 [00:02<00:02, 196263.23 examples/s]Filter:  50%|████▉     | 510000/1028298 [00:02<00:02, 196142.14 examples/s]Filter:  52%|█████▏    | 530000/1028298 [00:02<00:02, 195324.41 examples/s]Filter:  53%|█████▎    | 550000/1028298 [00:02<00:02, 195692.15 examples/s]Filter:  55%|█████▌    | 570000/1028298 [00:03<00:02, 195837.37 examples/s]Filter:  57%|█████▋    | 590000/1028298 [00:03<00:02, 195995.36 examples/s]Filter:  59%|█████▉    | 610000/1028298 [00:03<00:02, 196197.47 examples/s]Filter:  61%|██████▏   | 630000/1028298 [00:03<00:02, 196482.27 examples/s]Filter:  63%|██████▎   | 650000/1028298 [00:03<00:01, 197052.86 examples/s]Filter:  65%|██████▌   | 670000/1028298 [00:03<00:01, 197004.20 examples/s]Filter:  67%|██████▋   | 690000/1028298 [00:03<00:01, 197182.50 examples/s]Filter:  70%|██████▉   | 719000/1028298 [00:03<00:02, 142388.45 examples/s]Filter:  72%|███████▏  | 739000/1028298 [00:04<00:01, 153944.13 examples/s]Filter:  74%|███████▍  | 759000/1028298 [00:04<00:01, 163819.48 examples/s]Filter:  76%|███████▌  | 779000/1028298 [00:04<00:01, 172052.38 examples/s]Filter:  78%|███████▊  | 799000/1028298 [00:04<00:01, 178632.68 examples/s]Filter:  80%|███████▉  | 819000/1028298 [00:04<00:01, 183536.98 examples/s]Filter:  82%|████████▏ | 839000/1028298 [00:04<00:01, 187030.02 examples/s]Filter:  84%|████████▎ | 859000/1028298 [00:04<00:00, 189742.14 examples/s]Filter:  85%|████████▌ | 879000/1028298 [00:04<00:00, 192014.35 examples/s]Filter:  87%|████████▋ | 899000/1028298 [00:04<00:00, 191439.97 examples/s]Filter:  89%|████████▉ | 919000/1028298 [00:04<00:00, 192740.84 examples/s]Filter:  91%|█████████▏| 939000/1028298 [00:05<00:00, 193800.60 examples/s]Filter:  93%|█████████▎| 959000/1028298 [00:05<00:00, 194033.27 examples/s]Filter:  95%|█████████▌| 979000/1028298 [00:05<00:00, 194784.93 examples/s]Filter:  97%|█████████▋| 999000/1028298 [00:05<00:00, 195476.99 examples/s]Filter:  99%|█████████▉| 1022000/1028298 [00:05<00:00, 144529.80 examples/s]Filter: 100%|██████████| 1028298/1028298 [00:05<00:00, 181532.05 examples/s]
+general typed decisions: 500,000
+  epoch 1 step 200/15563  ce 1.3947  rl -0.1203  escalate 0.5871  7.0 min
+  epoch 1 step 400/15563  ce 1.1874  rl -0.1210  escalate 0.7858  8.9 min
+  epoch 1 step 600/15563  ce 1.2815  rl -0.0906  escalate 0.6431  10.8 min
+  epoch 1 step 800/15563  ce 1.2812  rl -0.0917  escalate 0.5859  12.6 min
+  epoch 1 step 1000/15563  ce 0.8724  rl -0.0496  escalate 0.5993  14.5 min
+  epoch 1 step 1200/15563  ce 1.1632  rl -0.1287  escalate 0.6481  16.3 min
+  epoch 1 step 1400/15563  ce 1.6295  rl -0.0632  escalate 0.5969  18.1 min
+  epoch 1 step 1600/15563  ce 1.3169  rl -0.0515  escalate 0.6253  20.0 min
+  epoch 1 step 1800/15563  ce 1.2196  rl -0.1770  escalate 0.6851  21.8 min
+  epoch 1 step 2000/15563  ce 1.1212  rl -0.1566  escalate 0.6187  23.6 min
+  epoch 1 step 2200/15563  ce 1.3464  rl -0.0733  escalate 0.6531  25.4 min
+  epoch 1 step 2400/15563  ce 1.3613  rl -0.0130  escalate 0.6739  27.2 min
+  epoch 1 step 2600/15563  ce 1.1184  rl -0.2233  escalate 0.7014  29.1 min
+  epoch 1 step 2800/15563  ce 1.2816  rl -0.0778  escalate 0.6514  30.9 min
+  epoch 1 step 3000/15563  ce 1.3084  rl -0.0631  escalate 0.6894  32.9 min
+  epoch 1 step 3200/15563  ce 1.2374  rl -0.0842  escalate 0.5832  34.7 min
+  epoch 1 step 3400/15563  ce 1.1834  rl -0.0761  escalate 0.6197  36.6 min
+  epoch 1 step 3600/15563  ce 1.0360  rl -0.0163  escalate 0.6782  38.4 min
+  epoch 1 step 3800/15563  ce 1.5173  rl -0.1895  escalate 0.5626  40.2 min
+  epoch 1 step 4000/15563  ce 1.2172  rl -0.1288  escalate 0.6500  42.1 min
+  epoch 1 step 4200/15563  ce 1.1769  rl -0.1499  escalate 0.6023  44.0 min
+  epoch 1 step 4400/15563  ce 1.1489  rl -0.0549  escalate 0.6533  45.8 min
+  epoch 1 step 4600/15563  ce 1.2973  rl -0.1015  escalate 0.6269  47.6 min
+  epoch 1 step 4800/15563  ce 1.3460  rl -0.0971  escalate 0.6395  49.5 min
+  epoch 1 step 5000/15563  ce 1.2044  rl 0.0755  escalate 0.5732  51.3 min
+  epoch 1 step 5200/15563  ce 1.2254  rl -0.0393  escalate 0.6929  53.2 min
+  epoch 1 step 5400/15563  ce 1.2708  rl -0.0027  escalate 0.7150  55.1 min
+  epoch 1 step 5600/15563  ce 1.1996  rl -0.0855  escalate 0.6553  56.9 min
+  epoch 1 step 5800/15563  ce 1.4448  rl -0.1102  escalate 0.6055  58.8 min
+  epoch 1 step 6000/15563  ce 1.2716  rl -0.1555  escalate 0.7220  60.6 min
+  epoch 1 step 6200/15563  ce 1.3456  rl 0.0334  escalate 0.6211  62.4 min
+  epoch 1 step 6400/15563  ce 1.4041  rl -0.0077  escalate 0.6396  64.2 min
+  epoch 1 step 6600/15563  ce 1.3026  rl -0.1266  escalate 0.6877  66.0 min
+  epoch 1 step 6800/15563  ce 1.2832  rl -0.0687  escalate 0.6228  67.9 min
+  epoch 1 step 7000/15563  ce 1.1609  rl -0.1625  escalate 0.6556  69.7 min
+  epoch 1 step 7200/15563  ce 1.3840  rl -0.1090  escalate 0.6011  71.6 min
+  epoch 1 step 7400/15563  ce 1.1856  rl -0.0634  escalate 0.6307  73.4 min
+  epoch 1 step 7600/15563  ce 1.1615  rl -0.1101  escalate 0.6112  75.3 min
+  epoch 1 step 7800/15563  ce 1.0577  rl -0.1724  escalate 0.6793  77.1 min
+  epoch 1 step 8000/15563  ce 1.1295  rl -0.0709  escalate 0.6177  79.0 min
+  epoch 1 step 8200/15563  ce 1.1101  rl -0.1406  escalate 0.6526  80.8 min
+  epoch 1 step 8400/15563  ce 1.2358  rl -0.0033  escalate 0.6488  82.7 min
+  epoch 1 step 8600/15563  ce 0.9664  rl -0.0490  escalate 0.6192  84.5 min
+  epoch 1 step 8800/15563  ce 1.2453  rl -0.0032  escalate 0.6351  86.3 min
+  epoch 1 step 9000/15563  ce 1.1933  rl -0.1730  escalate 0.6163  88.2 min
+  epoch 1 step 9200/15563  ce 1.2528  rl -0.0515  escalate 0.6397  90.1 min
+  epoch 1 step 9400/15563  ce 1.2755  rl -0.1272  escalate 0.6594  91.9 min
+  epoch 1 step 9600/15563  ce 1.3693  rl -0.0831  escalate 0.5218  93.8 min
+  epoch 1 step 9800/15563  ce 1.1976  rl 0.0515  escalate 0.6054  95.6 min
+  epoch 1 step 10000/15563  ce 1.0794  rl -0.0006  escalate 0.6395  97.5 min
+  epoch 1 step 10200/15563  ce 1.1259  rl -0.0248  escalate 0.6636  99.3 min
+  epoch 1 step 10400/15563  ce 1.3137  rl -0.0047  escalate 0.5653  101.2 min
+  epoch 1 step 10600/15563  ce 1.0140  rl -0.1295  escalate 0.6619  103.1 min
+  epoch 1 step 10800/15563  ce 1.1160  rl -0.1195  escalate 0.6582  105.0 min
+  epoch 1 step 11000/15563  ce 1.3017  rl -0.0037  escalate 0.5872  106.8 min
+  epoch 1 step 11200/15563  ce 1.0549  rl -0.1753  escalate 0.7054  108.7 min
+  epoch 1 step 11400/15563  ce 1.1072  rl -0.1503  escalate 0.6790  110.5 min
+  epoch 1 step 11600/15563  ce 1.1253  rl -0.0707  escalate 0.4941  112.4 min
+  epoch 1 step 11800/15563  ce 1.3807  rl -0.0716  escalate 0.6458  114.2 min
+  epoch 1 step 12000/15563  ce 1.0362  rl 0.0499  escalate 0.6220  116.0 min
+  epoch 1 step 12200/15563  ce 1.0615  rl -0.2455  escalate 0.7268  117.9 min
+  epoch 1 step 12400/15563  ce 1.3345  rl -0.1966  escalate 0.5936  119.8 min
+  epoch 1 step 12600/15563  ce 1.3931  rl -0.1465  escalate 0.5799  121.7 min
+  epoch 1 step 12800/15563  ce 1.1130  rl -0.0201  escalate 0.6089  123.6 min
+  epoch 1 step 13000/15563  ce 1.2619  rl -0.0027  escalate 0.6838  125.4 min
+  epoch 1 step 13200/15563  ce 1.1063  rl -0.0429  escalate 0.6241  127.2 min
+  epoch 1 step 13400/15563  ce 1.2327  rl -0.0672  escalate 0.6261  129.0 min
+zero-shot: accuracy 0.291  KL 0.470  Brier 0.250  ECE 0.073  escalate AUROC 0.456
+  epoch 2 step 200/845  ce 1.1854  rl -0.1067  escalate 0.6781  2.0 min
+  epoch 3 step 400/845  ce 1.0322  rl -0.1255  escalate 0.6927  3.9 min
+  epoch 4 step 600/845  ce 0.9939  rl -0.1034  escalate 0.7368  5.8 min
+  epoch 5 step 800/845  ce 0.8659  rl -0.0527  escalate 0.5267  7.7 min
+fitted at 1_pass: accuracy 0.575  KL 0.270
+fitted at 2_passes: accuracy 0.574  KL 0.269
+fitted at 3_passes: accuracy 0.575  KL 0.269
+  adaptive tau 0.00: accuracy 0.575 at 1.00 passes on average
+  adaptive tau 0.30: accuracy 0.575 at 1.00 passes on average
+  adaptive tau 0.40: accuracy 0.575 at 1.00 passes on average
+  adaptive tau 0.50: accuracy 0.576 at 1.15 passes on average
+  adaptive tau 0.60: accuracy 0.576 at 1.66 passes on average
+  adaptive tau 0.70: accuracy 0.575 at 1.98 passes on average
+  adaptive tau 0.80: accuracy 0.575 at 2.34 passes on average
+  adaptive tau 0.90: accuracy 0.575 at 2.82 passes on average
+  adaptive tau 1.01: accuracy 0.575 at 3.00 passes on average
+fitted: accuracy 0.575  KL 0.269  Brier 0.151  ECE 0.093  escalate AUROC 0.636  | by type: choice 0.535  noul 0.692  score 0.517
++ python3 scripts/sys1_train.py --gts /root/ck/gts3_float.pt --general 500000 --fit-epochs 5 --batch-size 32 --max-len 512 --lr 1e-4 --ternary-lr 3e-4 --out /workspace/out/sys1_gts3.json --save /workspace/out/models/sys1_gts3.pt
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+general typed decisions: 500,000
+  epoch 1 step 200/15563  ce 1.3556  rl -0.1172  escalate 0.6568  5.7 min
+  epoch 1 step 400/15563  ce 1.1903  rl -0.1197  escalate 0.7138  6.5 min
+  epoch 1 step 600/15563  ce 1.1652  rl -0.1130  escalate 0.6151  7.3 min
+  epoch 1 step 800/15563  ce 1.3903  rl -0.1056  escalate 0.6609  8.1 min
+  epoch 1 step 1000/15563  ce 0.8595  rl -0.0568  escalate 0.6980  8.9 min
+  epoch 1 step 1200/15563  ce 1.1602  rl -0.1332  escalate 0.6584  9.7 min
+  epoch 1 step 1400/15563  ce 1.6520  rl -0.0657  escalate 0.6239  10.5 min
+  epoch 1 step 1600/15563  ce 1.2446  rl -0.0565  escalate 0.6702  11.3 min
+  epoch 1 step 1800/15563  ce 1.2540  rl -0.1828  escalate 0.6801  12.1 min
+  epoch 1 step 2000/15563  ce 1.0871  rl -0.1478  escalate 0.6816  12.9 min
+  epoch 1 step 2200/15563  ce 1.3859  rl -0.0703  escalate 0.6232  13.7 min
+  epoch 1 step 2400/15563  ce 1.3664  rl -0.0144  escalate 0.6076  14.5 min
+  epoch 1 step 2600/15563  ce 1.1089  rl -0.2042  escalate 0.6585  15.3 min
+  epoch 1 step 2800/15563  ce 1.2971  rl -0.0778  escalate 0.6086  16.1 min
+  epoch 1 step 3000/15563  ce 1.3043  rl -0.0716  escalate 0.6251  16.9 min
+  epoch 1 step 3200/15563  ce 1.2413  rl -0.0791  escalate 0.6193  17.7 min
+  epoch 1 step 3400/15563  ce 1.1964  rl -0.0874  escalate 0.6510  18.5 min
+  epoch 1 step 3600/15563  ce 1.0610  rl -0.0012  escalate 0.7468  19.3 min
+  epoch 1 step 3800/15563  ce 1.4742  rl -0.2027  escalate 0.5924  20.1 min
+  epoch 1 step 4000/15563  ce 1.2151  rl -0.1210  escalate 0.7203  20.9 min
+  epoch 1 step 4200/15563  ce 1.1951  rl -0.1691  escalate 0.6026  21.7 min
+  epoch 1 step 4400/15563  ce 1.1494  rl -0.0542  escalate 0.7221  22.5 min
+  epoch 1 step 4600/15563  ce 1.3017  rl -0.0940  escalate 0.6800  23.3 min
+  epoch 1 step 4800/15563  ce 1.3018  rl -0.1076  escalate 0.7126  24.1 min
+  epoch 1 step 5000/15563  ce 1.2131  rl 0.0805  escalate 0.6447  24.9 min
+  epoch 1 step 5200/15563  ce 1.1914  rl -0.0539  escalate 0.6734  25.7 min
+  epoch 1 step 5400/15563  ce 1.3043  rl -0.0040  escalate 0.7348  26.5 min
+  epoch 1 step 5600/15563  ce 1.2320  rl -0.0826  escalate 0.6412  27.3 min
+  epoch 1 step 5800/15563  ce 1.4715  rl -0.1127  escalate 0.6691  28.1 min
+  epoch 1 step 6000/15563  ce 1.2685  rl -0.1661  escalate 0.6848  28.9 min
+  epoch 1 step 6200/15563  ce 1.3039  rl 0.0363  escalate 0.6633  29.7 min
+  epoch 1 step 6400/15563  ce 1.3713  rl -0.0054  escalate 0.6067  30.5 min
+  epoch 1 step 6600/15563  ce 1.2909  rl -0.1168  escalate 0.7123  31.3 min
+  epoch 1 step 6800/15563  ce 1.2322  rl -0.0530  escalate 0.6795  32.1 min
+  epoch 1 step 7000/15563  ce 1.2776  rl -0.1600  escalate 0.6786  32.9 min
+  epoch 1 step 7200/15563  ce 1.3290  rl -0.1057  escalate 0.5742  33.7 min
+  epoch 1 step 7400/15563  ce 1.2757  rl -0.0476  escalate 0.7188  34.5 min
+  epoch 1 step 7600/15563  ce 1.2126  rl -0.0968  escalate 0.6545  35.3 min
+  epoch 1 step 7800/15563  ce 1.1116  rl -0.1788  escalate 0.6491  36.1 min
+  epoch 1 step 8000/15563  ce 1.1243  rl -0.0620  escalate 0.5609  36.9 min
+  epoch 1 step 8200/15563  ce 1.1676  rl -0.1377  escalate 0.6767  37.7 min
+  epoch 1 step 8400/15563  ce 1.1909  rl -0.0088  escalate 0.6726  38.5 min
+  epoch 1 step 8600/15563  ce 0.9544  rl -0.0436  escalate 0.6025  39.3 min
+  epoch 1 step 8800/15563  ce 1.2737  rl 0.0009  escalate 0.5621  40.1 min
+  epoch 1 step 9000/15563  ce 1.2683  rl -0.1734  escalate 0.6772  40.9 min
+  epoch 1 step 9200/15563  ce 1.2715  rl -0.0521  escalate 0.5440  41.7 min
+  epoch 1 step 9400/15563  ce 1.2597  rl -0.1293  escalate 0.6436  42.5 min
+  epoch 1 step 9600/15563  ce 1.4090  rl -0.0841  escalate 0.4637  43.3 min
+  epoch 1 step 9800/15563  ce 1.2048  rl 0.0677  escalate 0.6139  44.1 min
+  epoch 1 step 10000/15563  ce 1.0753  rl 0.0023  escalate 0.6383  44.9 min
+  epoch 1 step 10200/15563  ce 1.1219  rl -0.0148  escalate 0.6948  45.7 min
+  epoch 1 step 10400/15563  ce 1.3358  rl -0.0013  escalate 0.6686  46.4 min
+  epoch 1 step 10600/15563  ce 1.0409  rl -0.1336  escalate 0.6730  47.2 min
+  epoch 1 step 10800/15563  ce 1.1043  rl -0.1225  escalate 0.6401  48.0 min
+  epoch 1 step 11000/15563  ce 1.2587  rl -0.0074  escalate 0.5887  48.8 min
+  epoch 1 step 11200/15563  ce 1.0975  rl -0.1714  escalate 0.6419  49.6 min
+  epoch 1 step 11400/15563  ce 1.1884  rl -0.1624  escalate 0.7214  50.4 min
+  epoch 1 step 11600/15563  ce 1.1807  rl -0.0657  escalate 0.5860  51.2 min
+  epoch 1 step 11800/15563  ce 1.3319  rl -0.0790  escalate 0.7104  52.0 min
+  epoch 1 step 12000/15563  ce 1.0617  rl 0.0268  escalate 0.6518  52.8 min
+  epoch 1 step 12200/15563  ce 1.0386  rl -0.2449  escalate 0.6763  53.6 min
+  epoch 1 step 12400/15563  ce 1.2771  rl -0.1898  escalate 0.5930  54.4 min
+  epoch 1 step 12600/15563  ce 1.4624  rl -0.1503  escalate 0.5755  55.2 min
+  epoch 1 step 12800/15563  ce 1.2568  rl -0.0228  escalate 0.6217  56.0 min
+  epoch 1 step 13000/15563  ce 1.2856  rl -0.0065  escalate 0.5829  56.8 min
+  epoch 1 step 13200/15563  ce 1.0664  rl -0.0452  escalate 0.5657  57.6 min
+  epoch 1 step 13400/15563  ce 1.3826  rl -0.0605  escalate 0.6712  58.4 min
+zero-shot: accuracy 0.344  KL 0.449  Brier 0.237  ECE 0.052  escalate AUROC 0.500
+  epoch 2 step 200/845  ce 1.1847  rl -0.1054  escalate 0.6986  0.9 min
+  epoch 3 step 400/845  ce 1.0691  rl -0.1192  escalate 0.7125  1.8 min
+  epoch 4 step 600/845  ce 1.0187  rl -0.1086  escalate 0.7116  2.6 min
+  epoch 5 step 800/845  ce 0.8725  rl -0.0422  escalate 0.5360  3.5 min
+fitted at 1_pass: accuracy 0.578  KL 0.256
+fitted: accuracy 0.578  KL 0.256  Brier 0.143  ECE 0.076  escalate AUROC 0.655  | by type: choice 0.535  noul 0.702  score 0.516
++ python3 scripts/sys1_train.py --hf answerdotai/ModernBERT-base --general 500000 --fit-epochs 5 --batch-size 32 --max-len 512 --lr 5e-5 --out /workspace/out/sys1_modernbert_base.json --save /workspace/out/models/sys1_modernbert_base.pt
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/134 [00:00<?, ?it/s]Loading weights: 100%|██████████| 134/134 [00:00<00:00, 9756.06it/s]
+[transformers] [1mModernBertModel LOAD REPORT[0m from: answerdotai/ModernBERT-base
+Key               | Status     |  | 
+------------------+------------+--+-
+head.dense.weight | UNEXPECTED |  | 
+head.norm.weight  | UNEXPECTED |  | 
+decoder.bias      | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+general typed decisions: 500,000
+[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (10428 > 8192). Running this sequence through the model will result in indexing errors
+  epoch 1 step 200/15563  ce 1.4390  rl -0.0785  escalate 0.6094  7.6 min
+  epoch 1 step 400/15563  ce 1.1935  rl -0.0914  escalate 0.6854  8.4 min
+  epoch 1 step 600/15563  ce 1.1156  rl -0.0615  escalate 0.6952  9.2 min
+  epoch 1 step 800/15563  ce 1.2499  rl 0.0049  escalate 0.6500  9.9 min
+  epoch 1 step 1000/15563  ce 0.7604  rl -0.0444  escalate 0.7314  10.7 min
+  epoch 1 step 1200/15563  ce 0.9746  rl -0.0032  escalate 0.7054  11.5 min
+  epoch 1 step 1400/15563  ce 1.4734  rl -0.1334  escalate 0.6773  12.3 min
+  epoch 1 step 1600/15563  ce 1.2542  rl -0.0997  escalate 0.6706  13.1 min
+  epoch 1 step 1800/15563  ce 1.1321  rl 0.0297  escalate 0.6463  13.9 min
+  epoch 1 step 2000/15563  ce 1.0896  rl -0.1157  escalate 0.7280  14.6 min
+  epoch 1 step 2200/15563  ce 1.0764  rl -0.0824  escalate 0.6245  15.4 min
+  epoch 1 step 2400/15563  ce 1.3686  rl -0.1046  escalate 0.7490  16.2 min
+  epoch 1 step 2600/15563  ce 0.8950  rl -0.1075  escalate 0.6188  17.0 min
+  epoch 1 step 2800/15563  ce 1.0571  rl -0.0320  escalate 0.5910  17.8 min
+  epoch 1 step 3000/15563  ce 1.1503  rl -0.0114  escalate 0.6724  18.6 min
+  epoch 1 step 3200/15563  ce 1.0986  rl -0.0650  escalate 0.6648  19.3 min
+  epoch 1 step 3400/15563  ce 0.9826  rl -0.0406  escalate 0.6097  20.1 min
+  epoch 1 step 3600/15563  ce 0.9061  rl -0.0502  escalate 0.6103  20.9 min
+  epoch 1 step 3800/15563  ce 1.2623  rl -0.1965  escalate 0.6455  21.7 min
+  epoch 1 step 4000/15563  ce 1.2036  rl -0.0668  escalate 0.5577  22.5 min
+  epoch 1 step 4200/15563  ce 0.8734  rl -0.1088  escalate 0.5074  23.3 min
+  epoch 1 step 4400/15563  ce 1.0928  rl -0.1569  escalate 0.6158  24.0 min
+  epoch 1 step 4600/15563  ce 1.0233  rl -0.0082  escalate 0.6480  24.8 min
+  epoch 1 step 4800/15563  ce 1.1452  rl -0.1624  escalate 0.6164  25.6 min
+  epoch 1 step 5000/15563  ce 1.0170  rl -0.1841  escalate 0.6779  26.4 min
+  epoch 1 step 5200/15563  ce 0.8223  rl -0.1028  escalate 0.5864  27.2 min
+  epoch 1 step 5400/15563  ce 1.2749  rl 0.0259  escalate 0.6838  28.0 min
+  epoch 1 step 5600/15563  ce 0.9221  rl -0.0093  escalate 0.5803  28.7 min
+  epoch 1 step 5800/15563  ce 1.2632  rl -0.0650  escalate 0.5740  29.5 min
+  epoch 1 step 6000/15563  ce 1.1855  rl -0.0510  escalate 0.6998  30.3 min
+  epoch 1 step 6200/15563  ce 0.8554  rl -0.1038  escalate 0.5625  31.1 min
+  epoch 1 step 6400/15563  ce 1.1186  rl -0.0929  escalate 0.5963  31.9 min
+  epoch 1 step 6600/15563  ce 1.0308  rl -0.1551  escalate 0.6264  32.7 min
+  epoch 1 step 6800/15563  ce 1.0075  rl -0.0337  escalate 0.5930  33.4 min
+  epoch 1 step 7000/15563  ce 0.7788  rl -0.0464  escalate 0.5455  34.2 min
+  epoch 1 step 7200/15563  ce 1.1179  rl -0.1184  escalate 0.5869  35.0 min
+  epoch 1 step 7400/15563  ce 1.1007  rl -0.1134  escalate 0.6011  35.8 min
+  epoch 1 step 7600/15563  ce 0.6733  rl -0.0549  escalate 0.4868  36.6 min
+  epoch 1 step 7800/15563  ce 0.9505  rl -0.1038  escalate 0.6077  37.4 min
+  epoch 1 step 8000/15563  ce 0.8486  rl -0.0900  escalate 0.5512  38.1 min
+  epoch 1 step 8200/15563  ce 0.7461  rl -0.0252  escalate 0.6278  38.9 min
+  epoch 1 step 8400/15563  ce 1.0046  rl -0.0884  escalate 0.6655  39.7 min
+  epoch 1 step 8600/15563  ce 0.7566  rl -0.0071  escalate 0.5502  40.5 min
+  epoch 1 step 8800/15563  ce 1.0040  rl -0.0196  escalate 0.6342  41.3 min
+  epoch 1 step 9000/15563  ce 0.7905  rl -0.0097  escalate 0.6382  42.1 min
+  epoch 1 step 9200/15563  ce 0.8615  rl -0.0193  escalate 0.4277  42.8 min
+  epoch 1 step 9400/15563  ce 0.9788  rl -0.1323  escalate 0.7246  43.6 min
+  epoch 1 step 9600/15563  ce 1.0323  rl 0.0028  escalate 0.4248  44.4 min
+  epoch 1 step 9800/15563  ce 0.9203  rl -0.0293  escalate 0.5287  45.2 min
+  epoch 1 step 10000/15563  ce 0.8615  rl -0.0475  escalate 0.5216  46.0 min
+  epoch 1 step 10200/15563  ce 0.7191  rl -0.0976  escalate 0.5334  46.7 min
+  epoch 1 step 10400/15563  ce 0.7565  rl -0.1171  escalate 0.4338  47.5 min
+  epoch 1 step 10600/15563  ce 0.5985  rl -0.1932  escalate 0.5314  48.3 min
+  epoch 1 step 10800/15563  ce 0.8165  rl -0.2453  escalate 0.5201  49.1 min
+  epoch 1 step 11000/15563  ce 0.8675  rl -0.0688  escalate 0.5223  49.9 min
+  epoch 1 step 11200/15563  ce 0.8747  rl -0.0718  escalate 0.6238  50.7 min
+  epoch 1 step 11400/15563  ce 0.8242  rl -0.1119  escalate 0.5083  51.4 min
+  epoch 1 step 11600/15563  ce 0.8074  rl -0.0877  escalate 0.5076  52.2 min
+  epoch 1 step 11800/15563  ce 0.9467  rl 0.1267  escalate 0.5844  53.0 min
+  epoch 1 step 12000/15563  ce 0.9099  rl -0.0577  escalate 0.6864  53.8 min
+  epoch 1 step 12200/15563  ce 0.8690  rl -0.1524  escalate 0.6963  54.6 min
+  epoch 1 step 12400/15563  ce 0.8856  rl -0.1153  escalate 0.5823  55.4 min
+  epoch 1 step 12600/15563  ce 1.0777  rl -0.0687  escalate 0.5691  56.1 min
+  epoch 1 step 12800/15563  ce 0.8827  rl -0.0138  escalate 0.4849  56.9 min
+  epoch 1 step 13000/15563  ce 0.7986  rl -0.0135  escalate 0.4512  57.7 min
+  epoch 1 step 13200/15563  ce 0.5385  rl 0.0056  escalate 0.3937  58.5 min
+  epoch 1 step 13400/15563  ce 1.0667  rl -0.0516  escalate 0.6406  59.3 min
+zero-shot: accuracy 0.393  KL 0.550  Brier 0.291  ECE 0.152  escalate AUROC 0.581
+  epoch 2 step 200/845  ce 0.8758  rl -0.1109  escalate 0.4266  0.9 min
+  epoch 3 step 400/845  ce 0.8965  rl -0.0337  escalate 0.5846  1.7 min
+  epoch 4 step 600/845  ce 0.7888  rl -0.0570  escalate 0.3445  2.5 min
+  epoch 5 step 800/845  ce 0.7111  rl -0.0811  escalate 0.0681  3.4 min
+fitted at 1_pass: accuracy 0.777  KL 0.094
+fitted: accuracy 0.777  KL 0.094  Brier 0.051  ECE 0.168  escalate AUROC 0.759  | by type: choice 0.747  noul 0.850  score 0.746
+++ date -u +%T
++ echo '=== DECIDE DONE 14:43:16 ==='
+=== DECIDE DONE 14:43:16 ===
+=== ALL DONE 14:43:16 ===
