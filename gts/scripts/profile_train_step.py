@@ -26,11 +26,13 @@ def build(blob, variant):
         if isinstance(mod, GTSMixed):
             if variant == "no deep trees":
                 mod.forward = types.MethodType(lambda self, u, attention_mask=None: self.bank(u, attention_mask=attention_mask), mod)
-            elif variant in ("deep trees, no side-branch (route_ste) gradient", "sparse deep trees, path-only gradient"):
+            elif variant == "deep trees, no side-branch (route_ste) gradient" or variant.startswith("sparse"):
                 mod.deep.route_ste = False
     if variant.startswith("sparse"):
+        import mamba_ssm.ops.gts_sparse as ops
         from mamba_ssm.modules.gts_sparse import sparsify
 
+        ops.SPLIT_KERNELS = "fused" not in variant
         sparsify(m)
     m = m.cuda().train()
     for i in range(len(m.backbone.layers)):
@@ -92,9 +94,10 @@ def main():
     n = a.batch * a.seq
     print(f"{torch.cuda.get_device_name(0)}: training step of the 110M masked LM, {a.batch} x {a.seq} tokens", flush=True)
     base = None
-    for variant in ("as trained", "deep trees, no side-branch (route_ste) gradient", "sparse deep trees, path-only gradient"):
+    for variant in ("as trained", "deep trees, no side-branch (route_ste) gradient", "sparse, path-only gradient, fused kernels",
+                    "sparse, path-only gradient, split kernels"):
         m = build(blob, variant)
-        ms = run(m, a.batch, a.seq, a.steps, prof=variant in ("as trained", "sparse deep trees, path-only gradient"))
+        ms = run(m, a.batch, a.seq, a.steps, prof=variant.startswith("sparse"))
         base = base or ms
         print(f"{variant:52s} {ms:7.1f} ms/step  {n / ms * 1e3:>9,.0f} tokens/s  ({ms / base:.2f} of the step as trained)", flush=True)
         del m

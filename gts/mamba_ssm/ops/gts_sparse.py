@@ -15,6 +15,8 @@ The node weights (4 x 1,023 x 768 x 2 bf16 = 12.6 MB for the 110M model) stay in
 FLOPs. The function is the dense path's: same nodes (the logit is rounded to the input dtype before the branch,
 as the dense bf16 GEMM rounds it), same output up to summation order. Forward only for now; see ``SparseRoute``.
 """
+import os
+
 import torch
 
 try:
@@ -143,6 +145,95 @@ if HAVE_TRITON:
             tl.store(OUT + tok[:, None] * s_o + (c + cols)[None, :], out, mask=ok[:, None] & cm[None, :])
 
 
+# ------------------------------------------------------------------------------ split kernels (trees in parallel)
+# The fused kernels above walk all trees of a token block in one program, a chain of trees x levels dependent loads.
+# These split the work: the walk and the path gradients with one program per (token block, tree), and the gathers
+# (output, input gradient) with one program per (token block, column chunk).
+SPLIT_KERNELS = os.environ.get("GTS_SPARSE_SPLIT", "1") == "1"  # GTS_SPARSE_SPLIT=0: the fused kernels
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _walk_tree(X, WI, BIAS, NODES, LOGITS, n_tok, d, s_x, N_TREES: tl.constexpr, N_NODES: tl.constexpr,
+                   DEPTH: tl.constexpr, HAS_BIAS: tl.constexpr, ROUND_BF16: tl.constexpr, BM: tl.constexpr, BD: tl.constexpr):
+        tok = tl.program_id(0) * BM + tl.arange(0, BM)
+        t = tl.program_id(1)
+        ok = tok < n_tok
+        cols = tl.arange(0, BD)
+        P: tl.constexpr = N_TREES * (DEPTH + 1)
+        cur = tl.zeros((BM,), dtype=tl.int32)
+        for k in range(DEPTH + 1):
+            node = t * N_NODES + cur
+            acc = tl.zeros((BM,), dtype=tl.float32)
+            for c in range(0, d, BD):
+                cm = (c + cols) < d
+                xv = tl.load(X + tok[:, None] * s_x + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+                wv = tl.load(WI + node[:, None] * d + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+                acc += tl.sum(xv.to(tl.float32) * wv.to(tl.float32), axis=1)
+            if HAS_BIAS:
+                acc += tl.load(BIAS + node, mask=ok, other=0.0).to(tl.float32)
+            if ROUND_BF16:
+                acc = acc.to(tl.bfloat16).to(tl.float32)
+            tl.store(NODES + tok * P + t * (DEPTH + 1) + k, node, mask=ok)
+            tl.store(LOGITS + tok * P + t * (DEPTH + 1) + k, acc, mask=ok)
+            cur = 2 * cur + 1 + (acc > 0).to(tl.int32)
+
+    @triton.jit
+    def _gather_rows(NODES, VALS, W, OUT, n_tok, d, s_o, P: tl.constexpr, COEF: tl.constexpr, ACT: tl.constexpr,
+                     BM: tl.constexpr, BD: tl.constexpr):
+        """OUT[n, cols] = sum over j of v(n, j) * W[node(n, j), cols], v = coef(VALS) if COEF else VALS."""
+        tok = tl.program_id(0) * BM + tl.arange(0, BM)
+        ok = tok < n_tok
+        cols = tl.program_id(1) * BD + tl.arange(0, BD)
+        cm = cols < d
+        acc = tl.zeros((BM, BD), dtype=tl.float32)
+        for j in range(P):
+            node = tl.load(NODES + tok * P + j, mask=ok, other=0)
+            v = tl.load(VALS + tok * P + j, mask=ok, other=0.0)
+            if COEF:
+                v = _coef(v, ACT)
+            wv = tl.load(W + node[:, None] * d + cols[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+            acc += v[:, None] * wv.to(tl.float32)
+        tl.store(OUT + tok[:, None] * s_o + cols[None, :], acc, mask=ok[:, None] & cm[None, :])
+
+    @triton.jit
+    def _path_grad_tree(DOUT, WO, NODES, LOGITS, DL, n_tok, d, s_do, N_TREES: tl.constexpr, DEPTH: tl.constexpr,
+                        ACT: tl.constexpr, BM: tl.constexpr, BD: tl.constexpr):
+        tok = tl.program_id(0) * BM + tl.arange(0, BM)
+        t = tl.program_id(1)
+        ok = tok < n_tok
+        cols = tl.arange(0, BD)
+        P: tl.constexpr = N_TREES * (DEPTH + 1)
+        for k in range(DEPTH + 1):
+            j = t * (DEPTH + 1) + k
+            node = tl.load(NODES + tok * P + j, mask=ok, other=0)
+            g = tl.zeros((BM,), dtype=tl.float32)
+            for c in range(0, d, BD):
+                cm = (c + cols) < d
+                dv = tl.load(DOUT + tok[:, None] * s_do + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+                wv = tl.load(WO + node[:, None] * d + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+                g += tl.sum(dv.to(tl.float32) * wv.to(tl.float32), axis=1)
+            lg = tl.load(LOGITS + tok * P + j, mask=ok, other=0.0)
+            tl.store(DL + tok * P + j, _dcoef(lg, ACT) * g, mask=ok)
+
+
+def _split_fwd(x, w_in, bias, w_out, n_trees, n_nodes, depth, code, block_m, block_d, num_warps):
+    n_tok, d = x.shape
+    P = n_trees * (depth + 1)
+    nodes = torch.empty(n_tok, n_trees, depth + 1, device=x.device, dtype=torch.int32)
+    logits = torch.empty(n_tok, n_trees, depth + 1, device=x.device, dtype=torch.float32)
+    out = torch.empty(n_tok, d, device=x.device, dtype=torch.float32)
+    b = bias.contiguous() if bias is not None else out
+    _walk_tree[(triton.cdiv(n_tok, block_m), n_trees)](x, w_in, b, nodes, logits, n_tok, d, x.stride(0), N_TREES=n_trees,
+                                                       N_NODES=n_nodes, DEPTH=depth, HAS_BIAS=bias is not None,
+                                                       ROUND_BF16=x.dtype == torch.bfloat16, BM=block_m, BD=block_d,
+                                                       num_warps=num_warps)
+    _gather_rows[(triton.cdiv(n_tok, block_m), triton.cdiv(d, block_d))](nodes, logits, w_out, out, n_tok, d, out.stride(0),
+                                                                          P=P, COEF=True, ACT=code, BM=block_m, BD=block_d,
+                                                                          num_warps=num_warps)
+    return out, nodes, logits
+
+
 def top_rows(n_trees, n_nodes, top, device):
     """Global row ids of every tree's first ``top`` levels, tree-major (the column order of LT and AT)."""
     nt = 2 ** top - 1
@@ -170,8 +261,10 @@ def sparse_route_fwd(x, w_in, bias, w_out, n_trees, n_nodes, depth, act="gelu", 
         logits = torch.empty(n_tok, n_trees, depth + 1, device=x.device, dtype=torch.float32)
     else:
         nodes, logits = buffers
-    b = bias.contiguous() if bias is not None else out
     top = min(top, depth + 1)
+    if SPLIT_KERNELS and not top and phases == 3 and not x_resident and buffers is None:
+        return _split_fwd(x, w_in, bias, w_out, n_trees, n_nodes, depth, code, block_m, block_d, num_warps)
+    b = bias.contiguous() if bias is not None else out
     if top:
         if top_weights is None:
             rows = top_rows(n_trees, n_nodes, top, x.device)
@@ -346,9 +439,16 @@ def _path_bwd_impl(dout, x, w_in, w_out, nodes, logits, act, rows, has_bias, kw,
     dout = dout.to(dt).contiguous()
     dl = torch.empty(n_tok, P, device=x.device, dtype=torch.float32)
     dx = torch.empty(n_tok, d, device=x.device, dtype=torch.float32)
-    bm = kw.get("block_m", 8)
-    _path_bwd[(triton.cdiv(n_tok, bm),)](dout, wi, wo, nodes, logits, dl, dx, n_tok, d, dout.stride(0), dx.stride(0),
-                                         P=P, ACT=code, BM=bm, BD=kw.get("block_d", 128), num_warps=kw.get("num_warps", 2))
+    bm, bd, nw = kw.get("block_m", 8), kw.get("block_d", 128), kw.get("num_warps", 2)
+    if SPLIT_KERNELS:
+        _path_grad_tree[(triton.cdiv(n_tok, bm), nodes.shape[1])](dout, wo, nodes, logits, dl, n_tok, d, dout.stride(0),
+                                                                  N_TREES=nodes.shape[1], DEPTH=nodes.shape[2] - 1, ACT=code,
+                                                                  BM=bm, BD=bd, num_warps=nw)
+        _gather_rows[(triton.cdiv(n_tok, bm), triton.cdiv(d, bd))](nodes, dl, wi, dx, n_tok, d, dx.stride(0), P=P,
+                                                                    COEF=False, ACT=code, BM=bm, BD=bd, num_warps=nw)
+    else:
+        _path_bwd[(triton.cdiv(n_tok, bm),)](dout, wi, wo, nodes, logits, dl, dx, n_tok, d, dout.stride(0), dx.stride(0),
+                                             P=P, ACT=code, BM=bm, BD=bd, num_warps=nw)
     dw_in = db = dw_out = None
     n_nodes = kw.get("n_nodes")
     if want_w_out:
