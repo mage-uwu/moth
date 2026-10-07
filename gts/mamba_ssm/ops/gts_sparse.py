@@ -23,7 +23,7 @@ try:
 except ImportError:  # pragma: no cover
     triton = None
 
-__all__ = ["sparse_route_fwd", "sparse_route_fwd_packed", "pack_rows", "HAVE_TRITON"]
+__all__ = ["sparse_route_fwd", "top_rows", "sparse_route_fwd_packed", "pack_rows", "HAVE_TRITON"]
 HAVE_TRITON = triton is not None
 
 if HAVE_TRITON:
@@ -36,10 +36,14 @@ if HAVE_TRITON:
         return x
 
     @triton.jit
-    def _sparse_fwd(X, WI, BIAS, WO, OUT, NODES, LOGITS, n_tok, d, s_x, s_o,
+    def _sparse_fwd(X, WI, BIAS, WO, OUT, NODES, LOGITS, LT, AT, n_tok, d, s_x, s_o, s_lt, s_at,
                     N_TREES: tl.constexpr, N_NODES: tl.constexpr, DEPTH: tl.constexpr, ACT: tl.constexpr,
                     HAS_BIAS: tl.constexpr, ROUND_BF16: tl.constexpr, BM: tl.constexpr, BD: tl.constexpr,
-                    PHASES: tl.constexpr, X_RES: tl.constexpr, DP: tl.constexpr):
+                    PHASES: tl.constexpr, X_RES: tl.constexpr, DP: tl.constexpr, TOP: tl.constexpr):
+        """TOP > 0: the first TOP levels (2^TOP - 1 nodes a tree, shared by many tokens) come as dense logits LT
+        from a small GEMM; their coefficients go to AT for the matching output GEMM, and only the deeper levels
+        are gathered."""
+        NT: tl.constexpr = 2 ** TOP - 1
         tok = tl.program_id(0) * BM + tl.arange(0, BM)
         ok = tok < n_tok
         cols = tl.arange(0, BD)
@@ -54,7 +58,10 @@ if HAVE_TRITON:
                 cur = tl.zeros((BM,), dtype=tl.int32)
                 for k in range(DEPTH + 1):
                     node = t * N_NODES + cur
-                    if X_RES:
+                    if k < TOP:  # a top level: the logit from the dense GEMM (bias included), the coefficient to AT
+                        acc = tl.load(LT + tok * s_lt + t * NT + cur, mask=ok, other=0.0).to(tl.float32)
+                        tl.store(AT + tok * s_at + t * NT + cur, _coef(acc, ACT).to(AT.dtype.element_ty), mask=ok)
+                    elif X_RES:
                         wv = tl.load(WI + node[:, None] * d + full[None, :], mask=ok[:, None] & fm[None, :], other=0.0)
                         acc = tl.sum(xr * wv.to(tl.float32), axis=1)
                     else:
@@ -64,10 +71,11 @@ if HAVE_TRITON:
                             xv = tl.load(X + tok[:, None] * s_x + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
                             wv = tl.load(WI + node[:, None] * d + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
                             acc += tl.sum(xv.to(tl.float32) * wv.to(tl.float32), axis=1)
-                    if HAS_BIAS:
-                        acc += tl.load(BIAS + node, mask=ok, other=0.0).to(tl.float32)
-                    if ROUND_BF16:  # the dense path's bf16 GEMM hands back bf16 logits: branch on the same value
-                        acc = acc.to(tl.bfloat16).to(tl.float32)
+                    if k >= TOP:
+                        if HAS_BIAS:
+                            acc += tl.load(BIAS + node, mask=ok, other=0.0).to(tl.float32)
+                        if ROUND_BF16:  # the dense path's bf16 GEMM hands back bf16 logits: branch on the same value
+                            acc = acc.to(tl.bfloat16).to(tl.float32)
                     tl.store(NODES + tok * P + t * (DEPTH + 1) + k, node, mask=ok)
                     tl.store(LOGITS + tok * P + t * (DEPTH + 1) + k, acc, mask=ok)
                     cur = 2 * cur + 1 + (acc > 0).to(tl.int32)
@@ -77,11 +85,13 @@ if HAVE_TRITON:
         for c in range(0, d, BD):
             cm = (c + cols) < d
             out = tl.zeros((BM, BD), dtype=tl.float32)
-            for j in range(P):
-                node = tl.load(NODES + tok * P + j, mask=ok, other=0)
-                cf = _coef(tl.load(LOGITS + tok * P + j, mask=ok, other=0.0), ACT)
-                wv = tl.load(WO + node[:, None] * d + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
-                out += cf[:, None] * wv.to(tl.float32)
+            for t in range(N_TREES):
+                for k in range(TOP, DEPTH + 1):
+                    j = t * (DEPTH + 1) + k
+                    node = tl.load(NODES + tok * P + j, mask=ok, other=0)
+                    cf = _coef(tl.load(LOGITS + tok * P + j, mask=ok, other=0.0), ACT)
+                    wv = tl.load(WO + node[:, None] * d + (c + cols)[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
+                    out += cf[:, None] * wv.to(tl.float32)
             tl.store(OUT + tok[:, None] * s_o + (c + cols)[None, :], out, mask=ok[:, None] & cm[None, :])
 
     @triton.jit
@@ -133,12 +143,20 @@ if HAVE_TRITON:
             tl.store(OUT + tok[:, None] * s_o + (c + cols)[None, :], out, mask=ok[:, None] & cm[None, :])
 
 
-def sparse_route_fwd(x, w_in, bias, w_out, n_trees, n_nodes, depth, act="gelu", block_m=16, block_d=128, num_warps=2,
-                     x_resident=False, phases=3, buffers=None):
+def top_rows(n_trees, n_nodes, top, device):
+    """Global row ids of every tree's first ``top`` levels, tree-major (the column order of LT and AT)."""
+    nt = 2 ** top - 1
+    return (torch.arange(n_trees, device=device)[:, None] * n_nodes + torch.arange(nt, device=device)[None, :]).reshape(-1)
+
+
+def sparse_route_fwd(x, w_in, bias, w_out, n_trees, n_nodes, depth, act="gelu", block_m=8, block_d=128, num_warps=2,
+                     x_resident=False, phases=3, buffers=None, top=0, top_weights=None):
     """x: (tokens, d); w_in, w_out: (>= trees * nodes, d) node rows (padding rows after the trees are never read);
     bias: (>= trees * nodes,) or None. Returns (out, nodes, logits): out (tokens, d) float32, nodes (tokens, trees,
     depth + 1) int32 global node ids along each path, logits the same shape in float32. ``act`` is "gelu", "split"
-    (the same with no context) or "linear"."""
+    (the same with no context) or "linear". ``top`` > 0: the first ``top`` levels by two small dense GEMMs (their
+    rows, from top_rows, can be passed pre-sliced as ``top_weights`` = (w_in_top, bias_top, w_out_top)); the logits
+    returned for those levels are then the GEMM's (rounded to x's dtype, as the dense path's)."""
     if not HAVE_TRITON:
         raise RuntimeError("sparse_route_fwd needs triton")
     code = {"gelu": 0, "split": 0, "linear": 1}[act]
@@ -153,11 +171,23 @@ def sparse_route_fwd(x, w_in, bias, w_out, n_trees, n_nodes, depth, act="gelu", 
     else:
         nodes, logits = buffers
     b = bias.contiguous() if bias is not None else out
+    top = min(top, depth + 1)
+    if top:
+        if top_weights is None:
+            rows = top_rows(n_trees, n_nodes, top, x.device)
+            top_weights = (w_in[rows], bias[rows] if bias is not None else None, w_out[rows])
+        wi_t, b_t, wo_t = top_weights
+        lt = torch.nn.functional.linear(x, wi_t.to(x.dtype), b_t.to(x.dtype) if b_t is not None else None)
+        at = torch.zeros_like(lt)
+    else:
+        lt = at = out
     _sparse_fwd[(triton.cdiv(n_tok, block_m),)](
-        x, w_in, b, w_out, out, nodes, logits, n_tok, d, x.stride(0), out.stride(0),
+        x, w_in, b, w_out, out, nodes, logits, lt, at, n_tok, d, x.stride(0), out.stride(0), lt.stride(0), at.stride(0),
         N_TREES=n_trees, N_NODES=n_nodes, DEPTH=depth, ACT=code, HAS_BIAS=bias is not None,
         ROUND_BF16=x.dtype == torch.bfloat16, BM=block_m, BD=block_d, PHASES=phases, X_RES=x_resident,
-        DP=triton.next_power_of_2(d), num_warps=num_warps)
+        DP=triton.next_power_of_2(d), TOP=top, num_warps=num_warps)
+    if top and phases & 2:
+        out += (at @ wo_t.to(at.dtype)).float()
     return out, nodes, logits
 
 

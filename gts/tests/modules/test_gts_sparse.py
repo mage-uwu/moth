@@ -33,16 +33,16 @@ def _dense(x, w_in, bias, w_out, n_trees, n_nodes, depth):
     return out, nodes
 
 
-@pytest.mark.parametrize("xres", [False, True])
+@pytest.mark.parametrize("xres,top", [(False, 0), (True, 0), (False, 2), (False, 9)])
 @pytest.mark.parametrize("n_tok,d,n_trees,depth,bias,pad", [(70, 96, 2, 3, True, 0), (33, 64, 4, 5, False, 64), (5, 48, 1, 0, True, 0)])
-def test_kernel_matches_dense(n_tok, d, n_trees, depth, bias, pad, xres):
+def test_kernel_matches_dense(n_tok, d, n_trees, depth, bias, pad, xres, top):
     torch.manual_seed(0)
     n_nodes = 2 ** (depth + 1) - 1
     rows = n_trees * n_nodes + pad
     x = torch.randn(n_tok, d, device=DEVICE)
     w_in, w_out = torch.randn(rows, d, device=DEVICE) / d ** 0.5, torch.randn(rows, d, device=DEVICE)
     b = torch.randn(rows, device=DEVICE) * 0.1 if bias else None
-    out, nodes, logits = sparse_route_fwd(x, w_in, b, w_out, n_trees, n_nodes, depth, block_m=16, block_d=32, x_resident=xres)
+    out, nodes, logits = sparse_route_fwd(x, w_in, b, w_out, n_trees, n_nodes, depth, block_m=16, block_d=32, x_resident=xres, top=top)
     ref, ref_nodes = _dense(x, w_in, b, w_out, n_trees, n_nodes, depth)
     assert torch.equal(nodes.long(), ref_nodes)
     torch.testing.assert_close(out.double(), ref, rtol=1e-4, atol=1e-4)

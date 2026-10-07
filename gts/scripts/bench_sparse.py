@@ -86,71 +86,27 @@ def main():
     ref, ref_nodes = dense()
     t_dense = timed(dense)
     print(f"\none deep-tree layer, forward ({x.shape[0]} tokens): dense route path {t_dense:.3f} ms", flush=True)
+    import mamba_ssm.modules.gts_sparse as gs
+
     best = None
-    for bm in (8, 16, 32):
-        for bd in (128, 256):
-            for nw in (2, 4):
-                for xres in (False, True):
-                    kw = dict(block_m=bm, block_d=bd, num_warps=nw, x_resident=xres)
-                    try:
-                        f = lambda kw=kw: sparse_route_fwd(x, wi16, bias, wo16, deep.n_trees, deep.n_nodes, deep.depth, deep.act, **kw)  # noqa: E731
-                        out, nodes, _ = f()
-                        t = timed(f)
-                    except Exception as e:  # a configuration the compiler rejects
-                        print(f"  {kw}: failed ({type(e).__name__}: {str(e)[:80]})")
-                        continue
-                    agree = (nodes.long() == ref_nodes.long()).all(-1).float().mean().item()
-                    print(f"  sparse BM {bm:2d} BD {bd:3d} warps {nw} x-resident {int(xres)}: {t:.3f} ms ({t_dense / t:.2f}x)  "
-                          f"paths equal {agree:.4f}", flush=True)
-                    if best is None or t < best[0]:
-                        best = (t, kw)
+    for top in (0, 3, 4, 5, 6, 7):
+        for bm, nw in ((8, 2), (16, 4), (8, 4)):
+            kw = dict(block_m=bm, block_d=128, num_warps=nw, top=top)
+            f = lambda kw=kw: sparse_route_fwd(x, wi16, bias, wo16, deep.n_trees, deep.n_nodes, deep.depth, deep.act, **kw)  # noqa: E731
+            try:
+                out, nodes, _ = f()
+                t = timed(f)
+            except Exception as e:
+                print(f"  {kw}: failed ({type(e).__name__}: {str(e)[:80]})")
+                continue
+            agree = (nodes.long() == ref_nodes.long()).all(-1).float().mean().item()
+            err = ((out - ref.float()).norm() / ref.float().norm()).item()
+            print(f"  sparse top {top} BM {bm:2d} warps {nw}: {t:.3f} ms ({t_dense / t:.2f}x)  paths equal {agree:.4f}  rel. diff {err:.2e}", flush=True)
+            if best is None or t < best[0]:
+                best = (t, kw)
     t, kw = best
     print(f"best sparse: {t:.3f} ms = {t_dense / t:.2f}x the dense layer ({kw})", flush=True)
-    _, nodes, logits = sparse_route_fwd(x, wi16, bias, wo16, deep.n_trees, deep.n_nodes, deep.depth, deep.act, **kw)
-    t1 = timed(lambda: sparse_route_fwd(x, wi16, bias, wo16, deep.n_trees, deep.n_nodes, deep.depth, deep.act, phases=1, **kw))
-    t2 = timed(lambda: sparse_route_fwd(x, wi16, bias, wo16, deep.n_trees, deep.n_nodes, deep.depth, deep.act, phases=2,
-                                        buffers=(nodes, logits), **kw))
-    print(f"  of which the walk (phase 1) {t1:.3f} ms, the output gather (phase 2) {t2:.3f} ms", flush=True)
-    L16 = torch.nn.functional.linear(x, wi16, bias.bfloat16() if bias is not None else None)
-    tg = timed(lambda: torch.nn.functional.linear(x, wi16, bias.bfloat16() if bias is not None else None))
-    tw = timed(lambda: route_ste_out(L16, wo16, deep.n_trees, deep.depth, deep.act, n_nodes=deep.n_nodes))
-    print(f"  dense path for comparison: logits GEMM {tg:.3f} ms, walk + output GEMM {tw:.3f} ms", flush=True)
-    import mamba_ssm.modules.gts_sparse as gs
     gs.KERNEL_ARGS = kw
-
-    # 2-bit node tables
-    from mamba_ssm.modules.ternary import pack_ternary
-    from mamba_ssm.ops.gts_sparse import pack_rows, sparse_route_fwd_packed
-
-    G = deep.node_in.shape[-1] // pack_ternary(deep.node_in[:1].detach(), deep.ternary_group)[1].shape[-1]
-    ci, si = pack_ternary(deep.node_in.detach(), deep.ternary_group)
-    co, so = pack_ternary(deep.node_out.detach(), deep.ternary_group)
-    pin, pout = pack_rows(ci, si), pack_rows(co, so)
-    bestp = None
-    for bm in (4, 8, 16, 32):
-        for bd in (32, 64, 128):
-            for nw in (1, 2, 4):
-                if G % bd:
-                    continue
-                kwp = dict(block_m=bm, block_d=bd, num_warps=nw)
-                f = lambda kwp=kwp: sparse_route_fwd_packed(x, pin, pout, bias, deep.n_trees, deep.n_nodes, deep.depth, G, deep.act, **kwp)  # noqa: E731
-                try:
-                    out, nodes, _ = f()
-                    t = timed(f)
-                except Exception as e:
-                    print(f"  packed {kwp}: failed ({type(e).__name__}: {str(e)[:80]})")
-                    continue
-                agree = (nodes.long() == ref_nodes.long()).all(-1).float().mean().item()
-                print(f"  packed BM {bm:2d} BD {bd:3d} warps {nw}: {t:.3f} ms ({t_dense / t:.2f}x)  paths equal {agree:.4f}", flush=True)
-                if bestp is None or t < bestp[0]:
-                    bestp = (t, kwp)
-    tp, kwp = bestp
-    _, nodes, logits = sparse_route_fwd_packed(x, pin, pout, bias, deep.n_trees, deep.n_nodes, deep.depth, G, deep.act, **kwp)
-    t1 = timed(lambda: sparse_route_fwd_packed(x, pin, pout, bias, deep.n_trees, deep.n_nodes, deep.depth, G, deep.act, phases=1, **kwp))
-    t2 = timed(lambda: sparse_route_fwd_packed(x, pin, pout, bias, deep.n_trees, deep.n_nodes, deep.depth, G, deep.act, phases=2,
-                                               buffers=(nodes, logits), **kwp))
-    print(f"best packed: {tp:.3f} ms = {t_dense / tp:.2f}x the dense layer ({kwp}); walk {t1:.3f} ms, output {t2:.3f} ms", flush=True)
-    gs.PACKED_ARGS = kwp
 
     # the whole encoder, inference, five ways
     from mamba_ssm.modules.gts_sparse import prepare_inference
@@ -175,8 +131,8 @@ def main():
     print(f"\nencoder inference, {n} tokens (bf16 autocast; masked-LM loss / accuracy on the same masked batch):")
     base = None
     for name, sp, fr, cp in [("dense, as trained", False, False, False), ("dense, weights quantised once", False, True, False),
-                             ("dense, quantised once, compiled", False, True, True), ("sparse 2-bit, quantised once", True, True, False),
-                             ("sparse 2-bit, quantised once, compiled", True, True, True)]:
+                             ("dense, quantised once, compiled", False, True, True), ("sparse, quantised once", True, True, False),
+                             ("sparse, quantised once, compiled", True, True, True)]:
         try:
             m = build(sp, fr, cp)
 

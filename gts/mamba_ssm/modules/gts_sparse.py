@@ -14,8 +14,8 @@ import torch
 from mamba_ssm.modules.gts import GTS
 from mamba_ssm.modules.ternary import pack_ternary
 
-KERNEL_ARGS = {}  # tile sizes for the unpacked kernel (bench_sparse.py sets the fastest it found)
-PACKED_ARGS = {}  # and for the 2-bit one
+KERNEL_ARGS = {"block_m": 8, "block_d": 128, "num_warps": 2, "top": 5}  # tiles and dense top levels (bench_sparse.py tunes)
+PACKED_ARGS = {"block_m": 4, "block_d": 128, "num_warps": 1}  # for the 2-bit kernel (slower on an A100: opt-in)
 _ACT = {"gelu": 0, "split": 0, "linear": 1}
 
 
@@ -36,6 +36,23 @@ def _(x, pi, si, po, so, bias, n_trees, n_nodes, depth, group, act, block_m, blo
     return x.new_empty(x.shape, dtype=torch.float32)
 
 
+@torch.library.custom_op("gts_sparse::route_fwd", mutates_args=())
+def _route_fwd_op(x: torch.Tensor, w_in: torch.Tensor, bias: torch.Tensor | None, w_out: torch.Tensor,
+                  wi_t: torch.Tensor | None, b_t: torch.Tensor | None, wo_t: torch.Tensor | None, n_trees: int,
+                  n_nodes: int, depth: int, top: int, act: int, block_m: int, block_d: int, num_warps: int) -> torch.Tensor:
+    from mamba_ssm.ops.gts_sparse import sparse_route_fwd
+
+    tw = (wi_t, b_t, wo_t) if top and wi_t is not None else None
+    out, _, _ = sparse_route_fwd(x, w_in, bias, w_out, n_trees, n_nodes, depth, "gelu" if act == 0 else "linear",
+                                 block_m=block_m, block_d=block_d, num_warps=num_warps, top=top, top_weights=tw)
+    return out
+
+
+@_route_fwd_op.register_fake
+def _(x, w_in, bias, w_out, wi_t, b_t, wo_t, n_trees, n_nodes, depth, top, act, block_m, block_d, num_warps):
+    return x.new_empty(x.shape, dtype=torch.float32)
+
+
 class GTSSparse(GTS):
     sparse = True
 
@@ -45,11 +62,13 @@ class GTSSparse(GTS):
         return (self.sparse and HAVE_TRITON and x.is_cuda and not torch.is_grad_enabled() and not self.use_context
                 and not self.read_state and not self.capture_paths and self.dense_walk)
 
-    def freeze_quantized(self, dtype=None):
-        """GTS.freeze_quantized, plus the deep trees' node tables packed to 2 bits (scales in ``dtype``, default
-        bfloat16: the dense path's weights under bf16 autocast are bf16(scale) * code, which these reproduce)."""
+    def freeze_quantized(self, dtype=None, packed=False):
+        """GTS.freeze_quantized, plus (``packed``) the deep trees' node tables packed to 2 bits (scales in ``dtype``,
+        default bfloat16: the dense path's weights under bf16 autocast are bf16(scale) * code, which these
+        reproduce). The 2-bit kernel is slower than the bf16 one on an A100 (it is bound by load latency, not bytes)."""
         super().freeze_quantized(dtype)
-        if self.ternary:
+        self._top_cache = {}
+        if self.ternary and packed:
             sd = dtype or torch.bfloat16
             from mamba_ssm.ops.gts_sparse import pack_rows
 
@@ -67,23 +86,39 @@ class GTSSparse(GTS):
         packed = self._frozen_q.get("packed") if self._frozen_q else None
         if packed is not None and not return_paths:
             (pi, si), (po, so), group = packed
-            kw = dict(block_m=8, block_d=min(128, group), num_warps=2, **PACKED_ARGS)
+            kw = dict(PACKED_ARGS)
+            kw["block_d"] = min(kw["block_d"], group)
             bias = self.node_bias.detach() if self.node_bias is not None else None
             out = _route_fwd_packed_op(xf, pi, si, po, so, bias, self.n_trees, self.n_nodes, self.depth, group,
                                        _ACT[self.act], kw["block_m"], kw["block_d"], kw["num_warps"])
             return out.view(batch, length, d).to(x.dtype) * mask.unsqueeze(-1)
-        from mamba_ssm.ops.gts_sparse import sparse_route_fwd
+        from mamba_ssm.ops.gts_sparse import sparse_route_fwd, top_rows
 
         if self._frozen_q:
             w_in, w_out, bias = self._frozen_q["padded"]
         else:
             w_in, w_out, bias = self._w_in(), self._w_out(), self.node_bias
-        out, nodes, _ = sparse_route_fwd(xf, w_in, bias, w_out, self.n_trees, self.n_nodes, self.depth, self.act,
-                                         **KERNEL_ARGS)
-        out = out.view(batch, length, d).to(x.dtype) * mask.unsqueeze(-1)
+        kw = dict(KERNEL_ARGS)
+        top = min(kw.pop("top", 0), self.depth + 1)
+        kw.pop("x_resident", None)
+        tw = (None, None, None)
+        if top:
+            cache = getattr(self, "_top_cache", None) if self._frozen_q else None
+            if cache is not None and top in cache:
+                tw = cache[top]
+            else:
+                rows = top_rows(self.n_trees, self.n_nodes, top, x.device)
+                tw = (w_in[rows].to(x.dtype).contiguous(), bias[rows].to(x.dtype) if bias is not None else None,
+                      w_out[rows].to(x.dtype).contiguous())
+                if cache is not None:
+                    cache[top] = tw
         if return_paths:
-            return out, nodes.view(batch, length, -1).long()
-        return out
+            out, nodes, _ = sparse_route_fwd(xf, w_in, bias, w_out, self.n_trees, self.n_nodes, self.depth, self.act,
+                                             top=top, top_weights=tw if top else None, **kw)
+            return out.view(batch, length, d).to(x.dtype) * mask.unsqueeze(-1), nodes.view(batch, length, -1).long()
+        out = _route_fwd_op(xf, w_in.to(x.dtype), bias, w_out.to(x.dtype), *tw, self.n_trees, self.n_nodes, self.depth,
+                            top, _ACT[self.act], kw["block_m"], kw["block_d"], kw["num_warps"])
+        return out.view(batch, length, d).to(x.dtype) * mask.unsqueeze(-1)
 
 
 def sparsify(model, enable=True):
@@ -97,12 +132,14 @@ def sparsify(model, enable=True):
     return n
 
 
-def prepare_inference(model, dtype=torch.bfloat16, sparse=True):
-    """For inference with fixed weights: sparse deep trees (2-bit tables) and every ternary weight quantised once.
-    Call again after changing the weights."""
+def prepare_inference(model, dtype=torch.bfloat16, sparse=True, packed=False):
+    """For inference with fixed weights: sparse deep trees and every ternary weight quantised once (``packed``: the
+    deep trees' tables as 2-bit codes). Call again after changing the weights."""
     if sparse:
         sparsify(model)
     for m in model.modules():
-        if isinstance(m, GTS):
+        if isinstance(m, GTSSparse):
+            m.freeze_quantized(dtype, packed=packed)
+        elif isinstance(m, GTS):
             m.freeze_quantized(dtype)
     return model
