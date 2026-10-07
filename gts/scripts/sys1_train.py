@@ -184,7 +184,14 @@ def proper_reward(q, g, ordinal):
 
 def train(model, data, a, device, epochs, lr):
     params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(params, lr=lr, weight_decay=0.01, fused=device == "cuda")
+    groups = [{"params": params, "lr": lr}]
+    if model.hf is None and a.ternary_lr:  # ternary latents only change the model when they cross a rounding threshold
+        from mamba_ssm.utils.ternary_pack import ternary_tensors
+
+        tern = {id(w) for w, _ in ternary_tensors(model).values()}
+        groups = [{"params": [q for q in params if id(q) not in tern], "lr": lr},
+                  {"params": [q for q in params if id(q) in tern], "lr": lr * a.ternary_lr / a.lr}]
+    opt = torch.optim.AdamW(groups, weight_decay=0.01, fused=device == "cuda")
     steps = max(1, epochs * math.ceil(len(data) / a.batch_size))
     warm = max(1, int(0.06 * steps))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min((s + 1) / warm, max(0.0, (steps - s) / max(1, steps - warm))))
@@ -335,6 +342,8 @@ def main():
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--fit-epochs", type=int, default=5)
     p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--ternary-lr", type=float, help="GTS: learning rate for the ternary weights' latent floats (default "
+                   "--lr); see glue_finetune.py")
     p.add_argument("--head-layers", type=int, default=2)
     p.add_argument("--loop-probs", default="0.1,0.2,0.7", help="a looped backbone: probability of training a step "
                    "with 1, 2, ... passes, so every depth stays usable (as in GTS-Uni pretraining)")

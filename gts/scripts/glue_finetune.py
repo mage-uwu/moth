@@ -148,7 +148,14 @@ def run_task(a, task, device):
         layers = model.backbone.layers
         for i in range(len(layers)):
             layers[i] = torch.compile(layers[i], dynamic=False)
-    opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0.01, fused=device == "cuda")
+    groups = [{"params": list(model.parameters()), "lr": a.lr}]
+    if a.gts and a.ternary_lr:  # ternary latents only change the model when they cross a rounding threshold
+        from mamba_ssm.utils.ternary_pack import ternary_tensors
+
+        tern = {id(w) for w, _ in ternary_tensors(model).values()}
+        groups = [{"params": [q for q in model.parameters() if id(q) not in tern], "lr": a.lr},
+                  {"params": [q for q in model.parameters() if id(q) in tern], "lr": a.ternary_lr}]
+    opt = torch.optim.AdamW(groups, weight_decay=0.01, fused=device == "cuda")
     steps = a.epochs * math.ceil(len(xtr) / a.batch_size)
     warm = max(1, int(0.1 * steps))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min((s + 1) / warm, max(0.0, (steps - s) / max(1, steps - warm))))
@@ -205,6 +212,8 @@ def main():
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--lr", type=float, default=5e-5)
+    p.add_argument("--ternary-lr", type=float, help="GTS: learning rate for the ternary weights' latent floats (default "
+                   "--lr). At 1e-4 and GLUE's few hundred steps almost no ternary code changes, which leaves an adapter")
     p.add_argument("--max-len", type=int, default=128)
     p.add_argument("--max-train", type=int, help="subsample large training sets (MNLI, QQP, QNLI) to this many")
     p.add_argument("--max-eval", type=int)
