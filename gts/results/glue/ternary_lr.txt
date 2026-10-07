@@ -1,0 +1,1 @@
+ternary learning rate: 3e-4

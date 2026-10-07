@@ -1,0 +1,112 @@
+{
+ "model": "/root/ck/gts3_float.pt",
+ "args": {
+  "gts": "/root/ck/gts3_float.pt",
+  "hf": null,
+  "loops": null,
+  "tasks": [
+   "rte",
+   "mrpc",
+   "stsb",
+   "cola"
+  ],
+  "epochs": 3,
+  "batch_size": 32,
+  "lr": 0.0001,
+  "ternary_lr": 0.001,
+  "max_len": 128,
+  "max_train": 100000,
+  "max_eval": null,
+  "seed": 0,
+  "compile": true,
+  "out": "/workspace/out/glue_sweep_gts3_tlr1e-3.json",
+  "save_dir": null
+ },
+ "tasks": {
+  "rte": {
+   "best": {
+    "accuracy": 0.5270758122743683
+   },
+   "epochs": [
+    {
+     "accuracy": 0.48736462093862815
+    },
+    {
+     "accuracy": 0.5270758122743683
+    },
+    {
+     "accuracy": 0.48375451263537905
+    }
+   ],
+   "train_examples": 2490,
+   "dev_examples": 277,
+   "minutes": 0.36456730365753176
+  },
+  "mrpc": {
+   "best": {
+    "accuracy": 0.6985294117647058,
+    "f1": 0.8161434977578476
+   },
+   "epochs": [
+    {
+     "accuracy": 0.6911764705882353,
+     "f1": 0.8012618296529969
+    },
+    {
+     "accuracy": 0.6985294117647058,
+     "f1": 0.8161434977578476
+    },
+    {
+     "accuracy": 0.6642156862745098,
+     "f1": 0.7583774250440917
+    }
+   ],
+   "train_examples": 3668,
+   "dev_examples": 408,
+   "minutes": 0.37558486064275104
+  },
+  "stsb": {
+   "best": {
+    "pearson": 0.5405582741095919,
+    "spearman": 0.5379620559831361
+   },
+   "epochs": [
+    {
+     "pearson": 0.2432374517579742,
+     "spearman": 0.22849628999835112
+    },
+    {
+     "pearson": 0.44960553113180435,
+     "spearman": 0.43686130704946985
+    },
+    {
+     "pearson": 0.5405582741095919,
+     "spearman": 0.5379620559831361
+    }
+   ],
+   "train_examples": 5749,
+   "dev_examples": 1500,
+   "minutes": 0.5614662528038025
+  },
+  "cola": {
+   "best": {
+    "mcc": 0.19979672933698073
+   },
+   "epochs": [
+    {
+     "mcc": 0.0529051568355168
+    },
+    {
+     "mcc": 0.16002326880569298
+    },
+    {
+     "mcc": 0.19979672933698073
+    }
+   ],
+   "train_examples": 8551,
+   "dev_examples": 1043,
+   "minutes": 0.738456400235494
+  }
+ },
+ "average": 0.5202445238380832
+}

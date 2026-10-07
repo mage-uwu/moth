@@ -1,0 +1,112 @@
+{
+ "model": "/root/ck/gts3_float.pt",
+ "args": {
+  "gts": "/root/ck/gts3_float.pt",
+  "hf": null,
+  "loops": null,
+  "tasks": [
+   "rte",
+   "mrpc",
+   "stsb",
+   "cola"
+  ],
+  "epochs": 3,
+  "batch_size": 32,
+  "lr": 0.0001,
+  "ternary_lr": 0.0003,
+  "max_len": 128,
+  "max_train": 100000,
+  "max_eval": null,
+  "seed": 0,
+  "compile": true,
+  "out": "/workspace/out/glue_sweep_gts3_tlr3e-4.json",
+  "save_dir": null
+ },
+ "tasks": {
+  "rte": {
+   "best": {
+    "accuracy": 0.5270758122743683
+   },
+   "epochs": [
+    {
+     "accuracy": 0.516245487364621
+    },
+    {
+     "accuracy": 0.5126353790613718
+    },
+    {
+     "accuracy": 0.5270758122743683
+    }
+   ],
+   "train_examples": 2490,
+   "dev_examples": 277,
+   "minutes": 0.955436114470164
+  },
+  "mrpc": {
+   "best": {
+    "accuracy": 0.7009803921568627,
+    "f1": 0.8145896656534954
+   },
+   "epochs": [
+    {
+     "accuracy": 0.6838235294117647,
+     "f1": 0.7922705314009661
+    },
+    {
+     "accuracy": 0.7009803921568627,
+     "f1": 0.8145896656534954
+    },
+    {
+     "accuracy": 0.6568627450980392,
+     "f1": 0.7586206896551724
+    }
+   ],
+   "train_examples": 3668,
+   "dev_examples": 408,
+   "minutes": 0.6209556738535563
+  },
+  "stsb": {
+   "best": {
+    "pearson": 0.5806240749033116,
+    "spearman": 0.5781357058380915
+   },
+   "epochs": [
+    {
+     "pearson": 0.32835234558850057,
+     "spearman": 0.30393337597038933
+    },
+    {
+     "pearson": 0.5265104193212733,
+     "spearman": 0.5204347130820948
+    },
+    {
+     "pearson": 0.5806240749033116,
+     "spearman": 0.5781357058380915
+    }
+   ],
+   "train_examples": 5749,
+   "dev_examples": 1500,
+   "minutes": 0.821050747235616
+  },
+  "cola": {
+   "best": {
+    "mcc": 0.17127344978212583
+   },
+   "epochs": [
+    {
+     "mcc": 0.05622776115943826
+    },
+    {
+     "mcc": 0.1001058161011389
+    },
+    {
+     "mcc": 0.17127344978212583
+    }
+   ],
+   "train_examples": 8551,
+   "dev_examples": 1043,
+   "minutes": 0.7965774655342102
+  }
+ },
+ "average": 0.5227686583870204
+}
