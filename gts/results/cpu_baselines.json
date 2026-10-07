@@ -1,0 +1,581 @@
+{
+ "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+ "rows": [
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 445
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 1374
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "onnx-fp32",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 578
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "onnx-int8",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 2311
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 305
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 1217
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "onnx-fp32",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 490
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "onnx-int8",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 1279
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 1030
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 1933
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "onnx-fp32",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 1657
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "onnx-int8",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 3865
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 625
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 3049
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "onnx-fp32",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 1451
+  },
+  {
+   "model": "bert-base",
+   "params_m": 109.5,
+   "setup": "onnx-int8",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 2852
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 949
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 2687
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "onnx-fp32",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 1150
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "onnx-int8",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 4790
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 727
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 2293
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "onnx-fp32",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 988
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "onnx-int8",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 2611
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 2331
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 5402
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "onnx-fp32",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 3667
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "onnx-int8",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 9419
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 1525
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 5489
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "onnx-fp32",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 2635
+  },
+  {
+   "model": "distilbert",
+   "params_m": 66.4,
+   "setup": "onnx-int8",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 5466
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 1213
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 2241
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "onnx-fp32",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 2064
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "onnx-int8",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 4254
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 831
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 1874
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "onnx-fp32",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 1391
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "onnx-int8",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 2915
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 1693
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 2906
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "onnx-fp32",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 3234
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "onnx-int8",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 3925
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 1651
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 4715
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "onnx-fp32",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 3157
+  },
+  {
+   "model": "mobilebert",
+   "params_m": 24.6,
+   "setup": "onnx-int8",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 4054
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 4309
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 11189
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "onnx-fp32",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 8115
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "onnx-int8",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 16739
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 2140
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 10390
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "onnx-fp32",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 4528
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "onnx-int8",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 6105
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 6125
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 15101
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "onnx-fp32",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 14884
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "onnx-int8",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 15232
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 3598
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 23472
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "onnx-fp32",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 8813
+  },
+  {
+   "model": "tinybert-4l",
+   "params_m": 14.4,
+   "setup": "onnx-int8",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 10868
+  },
+  {
+   "model": "modernbert-base",
+   "params_m": 149.0,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 399
+  },
+  {
+   "model": "modernbert-base",
+   "params_m": 149.0,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 890
+  },
+  {
+   "model": "modernbert-base",
+   "params_m": 149.0,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 405
+  },
+  {
+   "model": "modernbert-base",
+   "params_m": 149.0,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 697
+  },
+  {
+   "model": "modernbert-base",
+   "params_m": 149.0,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 121
+  },
+  {
+   "model": "modernbert-base",
+   "params_m": 149.0,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 285
+  },
+  {
+   "model": "modernbert-base",
+   "params_m": 149.0,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 1282
+  },
+  {
+   "model": "modernbert-base",
+   "params_m": 149.0,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 1990
+  }
+ ]
+}
