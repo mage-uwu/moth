@@ -55,6 +55,7 @@ class Sys1(torch.nn.Module):
             else:
                 load_binarized(blob, lm)
             self.backbone, self.hf, d = lm.backbone, None, cfg["d_model"]
+            self.max_loops = cfg.get("loops", 1)
             from bert_pretrain import _tokenizer
 
             tok = _tokenizer()
@@ -69,6 +70,7 @@ class Sys1(torch.nn.Module):
 
             tok = AutoTokenizer.from_pretrained(hf)
             self.backbone, self.hf = AutoModel.from_pretrained(hf), hf
+            self.max_loops = 1
             d = self.backbone.config.hidden_size
             self.enc = lambda s: tok(s, add_special_tokens=False)["input_ids"]  # noqa: E731
             self.cls = tok.cls_token_id if tok.cls_token_id is not None else tok.bos_token_id
@@ -104,13 +106,13 @@ class Sys1(torch.nn.Module):
             return None
         return ids, marks
 
-    def forward(self, ids, mask, rows, cols, n_opts):
+    def forward(self, ids, mask, rows, cols, n_opts, loops=None):
         if self.hf:
             h = self.backbone(input_ids=ids, attention_mask=mask.long()).last_hidden_state
             for layer in self.layers:
                 h = layer(h, src_key_padding_mask=~mask)
         else:
-            h = self.backbone(ids, attention_mask=mask, loops=self.loops)
+            h = self.backbone(ids, attention_mask=mask, loops=loops or self.loops)
             for layer in self.layers:
                 h = layer(h, attention_mask=mask)
         h = self.norm(h)
@@ -161,11 +163,14 @@ def train(model, data, a, device, epochs, lr):
     warm = max(1, int(0.06 * steps))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min((s + 1) / warm, max(0.0, (steps - s) / max(1, steps - warm))))
     g, t0, step = torch.Generator().manual_seed(a.seed), time.time(), 0
+    probs = [float(v) for v in a.loop_probs.split(",")][: model.max_loops] if model.max_loops > 1 else [1.0]
+    rng = np.random.default_rng(a.seed)
     model.train()
     for ep in range(epochs):
         for idx, ids, mask, rows, cols, n_opts, targets in batches(model, data, a, device, True, g):
+            n_pass = int(rng.choice(len(probs), p=np.asarray(probs) / sum(probs))) + 1  # every depth stays usable
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-                outs, act = model(ids, mask, rows, cols, n_opts)
+                outs, act = model(ids, mask, rows, cols, n_opts, loops=n_pass)
             ce = rl = 0.0
             correct = []
             for z, t, i in zip(outs, targets, idx):
@@ -195,11 +200,11 @@ def train(model, data, a, device, epochs, lr):
 
 
 @torch.no_grad()
-def raw_predict(model, data, a, device):
+def raw_predict(model, data, a, device, loops=None):
     logits, acts = [None] * len(data), [None] * len(data)
     for idx, ids, mask, rows, cols, n_opts, _ in batches(model, data, a, device):
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-            outs, act = model(ids, mask, rows, cols, n_opts)
+            outs, act = model(ids, mask, rows, cols, n_opts, loops=loops)
         for j, (i, z) in enumerate(zip(idx, outs)):
             logits[i], acts[i] = z.float().cpu().numpy(), float(torch.sigmoid(act[j]))
     return logits, acts
@@ -244,10 +249,10 @@ def apply(logits, data, temps):
     return out
 
 
-def evaluate(model, test, cal, a, device):
-    lc, _ = raw_predict(model, cal, a, device)
+def evaluate_depth(model, test, cal, a, device, loops):
+    lc, _ = raw_predict(model, cal, a, device, loops)
     temps = fit_temperatures(lc, cal)
-    lt, acts = raw_predict(model, test, a, device)
+    lt, acts = raw_predict(model, test, a, device, loops)
     probs = apply(lt, test, temps)
     keep = [i for i, p in enumerate(probs) if p is not None]
     res = {"temperatures": temps, "scores": scores([probs[i] for i in keep], [test[i] for i in keep]),
@@ -261,7 +266,36 @@ def evaluate(model, test, cal, a, device):
     res["escalate"] = {"auroc": float((ranks[right == 1].sum() - pos * (pos + 1) / 2) / max(1, pos * neg)),
                        **{f"accuracy_acting_on_top_{c}%": float(right[order[: max(1, int(len(order) * c / 100))]].mean())
                           for c in (50, 80, 100)}}
-    return res
+    return res, probs, acts
+
+
+def evaluate(model, test, cal, a, device):
+    """Scores at every pass count the backbone has (the gap between 1 and the most is what depth buys), and, for a
+    looped backbone, adaptive depth: answer with 1 pass when the act head's confidence is at least tau, else think
+    again with more passes (escalating depth one pass at a time), swept over tau, as accuracy against mean passes."""
+    L = model.max_loops
+    res, per = {}, {}
+    for n in range(1, L + 1):
+        r, probs, acts = evaluate_depth(model, test, cal, a, device, n)
+        res[f"{n}_pass" if n == 1 else f"{n}_passes"] = r
+        per[n] = (probs, acts)
+    best = res[f"{L}_passes" if L > 1 else "1_pass"]
+    out = {"scores": best["scores"], "escalate": best["escalate"], "temperatures": best["temperatures"],
+           "dropped": best["dropped"], "by_depth": res}
+    if L > 1:
+        keep = [i for i in range(len(test)) if all(per[n][0][i] is not None for n in per)]
+        curve = []
+        for tau in (0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.01):
+            right, passes = [], []
+            for i in keep:
+                n = 1
+                while n < L and per[n][1][i] < tau:
+                    n += 1
+                right.append(int(np.argmax(per[n][0][i])) == label_index(test[i]))
+                passes.append(n)
+            curve.append({"tau": tau, "accuracy": float(np.mean(right)), "mean_passes": float(np.mean(passes))})
+        out["adaptive_depth"] = curve
+    return out
 
 
 def main():
@@ -269,13 +303,15 @@ def main():
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--gts")
     src.add_argument("--hf")
-    p.add_argument("--loops", type=int, help="GTS-Uni passes")
+    p.add_argument("--loops", type=int, help="GTS-Uni: default pass count (training samples them, see --loop-probs)")
     p.add_argument("--general", type=int, default=500000)
     p.add_argument("--commercial-only", action="store_true")
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--fit-epochs", type=int, default=5)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--head-layers", type=int, default=2)
+    p.add_argument("--loop-probs", default="0.1,0.2,0.7", help="a looped backbone: probability of training a step "
+                   "with 1, 2, ... passes, so every depth stays usable (as in GTS-Uni pretraining)")
     p.add_argument("--rl-weight", type=float, default=1.0)
     p.add_argument("--rl-samples", type=int, default=8, help="noise samples per decision (the group of the baseline)")
     p.add_argument("--rl-sigma", type=float, default=0.5, help="exploration noise on the logits")
@@ -308,6 +344,10 @@ def main():
     res["fitted"] = evaluate(model, test, bench_train[cut:], a, device)
     res["minutes"] = (time.time() - t0) / 60
     json.dump(res, open(a.out, "w"), indent=1)
+    for n, rr in res["fitted"]["by_depth"].items():
+        print(f"fitted at {n}: accuracy {rr['scores']['all']['accuracy']:.3f}  KL {rr['scores']['all']['kl']:.3f}", flush=True)
+    for c in res["fitted"].get("adaptive_depth", []):
+        print(f"  adaptive tau {c['tau']:.2f}: accuracy {c['accuracy']:.3f} at {c['mean_passes']:.2f} passes on average", flush=True)
     r = res["fitted"]["scores"]
     print(f"fitted: accuracy {r['all']['accuracy']:.3f}  KL {r['all']['kl']:.3f}  Brier {r['all']['brier']:.3f}  "
           f"ECE {r['all']['ece']:.3f}  escalate AUROC {res['fitted']['escalate']['auroc']:.3f}  | by type: "

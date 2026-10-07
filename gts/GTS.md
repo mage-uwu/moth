@@ -533,3 +533,7 @@ on held-out decisions. RLCD alone drives a reported distribution to the gold one
 for gold [0.6, 0.25, 0.1, 0.05]). Benchmark: LocalLLaMA typed-decisions (zero-shot after 500K general decisions from
 tasksource-jev-typed-decisions, then fitted on its train); `scripts/decide_probe.py` holds the data, metrics (KL and
 Brier reproduce the README's Uniform row) and a cross-entropy-only ablation. `pod/decide_job.sh` runs it.
+On a GTS-Uni backbone, fine-tuning samples the pass count per step (`--loop-probs`, as in pretraining) so every depth
+stays usable; evaluation scores 1, 2 and 3 passes of the same weights (the 1-vs-3 gap is what depth buys) and an
+adaptive-depth curve: answer at 1 pass when the act head's confidence reaches tau, else run another pass, swept over
+tau as accuracy against mean passes (the "think harder before escalating" System One).
