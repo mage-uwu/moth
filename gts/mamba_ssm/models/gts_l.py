@@ -131,7 +131,7 @@ class GTSLBlock(nn.Module):
         self.norm1 = nn.Identity() if idx == 0 else nn.LayerNorm(d, eps=cfg.norm_eps, bias=False)  # as ModernBERT
         self.mixer = BiSSD(cfg)
         self.norm2 = nn.LayerNorm(d, eps=cfg.norm_eps, bias=False)
-        self.deep = GTS(d, depth=cfg.deep_depth, n_trees=cfg.deep_trees, use_context=False, d_conv=0, route_ste=True,
+        self.deep = GTS(d, depth=cfg.deep_depth, n_trees=cfg.deep_trees, use_context=False, d_conv=0, route_ste=True, dense_walk=True,
                         ternary=True, ternary_group=cfg.ternary_group, act_bits=cfg.act_bits, layer_idx=idx)
 
     def forward(self, h):
