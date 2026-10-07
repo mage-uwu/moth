@@ -1,0 +1,342 @@
++ O=/workspace/out
++ D=/root/fwe
++ R=/workspace/out/mohawk
++ mkdir -p /workspace/out /workspace/out/mohawk
++ python3 -m pip install -q einops packaging tokenizers huggingface_hub datasets pytest pyarrow 'transformers>=4.48'
++ tail -1
++ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+NVIDIA A100-SXM4-80GB, 81920 MiB
++ python3 -m pytest -q tests/models/test_gts_l.py
++ tail -3
+...                                                                      [100%]
+3 passed in 34.96s
++ '[' -f /root/fwe/meta.json ']'
++ python3 scripts/mohawk_distill.py prep --out /root/fwe --workers 14
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+sample/10BT/000_00000.parquet: 726,000 documents, 749,757,239 tokens so far (263 s)
+train 747,757,239 tokens, val 2,000,000 (263 s)
++ python3 scripts/mohawk_distill.py train --data /root/fwe --out /workspace/out/mohawk --stage1-minutes 15 --stage2-minutes 35 --stage3-minutes 100 --price-per-hour 1.59
++ tee /workspace/out/mohawk/train.log
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/173 [00:00<?, ?it/s]Loading weights: 100%|██████████| 173/173 [00:00<00:00, 2370.47it/s]
+teacher answerdotai/ModernBERT-large; student GTS-L 405.4M parameters (GTSLConfig(vocab_size=50368, d_model=1024, n_layer=28, n_heads=16, d_state=64, deep_trees=4, deep_depth=9, ternary_group=128, act_bits=8, norm_eps=1e-05, chunk_size=256, pad_token_id=50283)); data 747,757,239 training tokens
+== Stage 1: matrix orientation
+  [stage1] step      3       0.0M tokens     10,272 tokens/s  $43.00 per 1B tokens  matrix_rel 15.8622  0.0 min
+  [stage1] step     50       0.2M tokens     15,250 tokens/s  $28.96 per 1B tokens  matrix_rel 2.9612  0.2 min
+  [stage1] step    100       0.4M tokens     15,498 tokens/s  $28.50 per 1B tokens  matrix_rel 0.9339  0.4 min
+  [stage1] step    150       0.6M tokens     15,586 tokens/s  $28.34 per 1B tokens  matrix_rel 0.6630  0.7 min
+  [stage1] step    200       0.8M tokens     15,632 tokens/s  $28.25 per 1B tokens  matrix_rel 0.5675  0.9 min
+  [stage1] step    250       1.0M tokens     15,661 tokens/s  $28.20 per 1B tokens  matrix_rel 0.5498  1.1 min
+  [stage1] step    300       1.2M tokens     15,682 tokens/s  $28.16 per 1B tokens  matrix_rel 0.5268  1.3 min
+  [stage1] step    350       1.4M tokens     15,694 tokens/s  $28.14 per 1B tokens  matrix_rel 0.4682  1.5 min
+  [stage1] step    400       1.6M tokens     15,705 tokens/s  $28.12 per 1B tokens  matrix_rel 0.4492  1.7 min
+  [stage1] step    450       1.8M tokens     15,711 tokens/s  $28.11 per 1B tokens  matrix_rel 0.4147  2.0 min
+  [stage1] step    500       2.0M tokens     15,715 tokens/s  $28.10 per 1B tokens  matrix_rel 0.4105  2.2 min
+  [stage1] step    550       2.3M tokens     15,722 tokens/s  $28.09 per 1B tokens  matrix_rel 0.4154  2.4 min
+  [stage1] step    600       2.5M tokens     15,728 tokens/s  $28.08 per 1B tokens  matrix_rel 0.3822  2.6 min
+  [stage1] step    650       2.7M tokens     15,734 tokens/s  $28.07 per 1B tokens  matrix_rel 0.3888  2.8 min
+  [stage1] step    700       2.9M tokens     15,739 tokens/s  $28.06 per 1B tokens  matrix_rel 0.3902  3.0 min
+  [stage1] step    750       3.1M tokens     15,742 tokens/s  $28.06 per 1B tokens  matrix_rel 0.3728  3.3 min
+  [stage1] step    800       3.3M tokens     15,741 tokens/s  $28.06 per 1B tokens  matrix_rel 0.3509  3.5 min
+  [stage1] step    850       3.5M tokens     15,743 tokens/s  $28.06 per 1B tokens  matrix_rel 0.3483  3.7 min
+  [stage1] step    900       3.7M tokens     15,746 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3530  3.9 min
+  [stage1] step    950       3.9M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3454  4.1 min
+  [stage1] step   1000       4.1M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3421  4.3 min
+  [stage1] step   1050       4.3M tokens     15,747 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3337  4.6 min
+  [stage1] step   1100       4.5M tokens     15,746 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3297  4.8 min
+  [stage1] step   1150       4.7M tokens     15,745 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3399  5.0 min
+  [stage1] step   1200       4.9M tokens     15,744 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3368  5.2 min
+  [stage1] step   1250       5.1M tokens     15,744 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3199  5.4 min
+  [stage1] step   1300       5.3M tokens     15,743 tokens/s  $28.06 per 1B tokens  matrix_rel 0.3042  5.6 min
+  [stage1] step   1350       5.5M tokens     15,743 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3035  5.9 min
+  [stage1] step   1400       5.7M tokens     15,744 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3018  6.1 min
+  [stage1] step   1450       5.9M tokens     15,744 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3334  6.3 min
+  [stage1] step   1500       6.1M tokens     15,744 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3184  6.5 min
+  [stage1] step   1550       6.3M tokens     15,744 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3041  6.7 min
+  [stage1] step   1600       6.6M tokens     15,744 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2978  6.9 min
+  [stage1] step   1650       6.8M tokens     15,745 tokens/s  $28.05 per 1B tokens  matrix_rel 0.3111  7.2 min
+  [stage1] step   1700       7.0M tokens     15,746 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2938  7.4 min
+  [stage1] step   1750       7.2M tokens     15,746 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2861  7.6 min
+  [stage1] step   1800       7.4M tokens     15,747 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2896  7.8 min
+  [stage1] step   1850       7.6M tokens     15,747 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2819  8.0 min
+  [stage1] step   1900       7.8M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2883  8.2 min
+  [stage1] step   1950       8.0M tokens     15,749 tokens/s  $28.04 per 1B tokens  matrix_rel 0.2840  8.5 min
+  [stage1] step   2000       8.2M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2844  8.7 min
+  [stage1] step   2050       8.4M tokens     15,749 tokens/s  $28.04 per 1B tokens  matrix_rel 0.2868  8.9 min
+  [stage1] step   2100       8.6M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2950  9.1 min
+  [stage1] step   2150       8.8M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2773  9.3 min
+  [stage1] step   2200       9.0M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2840  9.5 min
+  [stage1] step   2250       9.2M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2792  9.8 min
+  [stage1] step   2300       9.4M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2812  10.0 min
+  [stage1] step   2350       9.6M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2808  10.2 min
+  [stage1] step   2400       9.8M tokens     15,747 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2777  10.4 min
+  [stage1] step   2450      10.0M tokens     15,747 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2735  10.6 min
+  [stage1] step   2500      10.2M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2680  10.8 min
+  [stage1] step   2550      10.4M tokens     15,746 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2728  11.1 min
+  [stage1] step   2600      10.6M tokens     15,743 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2686  11.3 min
+  [stage1] step   2650      10.9M tokens     15,743 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2706  11.5 min
+  [stage1] step   2700      11.1M tokens     15,742 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2697  11.7 min
+  [stage1] step   2750      11.3M tokens     15,742 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2739  11.9 min
+  [stage1] step   2800      11.5M tokens     15,741 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2736  12.1 min
+  [stage1] step   2850      11.7M tokens     15,740 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2724  12.4 min
+  [stage1] step   2900      11.9M tokens     15,740 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2681  12.6 min
+  [stage1] step   2950      12.1M tokens     15,739 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2739  12.8 min
+  [stage1] step   3000      12.3M tokens     15,739 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2821  13.0 min
+  [stage1] step   3050      12.5M tokens     15,738 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2681  13.2 min
+  [stage1] step   3100      12.7M tokens     15,739 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2586  13.4 min
+  [stage1] step   3150      12.9M tokens     15,738 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2595  13.7 min
+  [stage1] step   3200      13.1M tokens     15,736 tokens/s  $28.07 per 1B tokens  matrix_rel 0.2607  13.9 min
+  [stage1] step   3250      13.3M tokens     15,734 tokens/s  $28.07 per 1B tokens  matrix_rel 0.2592  14.1 min
+  [stage1] step   3300      13.5M tokens     15,733 tokens/s  $28.07 per 1B tokens  matrix_rel 0.2559  14.3 min
+  [stage1] step   3350      13.7M tokens     15,731 tokens/s  $28.08 per 1B tokens  matrix_rel 0.2631  14.5 min
+  [stage1] step   3400      13.9M tokens     15,731 tokens/s  $28.08 per 1B tokens  matrix_rel 0.2591  14.8 min
+  [stage1] step   3450      14.1M tokens     15,732 tokens/s  $28.08 per 1B tokens  matrix_rel 0.2560  15.0 min
+  [stage1] step   3457      14.2M tokens     15,732 tokens/s  $28.08 per 1B tokens  matrix_rel 0.2501  15.0 min
+== Stage 2: hidden-state alignment
+  [stage2] step      3       0.0M tokens        617 tokens/s  $716.34 per 1B tokens  attn_rel 5.2235  mlp_rel 0.9993  1.3 min
+  [stage2] step     50       0.8M tokens      7,443 tokens/s  $59.34 per 1B tokens  attn_rel 0.2829  mlp_rel 0.8497  1.8 min
+  [stage2] step    100       1.6M tokens     11,506 tokens/s  $38.39 per 1B tokens  attn_rel 0.2486  mlp_rel 0.6964  2.4 min
+  [stage2] step    150       2.5M tokens     14,052 tokens/s  $31.43 per 1B tokens  attn_rel 0.2584  mlp_rel 0.6086  2.9 min
+  [stage2] step    200       3.3M tokens     15,811 tokens/s  $27.93 per 1B tokens  attn_rel 0.2464  mlp_rel 0.5476  3.5 min
+  [stage2] step    250       4.1M tokens     17,096 tokens/s  $25.83 per 1B tokens  attn_rel 0.2469  mlp_rel 0.5069  4.0 min
+  [stage2] step    300       4.9M tokens     18,073 tokens/s  $24.44 per 1B tokens  attn_rel 0.2541  mlp_rel 0.4680  4.5 min
+  [stage2] step    350       5.7M tokens     18,838 tokens/s  $23.45 per 1B tokens  attn_rel 0.2298  mlp_rel 0.4361  5.1 min
+  [stage2] step    400       6.6M tokens     19,453 tokens/s  $22.70 per 1B tokens  attn_rel 0.2780  mlp_rel 0.4185  5.6 min
+  [stage2] step    450       7.4M tokens     19,962 tokens/s  $22.13 per 1B tokens  attn_rel 0.2314  mlp_rel 0.3959  6.2 min
+  [stage2] step    500       8.2M tokens     20,388 tokens/s  $21.66 per 1B tokens  attn_rel 0.2071  mlp_rel 0.3743  6.7 min
+  [stage2] step    550       9.0M tokens     20,750 tokens/s  $21.29 per 1B tokens  attn_rel 0.2030  mlp_rel 0.3657  7.2 min
+  [stage2] step    600       9.8M tokens     21,063 tokens/s  $20.97 per 1B tokens  attn_rel 0.2062  mlp_rel 0.3488  7.8 min
+  [stage2] step    650      10.6M tokens     21,337 tokens/s  $20.70 per 1B tokens  attn_rel 0.2641  mlp_rel 0.3470  8.3 min
+  [stage2] step    700      11.5M tokens     21,580 tokens/s  $20.47 per 1B tokens  attn_rel 0.2092  mlp_rel 0.3339  8.9 min
+  [stage2] step    750      12.3M tokens     21,795 tokens/s  $20.26 per 1B tokens  attn_rel 0.2088  mlp_rel 0.3317  9.4 min
+  [stage2] step    800      13.1M tokens     21,987 tokens/s  $20.09 per 1B tokens  attn_rel 0.3207  mlp_rel 0.3354  9.9 min
+  [stage2] step    850      13.9M tokens     22,158 tokens/s  $19.93 per 1B tokens  attn_rel 0.2061  mlp_rel 0.3278  10.5 min
+  [stage2] step    900      14.7M tokens     22,313 tokens/s  $19.79 per 1B tokens  attn_rel 0.1934  mlp_rel 0.3173  11.0 min
+  [stage2] step    950      15.6M tokens     22,454 tokens/s  $19.67 per 1B tokens  attn_rel 0.2205  mlp_rel 0.3200  11.6 min
+  [stage2] step   1000      16.4M tokens     22,582 tokens/s  $19.56 per 1B tokens  attn_rel 0.2080  mlp_rel 0.3161  12.1 min
+  [stage2] step   1050      17.2M tokens     22,694 tokens/s  $19.46 per 1B tokens  attn_rel 0.2208  mlp_rel 0.3199  12.6 min
+  [stage2] step   1100      18.0M tokens     22,802 tokens/s  $19.37 per 1B tokens  attn_rel 0.2107  mlp_rel 0.3084  13.2 min
+  [stage2] step   1150      18.8M tokens     22,901 tokens/s  $19.29 per 1B tokens  attn_rel 0.2276  mlp_rel 0.3090  13.7 min
+  [stage2] step   1200      19.7M tokens     22,993 tokens/s  $19.21 per 1B tokens  attn_rel 0.2204  mlp_rel 0.3107  14.3 min
+  [stage2] step   1250      20.5M tokens     23,079 tokens/s  $19.14 per 1B tokens  attn_rel 0.1994  mlp_rel 0.3171  14.8 min
+  [stage2] step   1300      21.3M tokens     23,160 tokens/s  $19.07 per 1B tokens  attn_rel 0.2104  mlp_rel 0.3054  15.3 min
+  [stage2] step   1350      22.1M tokens     23,233 tokens/s  $19.01 per 1B tokens  attn_rel 0.2061  mlp_rel 0.3066  15.9 min
+  [stage2] step   1400      22.9M tokens     23,303 tokens/s  $18.95 per 1B tokens  attn_rel 0.1850  mlp_rel 0.2929  16.4 min
+  [stage2] step   1450      23.8M tokens     23,367 tokens/s  $18.90 per 1B tokens  attn_rel 0.1896  mlp_rel 0.3029  16.9 min
+  [stage2] step   1500      24.6M tokens     23,426 tokens/s  $18.85 per 1B tokens  attn_rel 0.1874  mlp_rel 0.2984  17.5 min
+  [stage2] step   1550      25.4M tokens     23,482 tokens/s  $18.81 per 1B tokens  attn_rel 0.1878  mlp_rel 0.3034  18.0 min
+  [stage2] step   1600      26.2M tokens     23,533 tokens/s  $18.77 per 1B tokens  attn_rel 0.1882  mlp_rel 0.3022  18.6 min
+  [stage2] step   1650      27.0M tokens     23,585 tokens/s  $18.73 per 1B tokens  attn_rel 0.1887  mlp_rel 0.2942  19.1 min
+  [stage2] step   1700      27.9M tokens     23,633 tokens/s  $18.69 per 1B tokens  attn_rel 0.1746  mlp_rel 0.2965  19.6 min
+  [stage2] step   1750      28.7M tokens     23,678 tokens/s  $18.65 per 1B tokens  attn_rel 0.1827  mlp_rel 0.2909  20.2 min
+  [stage2] step   1800      29.5M tokens     23,722 tokens/s  $18.62 per 1B tokens  attn_rel 0.1894  mlp_rel 0.2943  20.7 min
+  [stage2] step   1850      30.3M tokens     23,764 tokens/s  $18.59 per 1B tokens  attn_rel 0.1879  mlp_rel 0.2906  21.3 min
+  [stage2] step   1900      31.1M tokens     23,804 tokens/s  $18.55 per 1B tokens  attn_rel 0.1825  mlp_rel 0.2841  21.8 min
+  [stage2] step   1950      31.9M tokens     23,841 tokens/s  $18.53 per 1B tokens  attn_rel 0.1826  mlp_rel 0.2970  22.3 min
+  [stage2] step   2000      32.8M tokens     23,878 tokens/s  $18.50 per 1B tokens  attn_rel 0.1737  mlp_rel 0.2923  22.9 min
+  [stage2] step   2050      33.6M tokens     23,912 tokens/s  $18.47 per 1B tokens  attn_rel 0.2478  mlp_rel 0.2925  23.4 min
+  [stage2] step   2100      34.4M tokens     23,945 tokens/s  $18.45 per 1B tokens  attn_rel 0.1907  mlp_rel 0.2953  23.9 min
+  [stage2] step   2150      35.2M tokens     23,976 tokens/s  $18.42 per 1B tokens  attn_rel 0.1842  mlp_rel 0.2862  24.5 min
+  [stage2] step   2200      36.0M tokens     24,005 tokens/s  $18.40 per 1B tokens  attn_rel 0.2954  mlp_rel 0.2885  25.0 min
+  [stage2] step   2250      36.9M tokens     24,033 tokens/s  $18.38 per 1B tokens  attn_rel 0.1740  mlp_rel 0.2855  25.6 min
+  [stage2] step   2300      37.7M tokens     24,059 tokens/s  $18.36 per 1B tokens  attn_rel 0.1711  mlp_rel 0.2861  26.1 min
+  [stage2] step   2350      38.5M tokens     24,085 tokens/s  $18.34 per 1B tokens  attn_rel 0.1744  mlp_rel 0.2883  26.6 min
+  [stage2] step   2400      39.3M tokens     24,109 tokens/s  $18.32 per 1B tokens  attn_rel 0.1993  mlp_rel 0.2764  27.2 min
+  [stage2] step   2450      40.1M tokens     24,131 tokens/s  $18.30 per 1B tokens  attn_rel 0.1868  mlp_rel 0.2819  27.7 min
+  [stage2] step   2500      41.0M tokens     24,154 tokens/s  $18.29 per 1B tokens  attn_rel 0.1833  mlp_rel 0.2792  28.3 min
+  [stage2] step   2550      41.8M tokens     24,176 tokens/s  $18.27 per 1B tokens  attn_rel 0.1908  mlp_rel 0.2780  28.8 min
+  [stage2] step   2600      42.6M tokens     24,197 tokens/s  $18.25 per 1B tokens  attn_rel 0.1859  mlp_rel 0.2782  29.3 min
+  [stage2] step   2650      43.4M tokens     24,218 tokens/s  $18.24 per 1B tokens  attn_rel 0.1902  mlp_rel 0.2771  29.9 min
+  [stage2] step   2700      44.2M tokens     24,239 tokens/s  $18.22 per 1B tokens  attn_rel 0.1975  mlp_rel 0.2773  30.4 min
+  [stage2] step   2750      45.1M tokens     24,259 tokens/s  $18.21 per 1B tokens  attn_rel 0.1708  mlp_rel 0.2798  31.0 min
+  [stage2] step   2800      45.9M tokens     24,279 tokens/s  $18.19 per 1B tokens  attn_rel 0.2001  mlp_rel 0.2829  31.5 min
+  [stage2] step   2850      46.7M tokens     24,297 tokens/s  $18.18 per 1B tokens  attn_rel 0.1840  mlp_rel 0.2754  32.0 min
+  [stage2] step   2900      47.5M tokens     24,315 tokens/s  $18.16 per 1B tokens  attn_rel 0.1791  mlp_rel 0.2771  32.6 min
+  [stage2] step   2950      48.3M tokens     24,333 tokens/s  $18.15 per 1B tokens  attn_rel 0.2429  mlp_rel 0.2711  33.1 min
+  [stage2] step   3000      49.2M tokens     24,350 tokens/s  $18.14 per 1B tokens  attn_rel 0.1641  mlp_rel 0.2710  33.6 min
+  [stage2] step   3050      50.0M tokens     24,365 tokens/s  $18.13 per 1B tokens  attn_rel 0.1621  mlp_rel 0.2751  34.2 min
+  [stage2] step   3100      50.8M tokens     24,380 tokens/s  $18.12 per 1B tokens  attn_rel 0.1563  mlp_rel 0.2712  34.7 min
+  [stage2] step   3126      51.2M tokens     24,388 tokens/s  $18.11 per 1B tokens  attn_rel 0.1736  mlp_rel 0.2731  35.0 min
+  eval before stage 3: s_ce 22.5161  t_ce 1.2878  kl 21.3180  agree 0.0000
+== Stage 3: end-to-end distillation
+  [stage3] step      3       0.0M tokens      7,670 tokens/s  $57.58 per 1B tokens  kl 20.9448  ce 22.2449  0.1 min
+W1007 20:15:29.729000 1099 torch/_dynamo/convert_frame.py:1016] [0/8] torch._dynamo hit config.recompile_limit (8)
+W1007 20:15:29.729000 1099 torch/_dynamo/convert_frame.py:1016] [0/8]    function: 'forward' (/root/moth/gts/mamba_ssm/modules/gts.py:504)
+W1007 20:15:29.729000 1099 torch/_dynamo/convert_frame.py:1016] [0/8]    last reason: 0/7: self.quant_lambda == 0.004299921492735544              
+W1007 20:15:29.729000 1099 torch/_dynamo/convert_frame.py:1016] [0/8] To log all recompilation reasons, use TORCH_LOGS="recompiles".
+W1007 20:15:29.729000 1099 torch/_dynamo/convert_frame.py:1016] [0/8] To diagnose recompilation issues, see https://pytorch.org/docs/main/torch.compiler_troubleshooting.html.
+  [stage3] step     50       0.8M tokens     17,313 tokens/s  $25.51 per 1B tokens  kl 7.1709  ce 8.4812  0.8 min
+  [stage3] step    100       1.6M tokens     18,853 tokens/s  $23.43 per 1B tokens  kl 6.6021  ce 7.8741  1.4 min
+  [stage3] step    150       2.5M tokens     19,427 tokens/s  $22.74 per 1B tokens  kl 6.4947  ce 7.6908  2.1 min
+  [stage3] step    200       3.3M tokens     19,719 tokens/s  $22.40 per 1B tokens  kl 6.2964  ce 7.5492  2.8 min
+  [stage3] step    250       4.1M tokens     19,898 tokens/s  $22.20 per 1B tokens  kl 6.4713  ce 7.6701  3.4 min
+  [stage3] step    300       4.9M tokens     20,019 tokens/s  $22.06 per 1B tokens  kl 6.2363  ce 7.5678  4.1 min
+  [stage3] step    350       5.7M tokens     20,103 tokens/s  $21.97 per 1B tokens  kl 6.1947  ce 7.5441  4.8 min
+  [stage3] step    400       6.6M tokens     20,168 tokens/s  $21.90 per 1B tokens  kl 6.0997  ce 7.3422  5.4 min
+  [stage3] step    450       7.4M tokens     20,223 tokens/s  $21.84 per 1B tokens  kl 5.8226  ce 7.1227  6.1 min
+  [stage3] step    500       8.2M tokens     20,265 tokens/s  $21.79 per 1B tokens  kl 5.4173  ce 6.6880  6.7 min
+  [stage3] step    550       9.0M tokens     20,299 tokens/s  $21.76 per 1B tokens  kl 5.1075  ce 6.4327  7.4 min
+  [stage3] step    600       9.8M tokens     20,327 tokens/s  $21.73 per 1B tokens  kl 4.5735  ce 5.8879  8.1 min
+  [stage3] step    650      10.6M tokens     20,350 tokens/s  $21.70 per 1B tokens  kl 4.4558  ce 5.6717  8.7 min
+  [stage3] step    700      11.5M tokens     20,369 tokens/s  $21.68 per 1B tokens  kl 4.3195  ce 5.5321  9.4 min
+  [stage3] step    750      12.3M tokens     20,385 tokens/s  $21.67 per 1B tokens  kl 4.2212  ce 5.4568  10.0 min
+  [stage3] step    800      13.1M tokens     20,399 tokens/s  $21.65 per 1B tokens  kl 3.8871  ce 5.1187  10.7 min
+  [stage3] step    850      13.9M tokens     20,411 tokens/s  $21.64 per 1B tokens  kl 3.7899  ce 5.0378  11.4 min
+  [stage3] step    900      14.7M tokens     20,421 tokens/s  $21.63 per 1B tokens  kl 3.6364  ce 4.8545  12.0 min
+  [stage3] step    950      15.6M tokens     20,432 tokens/s  $21.62 per 1B tokens  kl 3.7891  ce 5.0927  12.7 min
+  [stage3] step   1000      16.4M tokens     20,440 tokens/s  $21.61 per 1B tokens  kl 3.5513  ce 4.6988  13.4 min
+  [stage3] step   1050      17.2M tokens     20,448 tokens/s  $21.60 per 1B tokens  kl 3.4482  ce 4.7078  14.0 min
+  [stage3] step   1100      18.0M tokens     20,456 tokens/s  $21.59 per 1B tokens  kl 3.4274  ce 4.6770  14.7 min
+  [stage3] step   1150      18.8M tokens     20,463 tokens/s  $21.58 per 1B tokens  kl 3.3878  ce 4.5619  15.3 min
+  [stage3] step   1200      19.7M tokens     20,471 tokens/s  $21.58 per 1B tokens  kl 3.3447  ce 4.5908  16.0 min
+  [stage3] step   1250      20.5M tokens     20,473 tokens/s  $21.57 per 1B tokens  kl 3.2465  ce 4.4795  16.7 min
+  [stage3] step   1300      21.3M tokens     20,479 tokens/s  $21.57 per 1B tokens  kl 3.1832  ce 4.4951  17.3 min
+  [stage3] step   1350      22.1M tokens     20,479 tokens/s  $21.57 per 1B tokens  kl 3.0990  ce 4.3440  18.0 min
+  [stage3] step   1400      22.9M tokens     20,484 tokens/s  $21.56 per 1B tokens  kl 3.0246  ce 4.2801  18.7 min
+  [stage3] step   1450      23.8M tokens     20,489 tokens/s  $21.56 per 1B tokens  kl 2.9287  ce 4.1712  19.3 min
+  [stage3] step   1500      24.6M tokens     20,494 tokens/s  $21.55 per 1B tokens  kl 3.0631  ce 4.3228  20.0 min
+  eval (quant 0.50): s_ce 4.1521  t_ce 1.2878  kl 2.9402  agree 0.3549
+  [stage3] step   1550      25.4M tokens     20,432 tokens/s  $21.62 per 1B tokens  kl 2.9403  ce 4.2019  20.7 min
+  [stage3] step   1600      26.2M tokens     20,438 tokens/s  $21.61 per 1B tokens  kl 2.8556  ce 4.1431  21.4 min
+  [stage3] step   1650      27.0M tokens     20,444 tokens/s  $21.60 per 1B tokens  kl 2.9390  ce 4.0842  22.0 min
+  [stage3] step   1700      27.9M tokens     20,450 tokens/s  $21.60 per 1B tokens  kl 2.8375  ce 4.1004  22.7 min
+  [stage3] step   1750      28.7M tokens     20,455 tokens/s  $21.59 per 1B tokens  kl 2.8211  ce 4.1384  23.4 min
+  [stage3] step   1800      29.5M tokens     20,460 tokens/s  $21.59 per 1B tokens  kl 2.7493  ce 3.9723  24.0 min
+  [stage3] step   1850      30.3M tokens     20,464 tokens/s  $21.58 per 1B tokens  kl 2.7642  ce 3.9385  24.7 min
+  [stage3] step   1900      31.1M tokens     20,469 tokens/s  $21.58 per 1B tokens  kl 2.7369  ce 3.9290  25.3 min
+  [stage3] step   1950      31.9M tokens     20,473 tokens/s  $21.57 per 1B tokens  kl 2.6496  ce 3.9028  26.0 min
+  [stage3] step   2000      32.8M tokens     20,477 tokens/s  $21.57 per 1B tokens  kl 2.6926  ce 3.8799  26.7 min
+  [stage3] step   2050      33.6M tokens     20,481 tokens/s  $21.57 per 1B tokens  kl 2.6541  ce 3.9319  27.3 min
+  [stage3] step   2100      34.4M tokens     20,484 tokens/s  $21.56 per 1B tokens  kl 2.6157  ce 3.9107  28.0 min
+  [stage3] step   2150      35.2M tokens     20,487 tokens/s  $21.56 per 1B tokens  kl 2.5453  ce 3.7973  28.7 min
+  [stage3] step   2200      36.0M tokens     20,489 tokens/s  $21.56 per 1B tokens  kl 2.6131  ce 3.8794  29.3 min
+  [stage3] step   2250      36.9M tokens     20,492 tokens/s  $21.55 per 1B tokens  kl 2.4800  ce 3.9277  30.0 min
+  [stage3] step   2300      37.7M tokens     20,495 tokens/s  $21.55 per 1B tokens  kl 2.6241  ce 3.8561  30.6 min
+  [stage3] step   2350      38.5M tokens     20,498 tokens/s  $21.55 per 1B tokens  kl 2.6080  ce 3.8736  31.3 min
+  [stage3] step   2400      39.3M tokens     20,501 tokens/s  $21.54 per 1B tokens  kl 2.5827  ce 3.8714  32.0 min
+  [stage3] step   2450      40.1M tokens     20,503 tokens/s  $21.54 per 1B tokens  kl 2.4748  ce 3.6835  32.6 min
+  [stage3] step   2500      41.0M tokens     20,506 tokens/s  $21.54 per 1B tokens  kl 3.3212  ce 4.6544  33.3 min
+  [stage3] step   2550      41.8M tokens     20,509 tokens/s  $21.54 per 1B tokens  kl 2.9727  ce 4.1492  34.0 min
+  [stage3] step   2600      42.6M tokens     20,511 tokens/s  $21.53 per 1B tokens  kl 3.0432  ce 4.2489  34.6 min
+  [stage3] step   2650      43.4M tokens     20,513 tokens/s  $21.53 per 1B tokens  kl 2.8675  ce 4.1093  35.3 min
+  [stage3] step   2700      44.2M tokens     20,516 tokens/s  $21.53 per 1B tokens  kl 3.1001  ce 4.2875  35.9 min
+  [stage3] step   2750      45.1M tokens     20,518 tokens/s  $21.53 per 1B tokens  kl 2.8504  ce 4.1416  36.6 min
+  [stage3] step   2800      45.9M tokens     20,520 tokens/s  $21.52 per 1B tokens  kl 2.9499  ce 4.1642  37.3 min
+  [stage3] step   2850      46.7M tokens     20,522 tokens/s  $21.52 per 1B tokens  kl 2.9046  ce 4.1963  37.9 min
+  [stage3] step   2900      47.5M tokens     20,524 tokens/s  $21.52 per 1B tokens  kl 2.7485  ce 4.0889  38.6 min
+  [stage3] step   2950      48.3M tokens     20,526 tokens/s  $21.52 per 1B tokens  kl 2.8521  ce 4.1958  39.2 min
+  [stage3] step   3000      49.2M tokens     20,528 tokens/s  $21.52 per 1B tokens  kl 2.8428  ce 4.0672  39.9 min
+  eval (quant 1.00): s_ce 4.0306  t_ce 1.2878  kl 2.8099  agree 0.3777
+  [stage3] step   3050      50.0M tokens     20,506 tokens/s  $21.54 per 1B tokens  kl 2.7516  ce 3.9687  40.6 min
+  [stage3] step   3100      50.8M tokens     20,517 tokens/s  $21.53 per 1B tokens  kl 2.7211  ce 3.9478  41.3 min
+  [stage3] step   3150      51.6M tokens     20,530 tokens/s  $21.51 per 1B tokens  kl 2.7213  ce 4.0886  41.9 min
+  [stage3] step   3200      52.4M tokens     20,542 tokens/s  $21.50 per 1B tokens  kl 2.6922  ce 4.0044  42.5 min
+  [stage3] step   3250      53.2M tokens     20,554 tokens/s  $21.49 per 1B tokens  kl 2.5890  ce 3.8260  43.2 min
+  [stage3] step   3300      54.1M tokens     20,566 tokens/s  $21.48 per 1B tokens  kl 2.5050  ce 3.7745  43.8 min
+  [stage3] step   3350      54.9M tokens     20,577 tokens/s  $21.46 per 1B tokens  kl 2.5858  ce 3.7874  44.5 min
+  [stage3] step   3400      55.7M tokens     20,588 tokens/s  $21.45 per 1B tokens  kl 2.5379  ce 3.7682  45.1 min
+  [stage3] step   3450      56.5M tokens     20,599 tokens/s  $21.44 per 1B tokens  kl 2.5909  ce 3.8372  45.7 min
+  [stage3] step   3500      57.3M tokens     20,610 tokens/s  $21.43 per 1B tokens  kl 2.5702  ce 3.8113  46.4 min
+  [stage3] step   3550      58.2M tokens     20,621 tokens/s  $21.42 per 1B tokens  kl 2.5428  ce 3.7806  47.0 min
+  [stage3] step   3600      59.0M tokens     20,631 tokens/s  $21.41 per 1B tokens  kl 2.3817  ce 3.5904  47.6 min
+  [stage3] step   3650      59.8M tokens     20,641 tokens/s  $21.40 per 1B tokens  kl 2.4417  ce 3.7406  48.3 min
+  [stage3] step   3700      60.6M tokens     20,651 tokens/s  $21.39 per 1B tokens  kl 2.4741  ce 3.7237  48.9 min
+  [stage3] step   3750      61.4M tokens     20,660 tokens/s  $21.38 per 1B tokens  kl 2.4853  ce 3.7929  49.6 min
+  [stage3] step   3800      62.3M tokens     20,670 tokens/s  $21.37 per 1B tokens  kl 2.3768  ce 3.7069  50.2 min
+  [stage3] step   3850      63.1M tokens     20,679 tokens/s  $21.36 per 1B tokens  kl 2.5244  ce 3.7567  50.8 min
+  [stage3] step   3900      63.9M tokens     20,688 tokens/s  $21.35 per 1B tokens  kl 2.3056  ce 3.3763  51.5 min
+  [stage3] step   3950      64.7M tokens     20,696 tokens/s  $21.34 per 1B tokens  kl 2.3637  ce 3.5360  52.1 min
+  [stage3] step   4000      65.5M tokens     20,705 tokens/s  $21.33 per 1B tokens  kl 2.2581  ce 3.4786  52.8 min
+  [stage3] step   4050      66.4M tokens     20,713 tokens/s  $21.32 per 1B tokens  kl 2.3919  ce 3.6482  53.4 min
+  [stage3] step   4100      67.2M tokens     20,721 tokens/s  $21.32 per 1B tokens  kl 2.4104  ce 3.5914  54.0 min
+  [stage3] step   4150      68.0M tokens     20,728 tokens/s  $21.31 per 1B tokens  kl 2.3684  ce 3.7142  54.7 min
+  [stage3] step   4200      68.8M tokens     20,734 tokens/s  $21.30 per 1B tokens  kl 2.2821  ce 3.5757  55.3 min
+  [stage3] step   4250      69.6M tokens     20,741 tokens/s  $21.29 per 1B tokens  kl 2.3850  ce 3.6959  56.0 min
+  [stage3] step   4300      70.5M tokens     20,748 tokens/s  $21.29 per 1B tokens  kl 2.2710  ce 3.5576  56.6 min
+  [stage3] step   4350      71.3M tokens     20,756 tokens/s  $21.28 per 1B tokens  kl 2.2873  ce 3.5904  57.2 min
+  [stage3] step   4400      72.1M tokens     20,762 tokens/s  $21.27 per 1B tokens  kl 2.3528  ce 3.6176  57.9 min
+  [stage3] step   4450      72.9M tokens     20,768 tokens/s  $21.27 per 1B tokens  kl 2.2825  ce 3.5841  58.5 min
+  [stage3] step   4500      73.7M tokens     20,774 tokens/s  $21.26 per 1B tokens  kl 2.3124  ce 3.5771  59.1 min
+  [stage3] step   4550      74.5M tokens     20,780 tokens/s  $21.25 per 1B tokens  kl 2.2474  ce 3.4243  59.8 min
+  eval (quant 1.00): s_ce 3.3970  t_ce 1.2878  kl 2.1884  agree 0.4461
+  [stage3] step   4600      75.4M tokens     20,765 tokens/s  $21.27 per 1B tokens  kl 2.2464  ce 3.4484  60.5 min
+  [stage3] step   4650      76.2M tokens     20,771 tokens/s  $21.26 per 1B tokens  kl 2.1789  ce 3.4713  61.1 min
+  [stage3] step   4700      77.0M tokens     20,777 tokens/s  $21.26 per 1B tokens  kl 2.2324  ce 3.5009  61.8 min
+  [stage3] step   4750      77.8M tokens     20,783 tokens/s  $21.25 per 1B tokens  kl 2.2208  ce 3.6011  62.4 min
+  [stage3] step   4800      78.6M tokens     20,789 tokens/s  $21.25 per 1B tokens  kl 2.2107  ce 3.4723  63.1 min
+  [stage3] step   4850      79.5M tokens     20,794 tokens/s  $21.24 per 1B tokens  kl 2.2055  ce 3.5160  63.7 min
+  [stage3] step   4900      80.3M tokens     20,799 tokens/s  $21.24 per 1B tokens  kl 2.1095  ce 3.3946  64.3 min
+  [stage3] step   4950      81.1M tokens     20,804 tokens/s  $21.23 per 1B tokens  kl 2.1113  ce 3.3998  65.0 min
+  [stage3] step   5000      81.9M tokens     20,809 tokens/s  $21.22 per 1B tokens  kl 2.1789  ce 3.4750  65.6 min
+  [stage3] step   5050      82.7M tokens     20,814 tokens/s  $21.22 per 1B tokens  kl 2.1433  ce 3.4468  66.3 min
+  [stage3] step   5100      83.6M tokens     20,819 tokens/s  $21.21 per 1B tokens  kl 2.2189  ce 3.4187  66.9 min
+  [stage3] step   5150      84.4M tokens     20,824 tokens/s  $21.21 per 1B tokens  kl 2.1733  ce 3.5079  67.5 min
+  [stage3] step   5200      85.2M tokens     20,829 tokens/s  $21.20 per 1B tokens  kl 2.1851  ce 3.3711  68.2 min
+  [stage3] step   5250      86.0M tokens     20,834 tokens/s  $21.20 per 1B tokens  kl 2.1136  ce 3.4473  68.8 min
+  [stage3] step   5300      86.8M tokens     20,838 tokens/s  $21.19 per 1B tokens  kl 2.2021  ce 3.4730  69.5 min
+  [stage3] step   5350      87.7M tokens     20,843 tokens/s  $21.19 per 1B tokens  kl 2.2344  ce 3.5508  70.1 min
+  [stage3] step   5400      88.5M tokens     20,848 tokens/s  $21.19 per 1B tokens  kl 2.1301  ce 3.4592  70.7 min
+  [stage3] step   5450      89.3M tokens     20,853 tokens/s  $21.18 per 1B tokens  kl 2.0636  ce 3.3326  71.4 min
+  [stage3] step   5500      90.1M tokens     20,857 tokens/s  $21.18 per 1B tokens  kl 2.0962  ce 3.3583  72.0 min
+  [stage3] step   5550      90.9M tokens     20,861 tokens/s  $21.17 per 1B tokens  kl 2.0464  ce 3.1934  72.6 min
+  [stage3] step   5600      91.8M tokens     20,866 tokens/s  $21.17 per 1B tokens  kl 2.1462  ce 3.3917  73.3 min
+  [stage3] step   5650      92.6M tokens     20,870 tokens/s  $21.16 per 1B tokens  kl 2.0028  ce 3.2454  73.9 min
+  [stage3] step   5700      93.4M tokens     20,874 tokens/s  $21.16 per 1B tokens  kl 2.0739  ce 3.2758  74.6 min
+  [stage3] step   5750      94.2M tokens     20,878 tokens/s  $21.15 per 1B tokens  kl 2.0246  ce 3.2263  75.2 min
+  [stage3] step   5800      95.0M tokens     20,882 tokens/s  $21.15 per 1B tokens  kl 2.0696  ce 3.3719  75.8 min
+  [stage3] step   5850      95.8M tokens     20,886 tokens/s  $21.15 per 1B tokens  kl 2.0676  ce 3.3348  76.5 min
+  [stage3] step   5900      96.7M tokens     20,890 tokens/s  $21.14 per 1B tokens  kl 2.1091  ce 3.4198  77.1 min
+  [stage3] step   5950      97.5M tokens     20,894 tokens/s  $21.14 per 1B tokens  kl 2.0516  ce 3.2922  77.8 min
+  [stage3] step   6000      98.3M tokens     20,895 tokens/s  $21.14 per 1B tokens  kl 1.9341  ce 3.2810  78.4 min
+  [stage3] step   6050      99.1M tokens     20,899 tokens/s  $21.13 per 1B tokens  kl 2.0186  ce 3.1800  79.0 min
+  [stage3] step   6100      99.9M tokens     20,903 tokens/s  $21.13 per 1B tokens  kl 2.0935  ce 3.3061  79.7 min
+  eval (quant 1.00): s_ce 3.2055  t_ce 1.2878  kl 1.9896  agree 0.4734
+  [stage3] step   6150     100.8M tokens     20,891 tokens/s  $21.14 per 1B tokens  kl 2.0627  ce 3.4198  80.4 min
+  [stage3] step   6200     101.6M tokens     20,894 tokens/s  $21.14 per 1B tokens  kl 2.1057  ce 3.4208  81.0 min
+  [stage3] step   6250     102.4M tokens     20,898 tokens/s  $21.13 per 1B tokens  kl 2.0207  ce 3.2311  81.7 min
+  [stage3] step   6300     103.2M tokens     20,902 tokens/s  $21.13 per 1B tokens  kl 2.1103  ce 3.3937  82.3 min
+  [stage3] step   6350     104.0M tokens     20,905 tokens/s  $21.13 per 1B tokens  kl 2.0043  ce 3.3031  82.9 min
+  [stage3] step   6400     104.9M tokens     20,909 tokens/s  $21.12 per 1B tokens  kl 2.0105  ce 3.2170  83.6 min
+  [stage3] step   6450     105.7M tokens     20,912 tokens/s  $21.12 per 1B tokens  kl 2.1525  ce 3.3912  84.2 min
+  [stage3] step   6500     106.5M tokens     20,916 tokens/s  $21.12 per 1B tokens  kl 1.9749  ce 3.2854  84.9 min
+  [stage3] step   6550     107.3M tokens     20,919 tokens/s  $21.11 per 1B tokens  kl 1.9839  ce 3.2209  85.5 min
+  [stage3] step   6600     108.1M tokens     20,922 tokens/s  $21.11 per 1B tokens  kl 2.1171  ce 3.4340  86.1 min
+  [stage3] step   6650     109.0M tokens     20,925 tokens/s  $21.11 per 1B tokens  kl 1.9545  ce 3.2593  86.8 min
+  [stage3] step   6700     109.8M tokens     20,927 tokens/s  $21.10 per 1B tokens  kl 1.9538  ce 3.1734  87.4 min
+  [stage3] step   6750     110.6M tokens     20,930 tokens/s  $21.10 per 1B tokens  kl 2.0528  ce 3.3794  88.1 min
+  [stage3] step   6800     111.4M tokens     20,933 tokens/s  $21.10 per 1B tokens  kl 1.9901  ce 3.2554  88.7 min
+  [stage3] step   6850     112.2M tokens     20,936 tokens/s  $21.10 per 1B tokens  kl 1.9258  ce 3.2378  89.3 min
+  [stage3] step   6900     113.0M tokens     20,939 tokens/s  $21.09 per 1B tokens  kl 1.9538  ce 3.2503  90.0 min
+  [stage3] step   6950     113.9M tokens     20,942 tokens/s  $21.09 per 1B tokens  kl 1.9964  ce 3.1914  90.6 min
+  [stage3] step   7000     114.7M tokens     20,945 tokens/s  $21.09 per 1B tokens  kl 1.9344  ce 3.1333  91.3 min
+  [stage3] step   7050     115.5M tokens     20,948 tokens/s  $21.08 per 1B tokens  kl 1.9860  ce 3.2684  91.9 min
+  [stage3] step   7100     116.3M tokens     20,950 tokens/s  $21.08 per 1B tokens  kl 1.9436  ce 3.2174  92.5 min
+  [stage3] step   7150     117.1M tokens     20,953 tokens/s  $21.08 per 1B tokens  kl 1.8743  ce 3.0505  93.2 min
+  [stage3] step   7200     118.0M tokens     20,956 tokens/s  $21.08 per 1B tokens  kl 1.9599  ce 3.2307  93.8 min
+  [stage3] step   7250     118.8M tokens     20,958 tokens/s  $21.07 per 1B tokens  kl 1.7990  ce 2.9492  94.5 min
+  [stage3] step   7300     119.6M tokens     20,961 tokens/s  $21.07 per 1B tokens  kl 1.7767  ce 3.0274  95.1 min
+  [stage3] step   7350     120.4M tokens     20,964 tokens/s  $21.07 per 1B tokens  kl 1.8395  ce 3.1529  95.7 min
+  [stage3] step   7400     121.2M tokens     20,966 tokens/s  $21.07 per 1B tokens  kl 1.8315  ce 3.0575  96.4 min
+  [stage3] step   7450     122.1M tokens     20,969 tokens/s  $21.06 per 1B tokens  kl 1.8445  ce 3.1175  97.0 min
+  [stage3] step   7500     122.9M tokens     20,971 tokens/s  $21.06 per 1B tokens  kl 1.7392  ce 3.0031  97.7 min
+  [stage3] step   7550     123.7M tokens     20,974 tokens/s  $21.06 per 1B tokens  kl 1.6497  ce 2.9462  98.3 min
+  [stage3] step   7600     124.5M tokens     20,976 tokens/s  $21.06 per 1B tokens  kl 1.9026  ce 3.1448  98.9 min
+  [stage3] step   7650     125.3M tokens     20,978 tokens/s  $21.05 per 1B tokens  kl 1.7748  ce 3.1043  99.6 min
+  [stage3] step   7684     125.9M tokens     20,980 tokens/s  $21.05 per 1B tokens  kl 1.6932  ce 2.9424  100.0 min
+  final eval (ternary): s_ce 2.8918  t_ce 1.2878  kl 1.6765  agree 0.5178
+++ date -u +%T
++ echo '=== DONE 21:55:25 ==='
+=== DONE 21:55:25 ===
