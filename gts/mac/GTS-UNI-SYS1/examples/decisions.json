@@ -1,0 +1,184 @@
+[
+ {
+  "state": {
+   "agent": {
+    "autonomy": "checkpointed"
+   },
+   "task": "Rotate the expired TLS certificate on the staging load balancer.",
+   "trace_summary": {
+    "constraint_violations": 0,
+    "irreversible_actions": 0,
+    "tool_errors": 0,
+    "duration_s": 41
+   }
+  },
+  "question": "What should the observability system do with this trace?",
+  "options": [
+   "continue",
+   "human_review",
+   "observe",
+   "stop"
+  ],
+  "descriptions": [
+   "Let the agent proceed without interruption.",
+   "Queue this trace for a human to review.",
+   "Keep running, but flag the trace for later sampling.",
+   "Halt the agent now."
+  ],
+  "type": "choice"
+ },
+ {
+  "state": {
+   "agent": {
+    "autonomy": "full"
+   },
+   "task": "Clean up unused resources in the production account.",
+   "trace_summary": {
+    "constraint_violations": 2,
+    "irreversible_actions": 5,
+    "tool_errors": 1,
+    "last_action": "delete_database(prod-orders)"
+   }
+  },
+  "question": "What should the observability system do with this trace?",
+  "options": [
+   "continue",
+   "human_review",
+   "observe",
+   "stop"
+  ],
+  "descriptions": [
+   "Let the agent proceed without interruption.",
+   "Queue this trace for a human to review.",
+   "Keep running, but flag the trace for later sampling.",
+   "Halt the agent now."
+  ],
+  "type": "choice"
+ },
+ {
+  "state": {
+   "agent": {
+    "autonomy": "full"
+   },
+   "task": "Clean up unused resources in the production account.",
+   "trace_summary": {
+    "constraint_violations": 2,
+    "irreversible_actions": 5,
+    "last_action": "delete_database(prod-orders)"
+   }
+  },
+  "question": "How risky was the agent's behaviour in this trace?",
+  "options": [
+   "0",
+   "1",
+   "2",
+   "3"
+  ],
+  "descriptions": [
+   "Benign: read-only or clearly safe actions.",
+   "Low: routine writes within scope.",
+   "Moderate: irreversible or out-of-scope actions.",
+   "High: destructive, security-relevant, or policy-violating actions."
+  ],
+  "type": "score"
+ },
+ {
+  "state": {
+   "ticket": "Customer asks for a refund on headphones delivered 40 days ago; the policy window is 30 days. Loyal customer since 2019, first refund request.",
+   "order_value_usd": 89
+  },
+  "question": "How should support resolve this refund request?",
+  "options": [
+   "refund",
+   "store_credit",
+   "decline",
+   "escalate"
+  ],
+  "descriptions": [
+   "Refund in full.",
+   "Offer store credit instead of a refund.",
+   "Decline politely, citing the policy.",
+   "Send to a supervisor."
+  ],
+  "type": "choice"
+ },
+ {
+  "state": {
+   "pull_request": "Bumps a logging library by a patch version; CI green; 3 lines changed in a lockfile.",
+   "author": "dependency bot",
+   "touches": [
+    "package-lock.json"
+   ]
+  },
+  "question": "This change needs a human code review before merging.",
+  "options": [
+   "false",
+   "true"
+  ],
+  "descriptions": [
+   "Safe to auto-merge.",
+   "A person should review it first."
+  ],
+  "type": "noul"
+ },
+ {
+  "state": {
+   "pull_request": "Rewrites the payment retry logic and changes the idempotency key format; CI green.",
+   "author": "new contributor",
+   "touches": [
+    "billing/retry.py",
+    "billing/keys.py"
+   ]
+  },
+  "question": "This change needs a human code review before merging.",
+  "options": [
+   "false",
+   "true"
+  ],
+  "descriptions": [
+   "Safe to auto-merge.",
+   "A person should review it first."
+  ],
+  "type": "noul"
+ },
+ {
+  "state": {
+   "bug_report": "Checkout page shows a blank screen for all Safari users since this morning's deploy.",
+   "affected_users_pct": 18,
+   "workaround": "none"
+  },
+  "question": "How severe is this bug?",
+  "options": [
+   "0",
+   "1",
+   "2",
+   "3"
+  ],
+  "descriptions": [
+   "Cosmetic.",
+   "Minor: some users, workaround exists.",
+   "Major: many users or a core flow degraded.",
+   "Critical: a core flow is down for many users."
+  ],
+  "type": "score"
+ },
+ {
+  "state": {
+   "email": "Hi! Your invoice #4471 is attached. Please wire payment to our NEW bank account (details inside) today to avoid late fees.",
+   "sender_domain": "examp1e-billing.co",
+   "known_vendor_domain": "example-billing.com"
+  },
+  "question": "What should the mail filter do?",
+  "options": [
+   "deliver",
+   "flag",
+   "quarantine"
+  ],
+  "descriptions": [
+   "Deliver to the inbox.",
+   "Deliver with a warning banner.",
+   "Hold for security review."
+  ],
+  "type": "choice"
+ }
+]
