@@ -34,3 +34,17 @@ model, temperatures = Sys1.load("sys1_gts3.pt")
 Benchmark: LocalLLaMA/typed-decisions test (2,000). The same harness with ModernBERT-base reaches 0.777 / 0.094 /
 0.051 / 0.168 fitted (its weights are not kept here); the prior is 0.479 / 0.327 / 0.181 / 0.034. Results with
 per-type and per-depth breakdowns: `results/sys1/`.
+
+## `glue_gts3/`: GLUE classifiers on GTS3
+
+`scripts/glue_finetune.py` (3 epochs, batch 32, 128 tokens, lr 1e-4, ternary lr 3e-4; MNLI and QNLI on 100K
+examples), each task's best epoch on the dev set. Head on [CLS] and the mean final state; pairs as "[CLS] a [SEP] b
+[SEP]". Load one: `GTSClassifier.load("sst2.pt")` (from `scripts/glue_finetune.py`; the file also holds its task,
+label count, epoch and dev scores).
+
+| SST-2 | MRPC F1 | RTE | QNLI | MNLI-m | CoLA MCC | STS-B Spearman |
+|---|---|---|---|---|---|---|
+| 86.4 | 81.5 | 52.7 | 73.5 | 62.9 | 0.17 | 0.58 |
+
+The same harness: BERT-base averages 79.8, DistilBERT 77.9, TinyBERT-4L 70.4, GTS3 61.7 (`results/glue/`). GTS-Uni's
+classifiers (61.2 at 3 passes, 61.3 at 1) were not kept.
