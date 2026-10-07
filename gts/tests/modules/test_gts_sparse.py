@@ -103,7 +103,7 @@ def test_prepare_inference_matches_dense():
     torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.parametrize("wtop", [0, 2, 6])
+@pytest.mark.parametrize("wtop", [0, 2, 8])
 @pytest.mark.parametrize("n_tok,d,n_trees,depth,bias", [(70, 96, 2, 3, True), (33, 64, 3, 5, False), (130, 32, 1, 2, True)])
 def test_path_gradients_match_dense(n_tok, d, n_trees, depth, bias, wtop, monkeypatch):
     """sparse_path_route: values and every gradient against an autograd reference with the hard walk and no

@@ -278,7 +278,7 @@ if HAVE_TRITON:
 if HAVE_TRITON:
 
     @triton.jit
-    def _seg_own(SRC, s_src, OFF, TOK, VAL, DW, d, BE: tl.constexpr, BD: tl.constexpr):
+    def _seg_own(SRC, s_src, OFF, TOK, VAL, DW, DB, d, HAS_DB: tl.constexpr, BE: tl.constexpr, BD: tl.constexpr):
         """DW[r] = sum over r's run of the node-sorted entries of VAL * SRC[tok]: one program per (row, column chunk)
         owns its output, so no atomics."""
         r = tl.program_id(0)
@@ -288,6 +288,7 @@ if HAVE_TRITON:
             cols = tl.program_id(1) * BD + tl.arange(0, BD)
             cm = cols < d
             acc = tl.zeros((BD,), dtype=tl.float32)
+            vs = tl.zeros((BE,), dtype=tl.float32)
             for e0 in range(start, end, BE):
                 e = e0 + tl.arange(0, BE)
                 ok = e < end
@@ -295,10 +296,14 @@ if HAVE_TRITON:
                 val = tl.load(VAL + e, mask=ok, other=0.0)
                 v = tl.load(SRC + tok[:, None] * s_src + cols[None, :], mask=ok[:, None] & cm[None, :], other=0.0)
                 acc += tl.sum(v.to(tl.float32) * val[:, None], axis=0)
+                vs += val
             tl.store(DW + r * d + cols, acc, mask=cm)
+            if HAS_DB:
+                if tl.program_id(1) == 0:
+                    tl.store(DB + r, tl.sum(vs, axis=0))
 
 
-WGRAD_TOP = 6  # tree levels whose weight gradients come from one small dense GEMM (shared by many tokens)
+WGRAD_TOP = 8  # tree levels whose weight gradients come from one small dense GEMM (shared by many tokens)
 
 
 def _wgrad_levels(src, nodes, vals, rows, n_nodes, top, want_bias, block_e=32, block_d=128):
@@ -309,26 +314,26 @@ def _wgrad_levels(src, nodes, vals, rows, n_nodes, top, want_bias, block_e=32, b
     d = src.shape[1]
     top = min(top, n_lv)
     dw = torch.zeros(rows, d, device=src.device, dtype=torch.float32)
+    db = torch.zeros(rows, device=src.device, dtype=torch.float32) if want_bias else None
     if top:
         nt = 2 ** top - 1
         col = (torch.arange(n_trees, device=src.device, dtype=torch.int64)[None, :, None] * nt
                + (nodes[:, :, :top].long() - torch.arange(n_trees, device=src.device)[None, :, None] * n_nodes))
         a = torch.zeros(n_tok, n_trees * nt, device=src.device, dtype=src.dtype)
         a.scatter_(1, col.reshape(n_tok, -1), vals[:, :, :top].reshape(n_tok, -1).to(src.dtype))
-        dw[top_rows(n_trees, n_nodes, top, src.device)] = (a.t() @ src).float()
+        tr = top_rows(n_trees, n_nodes, top, src.device)
+        dw[tr] = (a.t() @ src).float()
+        if want_bias:
+            db.index_put_((tr,), torch.zeros(tr.numel(), device=src.device).scatter_add_(
+                0, col.reshape(-1), vals[:, :, :top].reshape(-1).float()))
     if top < n_lv:
         nd = nodes[:, :, top:].reshape(-1)
         vd = vals[:, :, top:].reshape(-1)
         sorted_nodes, perm = torch.sort(nd)
         tok = (perm // (n_trees * (n_lv - top))).to(torch.int32)
-        off = torch.zeros(rows + 1, device=src.device, dtype=torch.int32)
-        off[1:] = torch.cumsum(torch.bincount(sorted_nodes.long(), minlength=rows)[:rows], 0)
-        _seg_own[(rows, triton.cdiv(d, block_d))](src, src.stride(0), off, tok, vd[perm].contiguous(), dw, d,
-                                                  BE=block_e, BD=block_d)
-    db = None
-    if want_bias:
-        db = torch.zeros(rows, device=src.device, dtype=torch.float32)
-        db.index_add_(0, nodes.reshape(-1).long(), vals.reshape(-1).float())
+        off = torch.searchsorted(sorted_nodes, torch.arange(rows + 1, device=src.device, dtype=sorted_nodes.dtype)).to(torch.int32)
+        _seg_own[(rows, triton.cdiv(d, block_d))](src, src.stride(0), off, tok, vd[perm].contiguous(), dw,
+                                                  db if want_bias else dw, d, HAS_DB=want_bias, BE=block_e, BD=block_d)
     return dw, db
 
 
