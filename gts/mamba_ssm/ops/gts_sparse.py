@@ -399,10 +399,14 @@ if HAVE_TRITON:
 WGRAD_TOP = 8  # tree levels whose weight gradients come from one small dense GEMM (shared by many tokens)
 
 
-def _wgrad_levels(src, nodes, vals, rows, n_nodes, top, want_bias, block_e=32, block_d=128):
+SEG_ARGS = {"block_e": 32, "block_d": 128, "num_warps": 4}  # _seg_own tiles (profile_train_step.py sweeps them)
+
+
+def _wgrad_levels(src, nodes, vals, rows, n_nodes, top, want_bias, block_e=None, block_d=None, num_warps=None):
     """dW[m] = sum over path entries at node m of vals * src[token], and (want_bias) db[m] = sum of vals.
     nodes, vals: (tokens, trees, depth + 1). The first ``top`` levels by a dense (tokens x trees * (2^top - 1)) GEMM,
     the deeper ones by node-sorted runs, each owned by one program."""
+    block_e, block_d, num_warps = block_e or SEG_ARGS["block_e"], block_d or SEG_ARGS["block_d"], num_warps or SEG_ARGS["num_warps"]
     n_tok, n_trees, n_lv = nodes.shape
     d = src.shape[1]
     top = min(top, n_lv)
@@ -426,7 +430,8 @@ def _wgrad_levels(src, nodes, vals, rows, n_nodes, top, want_bias, block_e=32, b
         tok = (perm // (n_trees * (n_lv - top))).to(torch.int32)
         off = torch.searchsorted(sorted_nodes, torch.arange(rows + 1, device=src.device, dtype=sorted_nodes.dtype)).to(torch.int32)
         _seg_own[(rows, triton.cdiv(d, block_d))](src, src.stride(0), off, tok, vd[perm].contiguous(), dw,
-                                                  db if want_bias else dw, d, HAS_DB=want_bias, BE=block_e, BD=block_d)
+                                                  db if want_bias else dw, d, HAS_DB=want_bias, BE=block_e, BD=block_d,
+                                                  num_warps=num_warps)
     return dw, db
 
 

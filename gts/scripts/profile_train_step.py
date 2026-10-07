@@ -103,6 +103,40 @@ def main():
         del m
         torch.cuda.empty_cache()
         torch._dynamo.reset()
+    wgrad_sweep(blob)
+
+
+def wgrad_sweep(blob):
+    """The weight-gradient routine alone, on one real layer's paths (GTS3 weights, the batch's input to that layer)."""
+    import mamba_ssm.ops.gts_sparse as ops
+
+    m = build(blob, "as trained")
+    deep = m.backbone.layers[7]._orig_mod.mixer.deep if hasattr(m.backbone.layers[7], "_orig_mod") else m.backbone.layers[7].mixer.deep
+    x = torch.randn(64 * 512, deep.node_in.shape[1], device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        _, nodes, logits = ops.sparse_route_fwd(x, deep._w_in().bfloat16(), deep.node_bias, deep._w_out().bfloat16(),
+                                                deep.n_trees, deep.n_nodes, deep.depth)
+    vals = torch.nn.functional.gelu(logits)
+    rows = deep.n_trees * deep.n_nodes
+
+    def t(fn, reps=10):
+        fn()
+        torch.cuda.synchronize()
+        a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        a.record()
+        for _ in range(reps):
+            fn()
+        b.record()
+        torch.cuda.synchronize()
+        return a.elapsed_time(b) / reps
+
+    print("\nweight-gradient routine alone (one layer, 32,768 tokens): dense levels, run-kernel tiles -> ms", flush=True)
+    for top in (7, 8, 9):
+        for be, bd, nw in ((32, 128, 4), (64, 128, 4), (16, 256, 4), (32, 256, 8), (64, 64, 2), (128, 128, 8)):
+            ms = t(lambda: ops._wgrad_levels(x, nodes, vals, rows, deep.n_nodes, top, True, be, bd, nw))
+            print(f"  top {top}  BE {be:3d} BD {bd:3d} warps {nw}: {ms:.3f} ms", flush=True)
+    a_ = torch.randn(64 * 512, rows, device="cuda", dtype=torch.bfloat16)
+    print(f"  (dense equivalent, one (tokens x nodes)^T GEMM: {t(lambda: a_.t() @ x):.3f} ms)", flush=True)
 
 
 if __name__ == "__main__":
