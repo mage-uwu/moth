@@ -313,50 +313,114 @@ def _wgrad(src, nodes_sorted, tok_sorted, val_sorted, rows, d, want_bias, block_
     return dw, (db if want_bias else None)
 
 
+def _path_bwd_impl(dout, x, w_in, w_out, nodes, logits, act, rows, has_bias, kw, want_x, want_w_in, want_w_out):
+    code = {"gelu": 0, "split": 0, "linear": 1}[act] if isinstance(act, str) else act
+    dt = x.dtype
+    wi, wo = w_in.to(dt).contiguous(), w_out.to(dt).contiguous()
+    n_tok, d = x.shape
+    P = nodes.shape[1] * nodes.shape[2]
+    dout = dout.to(dt).contiguous()
+    dl = torch.empty(n_tok, P, device=x.device, dtype=torch.float32)
+    dx = torch.empty(n_tok, d, device=x.device, dtype=torch.float32)
+    bm = kw.get("block_m", 8)
+    _path_bwd[(triton.cdiv(n_tok, bm),)](dout, wi, wo, nodes, logits, dl, dx, n_tok, d, dout.stride(0), dx.stride(0),
+                                         P=P, ACT=code, BM=bm, BD=kw.get("block_d", 128), num_warps=kw.get("num_warps", 2))
+    dw_in = db = dw_out = None
+    if want_w_in or want_w_out:
+        sorted_nodes, perm = torch.sort(nodes.reshape(-1))
+        tok = (perm // P).to(torch.int32)
+        if want_w_out:
+            coef = torch.nn.functional.gelu(logits) if code == 0 else logits
+            dw_out, _ = _wgrad(dout, sorted_nodes, tok, coef.reshape(-1)[perm].contiguous(), rows, d, False)
+        if want_w_in:
+            dw_in, db = _wgrad(x, sorted_nodes, tok, dl.reshape(-1)[perm].contiguous(), rows, d, has_bias)
+    return dx, dw_in, db, dw_out
+
+
 class SparsePathRoute(torch.autograd.Function):
     """out = the deep trees' output, sparse forward and backward, with the plain FFF routing gradient (no gradient
-    through the hard branches): GTS._forward_route_ste with route_ste=False, as a sparse computation."""
+    through the hard branches): GTS._forward_route_ste with route_ste=False, as a sparse computation. (Eager use;
+    under torch.compile, ``sparse_path_route`` goes through the custom ops below instead.)"""
 
     @staticmethod
     def forward(ctx, x, w_in, bias, w_out, n_trees, n_nodes, depth, act, kw):
         dt = x.dtype
-        wi, wo = w_in.to(dt).contiguous(), w_out.to(dt).contiguous()
-        out, nodes, logits = sparse_route_fwd(x, wi, bias, wo, n_trees, n_nodes, depth, act, **kw)
-        ctx.save_for_backward(x, wi, wo, nodes, logits)
-        ctx.cfg = (act, bias is not None, w_in.shape[0], w_in.dtype, w_out.dtype, bias.dtype if bias is not None else None, kw)
+        out, nodes, logits = sparse_route_fwd(x, w_in.to(dt).contiguous(), bias, w_out.to(dt).contiguous(), n_trees,
+                                              n_nodes, depth, act, **kw)
+        ctx.save_for_backward(x, w_in, w_out, nodes, logits)
+        ctx.cfg = (act, bias, kw)
         return out
 
     @staticmethod
     def backward(ctx, dout):
-        x, wi, wo, nodes, logits = ctx.saved_tensors
-        act, has_bias, rows, wi_dt, wo_dt, b_dt, kw = ctx.cfg
-        code = {"gelu": 0, "split": 0, "linear": 1}[act]
-        n_tok, d = x.shape
-        P = nodes.shape[1] * nodes.shape[2]
-        dout = dout.to(x.dtype).contiguous()
-        dl = torch.empty(n_tok, P, device=x.device, dtype=torch.float32)
-        dx = torch.empty(n_tok, d, device=x.device, dtype=torch.float32)
-        bm = kw.get("block_m", 8)
-        _path_bwd[(triton.cdiv(n_tok, bm),)](dout, wi, wo, nodes, logits, dl, dx, n_tok, d, dout.stride(0), dx.stride(0),
-                                             P=P, ACT=code, BM=bm, BD=kw.get("block_d", 128), num_warps=kw.get("num_warps", 2))
-        dw_in = db = dw_out = None
-        if ctx.needs_input_grad[1] or ctx.needs_input_grad[2] or ctx.needs_input_grad[3]:
-            flat = nodes.reshape(-1)
-            sorted_nodes, perm = torch.sort(flat)
-            tok = (perm // P).to(torch.int32)
-            if ctx.needs_input_grad[3]:
-                coef = torch.nn.functional.gelu(logits) if code == 0 else logits
-                dw_out, _ = _wgrad(dout, sorted_nodes, tok, coef.reshape(-1)[perm].contiguous(), rows, d, False)
-                dw_out = dw_out.to(wo_dt)
-            if ctx.needs_input_grad[1] or ctx.needs_input_grad[2]:
-                dw_in, db = _wgrad(x, sorted_nodes, tok, dl.reshape(-1)[perm].contiguous(), rows, d, has_bias)
-                dw_in = dw_in.to(wi_dt)
-                db = db.to(b_dt) if db is not None else None
-        return dx.to(x.dtype), dw_in, db, dw_out, None, None, None, None, None
+        x, w_in, w_out, nodes, logits = ctx.saved_tensors
+        act, bias, kw = ctx.cfg
+        dx, dw_in, db, dw_out = _path_bwd_impl(dout, x, w_in, w_out, nodes, logits, act, w_in.shape[0], bias is not None,
+                                               kw, True, ctx.needs_input_grad[1] or ctx.needs_input_grad[2],
+                                               ctx.needs_input_grad[3])
+        return (dx.to(x.dtype), dw_in.to(w_in.dtype) if dw_in is not None else None,
+                db.to(bias.dtype) if db is not None else None, dw_out.to(w_out.dtype) if dw_out is not None else None,
+                None, None, None, None, None)
+
+
+# The same as torch.library custom ops, so that torch.compile treats the kernels as opaque calls (tracing into raw
+# Triton launches inside an autograd.Function gave wrong values).
+@torch.library.custom_op("gts_sparse::path_fwd", mutates_args=())
+def _path_fwd_op(x: torch.Tensor, w_in: torch.Tensor, bias: torch.Tensor | None, w_out: torch.Tensor, n_trees: int,
+                 n_nodes: int, depth: int, act: int, block_m: int, block_d: int, num_warps: int
+                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    dt = x.dtype
+    out, nodes, logits = sparse_route_fwd(x, w_in.to(dt).contiguous(), bias, w_out.to(dt).contiguous(), n_trees, n_nodes,
+                                          depth, "gelu" if act == 0 else "linear", block_m=block_m, block_d=block_d,
+                                          num_warps=num_warps)
+    return out, nodes, logits
+
+
+@_path_fwd_op.register_fake
+def _(x, w_in, bias, w_out, n_trees, n_nodes, depth, act, block_m, block_d, num_warps):
+    n = x.shape[0]
+    return (x.new_empty(x.shape, dtype=torch.float32), x.new_empty((n, n_trees, depth + 1), dtype=torch.int32),
+            x.new_empty((n, n_trees, depth + 1), dtype=torch.float32))
+
+
+@torch.library.custom_op("gts_sparse::path_bwd", mutates_args=())
+def _path_bwd_op(dout: torch.Tensor, x: torch.Tensor, w_in: torch.Tensor, w_out: torch.Tensor, nodes: torch.Tensor,
+                 logits: torch.Tensor, has_bias: bool, act: int, block_m: int, block_d: int, num_warps: int
+                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    kw = dict(block_m=block_m, block_d=block_d, num_warps=num_warps)
+    dx, dw_in, db, dw_out = _path_bwd_impl(dout, x, w_in, w_out, nodes, logits, act, w_in.shape[0], has_bias, kw,
+                                           True, True, True)
+    db = db if db is not None else dx.new_zeros(0)
+    return dx.to(x.dtype), dw_in.to(w_in.dtype), db, dw_out.to(w_out.dtype)
+
+
+@_path_bwd_op.register_fake
+def _(dout, x, w_in, w_out, nodes, logits, has_bias, act, block_m, block_d, num_warps):
+    return (torch.empty_like(x), torch.empty_like(w_in),
+            x.new_empty((w_in.shape[0],) if has_bias else (0,), dtype=torch.float32), torch.empty_like(w_out))
+
+
+def _path_setup(ctx, inputs, output):
+    x, w_in, bias, w_out, n_trees, n_nodes, depth, act, block_m, block_d, num_warps = inputs
+    _, nodes, logits = output
+    ctx.save_for_backward(x, w_in, w_out, nodes, logits)
+    ctx.cfg = (bias is not None, bias.dtype if bias is not None else None, act, block_m, block_d, num_warps)
+
+
+def _path_backward(ctx, dout, _dnodes, _dlogits):
+    x, w_in, w_out, nodes, logits = ctx.saved_tensors
+    has_bias, b_dt, act, block_m, block_d, num_warps = ctx.cfg
+    dx, dw_in, db, dw_out = _path_bwd_op(dout, x, w_in, w_out, nodes, logits, has_bias, act, block_m, block_d, num_warps)
+    return dx, dw_in, (db.to(b_dt) if has_bias else None), dw_out, None, None, None, None, None, None, None
+
+
+_path_fwd_op.register_autograd(_path_backward, setup_context=_path_setup)
 
 
 def sparse_path_route(x, w_in, bias, w_out, n_trees, n_nodes, depth, act="gelu", **kw):
     """Differentiable sparse deep trees with the plain FFF routing gradient (route_ste=False). x: (tokens, d); returns
     (tokens, d) float32. ``kw``: tile sizes for the kernels (block_m, block_d, num_warps)."""
-    kw = {k: v for k, v in kw.items() if k in ("block_m", "block_d", "num_warps")}
-    return SparsePathRoute.apply(x, w_in, bias, w_out, n_trees, n_nodes, depth, act, kw)
+    kw = {"block_m": 8, "block_d": 128, "num_warps": 2, **{k: v for k, v in kw.items() if k in ("block_m", "block_d", "num_warps")}}
+    code = {"gelu": 0, "split": 0, "linear": 1}[act]
+    out, _, _ = _path_fwd_op(x, w_in, bias, w_out, n_trees, n_nodes, depth, code, kw["block_m"], kw["block_d"], kw["num_warps"])
+    return out

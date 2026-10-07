@@ -94,7 +94,7 @@ def main():
     base = None
     for variant in ("as trained", "no deep trees", "deep trees, no side-branch (route_ste) gradient", "sparse deep trees, path-only gradient"):
         m = build(blob, variant)
-        ms = run(m, a.batch, a.seq, a.steps, prof=variant == "as trained")
+        ms = run(m, a.batch, a.seq, a.steps, prof=variant in ("as trained", "sparse deep trees, path-only gradient"))
         base = base or ms
         print(f"{variant:52s} {ms:7.1f} ms/step  {n / ms * 1e3:>9,.0f} tokens/s  ({ms / base:.2f} of the step as trained)", flush=True)
         del m
