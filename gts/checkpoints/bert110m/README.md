@@ -43,12 +43,33 @@ masked-token accuracy **53.2%**. (A distillation leg from bert-base-uncased was 
 | Phase 2 | 108,829 | 3.57B | 2.713 | 51.7% |
 | Phase 3 (**GTS3**) | 225,197 | 7.38B | 2.615 | 53.2% |
 
+## GTS-Uni
+
+**GTS-Uni** (`uni/`) is GTS3 made depth-recurrent: the same 14 layers run up to 3 times (shared weights), each pass
+with its own learned pass embedding and a per-channel gate initialised at zero, plus 16 learned latent tokens appended
+to the sequence as a scratchpad (`GTSConfig(loops=3, latent_tokens=16)`; see `GTS.md`). At initialisation it computes
+exactly GTS3. Trained from GTS3's float weights (`--init-from`) for $10 (one A100, 359 minutes): 48,700 steps, 1.60B
+tokens, the pass count sampled per step (1/2/3 with probability 0.1/0.2/0.7), learning rate 3e-5 for the pretrained
+weights and 1e-3 for the new ones (pass embeddings, gates, latents), 500 warmup steps, cosine down.
+
+| GTS-Uni at step 48,700 | validation loss | masked accuracy | CPU tokens/s (4 threads, 512 tokens) |
+|---|---|---|---|
+| 1 pass | 2.578 | 53.7% | 27K |
+| 2 passes | 2.562 | 53.9% | 12.9K |
+| 3 passes | **2.561** | **53.9%** | 7.2K |
+| GTS3 (start) | 2.618 | 53.1% | 24-27K |
+
+The extra passes help (2.578 to 2.561), but almost all of it comes from the second; the run also improved the one-pass
+model by 0.04 on its own. Same file layout as below (`checkpoint.pt` float with AdamW state; `binarized.pt`, whose
+ternary codes match the float checkpoint's exactly: 0 mismatches across 89.3M ternary weights). Load with the
+snippet below; `model(input_ids, loops=2)` picks the number of passes.
+
 ## Files
 
 Each checkpoint is split into 90 MB parts (GitHub refuses files over 100 MB). Rebuild and check:
 
 ```bash
-cd checkpoints/bert110m/phase3   # or phase1, phase2
+cd checkpoints/bert110m/phase3   # or phase1, phase2, uni
 cat checkpoint.pt.part* > checkpoint.pt
 cat binarized.pt.part* > binarized.pt
 sha256sum -c SHA256SUMS
