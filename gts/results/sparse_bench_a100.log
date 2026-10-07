@@ -1,0 +1,29 @@
+25 passed in 23.44s
+one deep-tree layer, forward (32768 tokens): dense route path 2.329 ms
+  sparse top 0 BM  8 warps 2: 1.581 ms (1.47x)  paths equal 0.9996  rel. diff 1.01e-02
+  sparse top 0 BM 16 warps 4: 1.553 ms (1.50x)  paths equal 0.9996  rel. diff 1.01e-02
+  sparse top 0 BM  8 warps 4: 1.610 ms (1.45x)  paths equal 0.9996  rel. diff 1.01e-02
+  sparse top 3 BM  8 warps 2: 1.947 ms (1.20x)  paths equal 0.9997  rel. diff 8.65e-03
+  sparse top 3 BM 16 warps 4: 1.957 ms (1.19x)  paths equal 0.9997  rel. diff 8.65e-03
+  sparse top 3 BM  8 warps 4: 1.887 ms (1.23x)  paths equal 0.9997  rel. diff 8.65e-03
+  sparse top 4 BM  8 warps 2: 1.822 ms (1.28x)  paths equal 0.9997  rel. diff 6.45e-03
+  sparse top 4 BM 16 warps 4: 1.831 ms (1.27x)  paths equal 0.9997  rel. diff 6.45e-03
+  sparse top 4 BM  8 warps 4: 1.762 ms (1.32x)  paths equal 0.9997  rel. diff 6.45e-03
+  sparse top 5 BM  8 warps 2: 1.737 ms (1.34x)  paths equal 0.9997  rel. diff 6.08e-03
+  sparse top 5 BM 16 warps 4: 1.750 ms (1.33x)  paths equal 0.9997  rel. diff 6.08e-03
+  sparse top 5 BM  8 warps 4: 1.679 ms (1.39x)  paths equal 0.9997  rel. diff 6.08e-03
+  sparse top 6 BM  8 warps 2: 1.696 ms (1.37x)  paths equal 0.9998  rel. diff 4.61e-03
+  sparse top 6 BM 16 warps 4: 1.707 ms (1.36x)  paths equal 0.9998  rel. diff 4.61e-03
+  sparse top 6 BM  8 warps 4: 1.520 ms (1.53x)  paths equal 0.9998  rel. diff 4.61e-03
+  sparse top 7 BM  8 warps 2: 1.748 ms (1.33x)  paths equal 0.9999  rel. diff 4.36e-03
+  sparse top 7 BM 16 warps 4: 1.777 ms (1.31x)  paths equal 0.9999  rel. diff 4.36e-03
+  sparse top 7 BM  8 warps 4: 1.640 ms (1.42x)  paths equal 0.9999  rel. diff 4.36e-03
+best sparse: 1.520 ms = 1.53x the dense layer ({'block_m': 8, 'block_d': 128, 'num_warps': 4, 'top': 6})
+encoder inference, 32768 tokens (bf16 autocast; masked-LM loss / accuracy on the same masked batch):
+  dense, as trained                          123.4 ms     265,649 tokens/s   1.00x   loss 2.8709  acc 0.4792
+  dense, weights quantised once              122.1 ms     268,383 tokens/s   1.01x   loss 2.8708  acc 0.4809
+  dense, quantised once, compiled             45.5 ms     720,088 tokens/s   2.71x   loss 2.8778  acc 0.4798
+  sparse, quantised once                     112.4 ms     291,523 tokens/s   1.10x   loss 2.8754  acc 0.4794
+  sparse, quantised once, compiled            35.6 ms     920,000 tokens/s   3.46x   loss 2.8724  acc 0.4819
+
+[exited with code 0]
