@@ -39,30 +39,52 @@ def test_gpu_scan_equals_matrix():
     torch.testing.assert_close(y, ref, rtol=2e-3, atol=2e-3)
 
 
+def _padded(device, L=40):
+    ids = torch.randint(4, 64, (2, L), device=device)
+    mask = torch.ones(2, L, device=device)
+    mask[0, 29:] = 0  # padding at the end of one row and in the middle of the other, which the reversed scan
+    mask[1, 10:17] = 0  # would otherwise carry into earlier tokens
+    return ids, mask
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_padding_mask_hides_padding(device):
-    """A padded batch with ``mask``: every real token's hidden state equals the unpadded sequence's (padding at the end
-    of one row and in the middle of another, which the reversed scan would otherwise carry into earlier tokens)."""
+def test_mixer_mask_hides_padding(device):
+    """BiSSD with ``mask`` on a padded batch: every real token's output equals the unpadded sequence's (CPU: the
+    materialised matrix; CUDA: the two chunked scans, whose TF32 products hold to ~1e-3)."""
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("needs CUDA")
     torch.manual_seed(0)
+    c = GTSLConfig(d_model=64, n_heads=2, d_state=8, n_layer=1, chunk_size=16)
+    mix = BiSSD(c).to(device)
+    tol = 1e-4 if device == "cpu" else 2e-3
+    with torch.no_grad():
+        mix.dt_proj.bias.fill_(0.5)  # dt larger than at init, so a leak through the padding would show
+        _, mask = _padded(device)
+        u = torch.randn(2, 40, 64, device=device)
+        y = mix(u, mask)
+        for r in range(2):
+            keep = mask[r].bool()
+            torch.testing.assert_close(y[r, keep], mix(u[r : r + 1, keep])[0], rtol=tol, atol=tol)
+        assert (mix(u)[0, :29] - y[0, :29]).abs().max() > 10 * tol  # without the mask, padding leaks
+
+
+def test_padding_mask_hides_padding():
+    """The whole model with ``mask`` (CPU, exact float32; on a GPU the trees' hard routing can flip on TF32 noise):
+    every real token's hidden state equals the unpadded sequence's."""
+    torch.manual_seed(0)
     c = GTSLConfig(vocab_size=64, d_model=64, n_heads=2, d_state=8, n_layer=2, deep_trees=2, deep_depth=3, ternary_group=32,
                    pad_token_id=3, chunk_size=16)
-    m = GTSLForMaskedLM(c).to(device).eval()
+    m = GTSLForMaskedLM(c).eval()
     with torch.no_grad():
-        for blk in m.layers:  # dt larger than at init, so a leak through the padding would show
+        for blk in m.layers:
             blk.mixer.dt_proj.bias.fill_(0.5)
-        ids = torch.randint(4, 64, (2, 40), device=device)
-        mask = torch.ones(2, 40, device=device)
-        mask[0, 29:] = 0
-        mask[1, 10:17] = 0
+        ids, mask = _padded("cpu")
         padded = torch.where(mask.bool(), ids, torch.full_like(ids, 3))
         h = m.hidden(padded, mask=mask)
         for r in range(2):
             keep = mask[r].bool()
-            ref = m.hidden(ids[r : r + 1, keep])[0]
-            torch.testing.assert_close(h[r, keep], ref, rtol=1e-4, atol=1e-4)
-        assert not torch.allclose(m.hidden(padded)[0, :29], h[0, :29], atol=1e-3)  # without the mask, padding leaks
+            torch.testing.assert_close(h[r, keep], m.hidden(ids[r : r + 1, keep])[0], rtol=1e-4, atol=1e-4)
+        assert not torch.allclose(m.hidden(padded)[0, :29], h[0, :29], atol=1e-3)
 
 
 def test_init_from_modernbert():

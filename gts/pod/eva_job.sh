@@ -17,7 +17,7 @@ python3 -c "import torch, sys; v = tuple(int(x) for x in torch.__version__.split
   || python3 -m pip install -q "torch==2.8.0" --index-url https://download.pytorch.org/whl/cu126
 python3 -m pip install -q einops packaging tokenizers huggingface_hub datasets pytest pyarrow "transformers>=4.48" 2>&1 | tail -1
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
-python3 -m pytest -q tests/models/test_gts_l.py 2>&1 | tail -3
+python3 -m pytest -q -rf --tb=short tests/models/test_gts_l.py 2>&1 | tail -25
 if [ ! -f "$OUT/data/meta.json" ]; then
   timeout 90m python3 scripts/mohawk_distill.py prep --out "$OUT/data" --workers "$(nproc)" \
     --files sample/10BT/000_00000.parquet sample/10BT/001_00000.parquet sample/10BT/002_00000.parquet \
