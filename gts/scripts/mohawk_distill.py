@@ -58,7 +58,7 @@ def _tok_worker(args):
 
 def prep(a):
     """FineWeb-Edu (ODC-By) in ModernBERT's tokenizer: documents joined with [SEP] into one uint16 stream."""
-    from multiprocessing import Pool
+    import multiprocessing as mp
 
     import pyarrow.parquet as pq
     from huggingface_hub import hf_hub_download
@@ -67,10 +67,12 @@ def prep(a):
     t0 = time.time()
     parts = []
     for name in a.files:
+        print(f"downloading {name} ...", flush=True)
         path = hf_hub_download("HuggingFaceFW/fineweb-edu", name, repo_type="dataset")
         n = pq.ParquetFile(path).metadata.num_rows
+        print(f"  {n:,} documents; tokenising with {a.workers} workers ({time.time() - t0:.0f} s)", flush=True)
         step = math.ceil(n / (a.workers * 4))
-        with Pool(a.workers) as pool:
+        with mp.get_context("spawn").Pool(a.workers) as pool:  # spawn: no forked tokenizer threads to deadlock
             parts += pool.map(_tok_worker, [(path, s, min(n, s + step)) for s in range(0, n, step)])
         print(f"{name}: {n:,} documents, {sum(p.size for p in parts):,} tokens so far ({time.time() - t0:.0f} s)", flush=True)
     stream = np.concatenate(parts)

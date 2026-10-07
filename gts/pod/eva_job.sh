@@ -19,7 +19,7 @@ python3 -m pip install -q einops packaging tokenizers huggingface_hub datasets p
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 python3 -m pytest -q tests/models/test_gts_l.py 2>&1 | tail -3
 if [ ! -f "$OUT/data/meta.json" ]; then
-  python3 scripts/mohawk_distill.py prep --out "$OUT/data" --workers "$(nproc)" \
+  timeout 90m python3 scripts/mohawk_distill.py prep --out "$OUT/data" --workers "$(nproc)" \
     --files sample/10BT/000_00000.parquet sample/10BT/001_00000.parquet sample/10BT/002_00000.parquet \
             sample/10BT/003_00000.parquet sample/10BT/004_00000.parquet
 fi
