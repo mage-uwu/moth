@@ -128,6 +128,134 @@
    "threads": 4,
    "length": 512,
    "tokens_per_s": 1255
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 143
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 363
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "onnx-fp32",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 147
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "onnx-int8",
+   "threads": 1,
+   "length": 128,
+   "tokens_per_s": 645
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "torch-fp32",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 143
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "torch-int8",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 276
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "onnx-fp32",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 116
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "onnx-int8",
+   "threads": 1,
+   "length": 512,
+   "tokens_per_s": 282
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 405
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 881
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "onnx-fp32",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 464
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "onnx-int8",
+   "threads": 4,
+   "length": 128,
+   "tokens_per_s": 1251
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "torch-fp32",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 493
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "torch-int8",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 918
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "onnx-fp32",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 366
+  },
+  {
+   "model": "modernbert-large",
+   "params_m": 394.8,
+   "setup": "onnx-int8",
+   "threads": 4,
+   "length": 512,
+   "tokens_per_s": 703
   }
  ]
 }
