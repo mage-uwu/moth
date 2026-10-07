@@ -4,24 +4,31 @@ A side quest: can the GTS mixer (hard-routed trees plus a bidirectional Mamba-2-
 activations) work as a vision backbone at about MobileNetV4's size (~38M), and can a small sidecar give the GTS masked
 LM (`checkpoints/bert110m/`) vision? Only GTS models are trained here; there are no non-GTS baselines.
 
-## Where it stands (6 October 2026)
+## Where it stands (7 October 2026)
 
-- **Run 1 is training**: pod `j5va1zpr8iyi7b` (RunPod, secure A40, $0.49/hr, CA-MTL-1, no network volume), started
-  by `pod/vl_job.sh` (a wrapper for `vision/job.sh`), training until **07:35 UTC on 7 October** (budget about $8 in
-  all). Its log and outputs are served at `https://j5va1zpr8iyi7b-8888.proxy.runpod.net/` (`vl.log`,
-  `vl_result.json`, then `vl_backbone.pt`, `vl_binarized.pt`, `vl_checkpoint.pt` at the end). The pod's disk is
-  ephemeral: download the outputs into `vision/runs/run1/` before terminating it.
-- Data prep ran in 36 minutes: 620,000 pairs, none dropped (below). 2,048 are held out for evaluation.
-- It trains against the **phase 2** GTS-MLM (`checkpoints/bert110m/phase2/binarized.pt`), because phase 3 was still
-  running. Phase 3 continues from the same weights, so the sidecar should carry over; a short sidecar-only run against
-  phase 3 would align it exactly.
-- Not done yet: any result. Fill in the table below from `vl_result.json`.
+- **Run 1 is done** (`runs/run1/`): 38,095 steps, 15.8 epochs of 617,952 pairs, 678 minutes on a secure A40
+  (pod `f4umyld24ayokv`, CA-MTL-1, $0.49/hr, about $6.40, now terminated) at 241 images/s, against the **phase 2**
+  GTS-MLM (`checkpoints/bert110m/phase2/binarized.pt`, frozen). 2,048 pairs are held out for evaluation.
+- **GTS can see.** On the held-out pairs, retrieval at 1 among 1,000 is 55% (chance: 0.1%), and the frozen LM's
+  caption loss is 0.36 nats lower with the right image than with a shuffled one, a gap that grew all run.
+- It was still improving at the end, but slowly, and the training contrastive loss (0.65) had pulled well below
+  what held-out retrieval implies: at 16 epochs the backbone is memorising this data. More (and permissive) pairs
+  should help a next run more than more steps.
+- **Resume from** `/workspace/vl_run/checkpoint.pt` on RunPod network volume `aiazdht0py` (CA-MTL-1, with the
+  prepared data in `/workspace/vl` and the caption-embedding cache): attach it to a pod in CA-MTL-1 and set
+  `VL_RESUME=/workspace/vl_run/checkpoint.pt VL_OUT=/workspace/vl_run2`. The float checkpoint (476 MB, with optimizer
+  state) is only there; delete the volume when no resume is planned.
 
-| | |
+| Run 1 | |
 |---|---|
-| Images/s, epochs | (from the log's "schedule fitted" line) |
-| Held-out image-to-text / text-to-image R@1 among 1,000 | |
-| Held-out caption loss: right image / shuffled image | |
+| Images/s, epochs | 241 (A40, bf16, compiled), 15.8 epochs, 38,095 steps of 256 |
+| Held-out image-to-text / text-to-image R@1 among 1,000 | **55.3% / 57.1%** (step 26,000: 48.5% / 51.7%; 10,000: 35.2% / 38.1%) |
+| Held-out caption loss: right image / shuffled image | 3.206 / 3.566 |
+| Backbone size | 38.0M parameters; 15.8 MB binarized (2-bit ternary codes, float norms and biases) |
+
+Files in `runs/run1/`: `vl_binarized.pt` (the backbone, `mamba_ssm.utils.ternary_pack` format, config inside),
+`vl_backbone.pt.part*` (float backbone plus the sidecar into the LM and their configs: `cat vl_backbone.pt.part* >
+vl_backbone.pt`, then `sha256sum -c SHA256SUMS`), `vl_result.json` (settings and the whole curve), `vl.log`.
 
 ## Files
 
@@ -106,11 +113,9 @@ next run, all on by default, each with a flag to turn it off; none changes what 
 
 ## Picking it up
 
-1. When run 1 ends, download `vl_result.json`, `vl_backbone.pt`, `vl_binarized.pt`, `vl_checkpoint.pt` and `vl.log`
-   from the pod into `vision/runs/run1/`, terminate the pod, and fill in the table above.
-2. Was GTS able to see? The signals: recall well above chance (0.001), and caption loss with the right image clearly
-   below the shuffled-image loss.
-3. Next, in rough order: align the sidecar to the final GTS-MLM (phase 3) with the backbone frozen; a commercial
+1. Run 1 answered "can GTS see?" with yes (above). Its outputs are in `runs/run1/`, its resumable checkpoint on the
+   volume.
+2. Next, in rough order: align the sidecar to the final GTS-MLM (phase 3) with the backbone frozen; a commercial
    rerun on permissive data; a probe on a permissively licensed labelled set in place of ImageNet; a C/CPU inference
    path for the backbone like `kernel/enc_bench.c`.
 
