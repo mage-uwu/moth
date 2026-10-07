@@ -1,0 +1,19 @@
+35 passed in 18.75s
+  first step: loss 12.09679  gradient norm 15.64377
+as trained                                             173.5 ms/step    188,905 tokens/s  (1.00 of the step as trained)
+  first step: loss 12.09679  gradient norm 14.50019
+deep trees, no side-branch (route_ste) gradient        162.0 ms/step    202,310 tokens/s  (0.93 of the step as trained)
+  first step: loss 12.09673  gradient norm 14.44781
+  GPU kernel time 124.6 ms in the profiled step; top kernels:
+      19.37 ms  15.5%  x  14  _sparse_fwd
+      17.57 ms  14.1%  x  14  _path_bwd
+       9.84 ms   7.9%  x  28  _seg_own
+       2.03 ms   1.6%  x  14  triton_poi_fused__to_copy_mul_path_bwd_0
+sparse, path-only gradient, fused kernels              127.1 ms/step    257,735 tokens/s  (0.73 of the step as trained)
+  first step: loss 12.09673  gradient norm 14.44781
+  GPU kernel time 141.0 ms in the profiled step; top kernels:
+       9.87 ms   7.0%  x  28  _seg_own
+       2.05 ms   1.5%  x  14  triton_poi_fused__to_copy_mul_path_bwd_0
+sparse, path-only gradient, split kernels              143.9 ms/step    227,759 tokens/s  (0.83 of the step as trained)
+
+[exited with code 0]
