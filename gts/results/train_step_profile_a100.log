@@ -1,0 +1,34 @@
+NVIDIA A100-SXM4-80GB, 81920 MiB
+.........................                                                [100%]
+25 passed in 17.17s
+NVIDIA A100-SXM4-80GB: training step of the 110M masked LM, 64 x 512 tokens
+  GPU kernel time 171.2 ms in the profiled step; top kernels:
+      22.58 ms  13.2%  x  28  ampere_bf16_s16816gemm_bf16_128x256_ldg8_f2f_stages_64x3_nn
+      22.48 ms  13.1%  x  29  ampere_bf16_s16816gemm_bf16_128x256_ldg8_f2f_stages_64x3_nt
+      14.72 ms   8.6%  x  14  _route_bwd
+      12.69 ms   7.4%  x  15  ampere_bf16_s16816gemm_bf16_128x128_ldg8_relu_f2f_stages_32x5_tn
+      11.51 ms   6.7%  x  14  ampere_bf16_s16816gemm_bf16_128x128_ldg8_f2f_stages_32x5_tn
+       6.88 ms   4.0%  x  42  _out_kernel
+       6.42 ms   3.8%  x  28  _route_fwd
+       5.12 ms   3.0%  x  30  void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >
+       4.84 ms   2.8%  x  28  triton_poi_fused_add_0
+       4.05 ms   2.4%  x  29  void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1u
+       4.04 ms   2.4%  x  28  triton_red_fused_mul_sum_0
+       3.74 ms   2.2%  x  42  triton_poi_fused__to_copy_mul_0
+       2.41 ms   1.4%  x  14  triton_per_fused_add_div_mul_pow_sum_2
+       2.25 ms   1.3%  x  14  triton_red_fused__to_copy_abs_add_amax_clamp_div_mul_reciprocal_round_sub_1
+       2.19 ms   1.3%  x   7  void at::native::(anonymous namespace)::multi_tensor_apply_kernel<at::native::(anonymous namespace)::FusedOpti
+       2.10 ms   1.2%  x  14  triton_red_fused_sum_0
+       2.05 ms   1.2%  x  14  triton_red_fused_abs_add_amax_clamp_div_mul_reciprocal_round_sub_2
+       1.97 ms   1.1%  x  42  ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn
+       1.89 ms   1.1%  x  14  triton_red_fused__to_copy_add_mul_sum_17
+       1.86 ms   1.1%  x  14  triton_poi_fused_zeros_like_0
+       1.73 ms   1.0%  x  42  ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x4_nt
+       1.73 ms   1.0%  x  14  triton_poi_fused__to_copy_add_mul_slice_backward_19
+as trained                                             172.9 ms/step    189,498 tokens/s  (1.00 of the step as trained)
+no deep trees                                           49.5 ms/step    662,058 tokens/s  (0.29 of the step as trained)
+deep trees, no side-branch (route_ste) gradient        162.6 ms/step    201,495 tokens/s  (0.94 of the step as trained)
+++ date -u +%T
+=== DONE 17:21:10 ===
+
+[exited with code 0]
