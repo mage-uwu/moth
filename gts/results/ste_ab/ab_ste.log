@@ -1,0 +1,94 @@
+weights from /root/gts3_float.pt (step 225197); new parameters: []
+GTS masked LM: 112.9M parameters; bert-base-uncased WordPiece of wikimedia/wikipedia 20231101.en, training shards 20 to 25, 480,133,295 training tokens
+step      0  tokens      0.0M  val loss 2.6013  masked acc 0.5330  train nan     0.2 min
+  step    100  loss 2.3795  lr 5.05e-05  0.9 min
+  5.78 steps/s = 189,376 tokens/s; schedule fitted to 6899 steps, 6899 in this phase (0.23B tokens)
+  step    200  loss 2.4587  lr 1.00e-04  1.2 min
+  step    300  loss 2.3763  lr 1.00e-04  1.5 min
+  step    400  loss 2.4730  lr 9.98e-05  1.7 min
+  step    500  loss 2.4253  lr 9.96e-05  2.0 min
+step    500  tokens     16.4M  val loss 2.6453  masked acc 0.5271  train 2.4226     2.1 min
+  step    600  loss 2.5670  lr 9.92e-05  2.4 min
+  step    700  loss 2.5539  lr 9.88e-05  2.7 min
+  step    800  loss 2.5122  lr 9.82e-05  3.0 min
+  step    900  loss 2.5257  lr 9.76e-05  3.3 min
+  step   1000  loss 2.3824  lr 9.69e-05  3.6 min
+step   1000  tokens     32.8M  val loss 2.6491  masked acc 0.5275  train 2.5082     3.6 min
+  step   1100  loss 2.4278  lr 9.61e-05  3.9 min
+  step   1200  loss 2.5094  lr 9.51e-05  4.2 min
+  step   1300  loss 2.3835  lr 9.41e-05  4.5 min
+  step   1400  loss 2.4747  lr 9.31e-05  4.8 min
+  step   1500  loss 2.3274  lr 9.19e-05  5.1 min
+step   1500  tokens     49.2M  val loss 2.6509  masked acc 0.5272  train 2.4245     5.2 min
+  step   1600  loss 2.2994  lr 9.06e-05  5.5 min
+  step   1700  loss 2.6069  lr 8.93e-05  5.8 min
+  step   1800  loss 2.5059  lr 8.79e-05  6.0 min
+  step   1900  loss 2.4432  lr 8.64e-05  6.3 min
+  step   2000  loss 2.5157  lr 8.49e-05  6.6 min
+step   2000  tokens     65.5M  val loss 2.6424  masked acc 0.5288  train 2.4742     6.7 min
+  step   2100  loss 2.3995  lr 8.33e-05  7.0 min
+  step   2200  loss 2.3059  lr 8.16e-05  7.3 min
+  step   2300  loss 2.4509  lr 7.99e-05  7.6 min
+  step   2400  loss 2.3430  lr 7.81e-05  7.9 min
+  step   2500  loss 2.5788  lr 7.63e-05  8.2 min
+step   2500  tokens     81.9M  val loss 2.6359  masked acc 0.5294  train 2.4156     8.2 min
+  step   2600  loss 2.6492  lr 7.44e-05  8.5 min
+  step   2700  loss 2.2304  lr 7.25e-05  8.8 min
+  step   2800  loss 2.4117  lr 7.05e-05  9.1 min
+  step   2900  loss 2.4477  lr 6.85e-05  9.4 min
+  step   3000  loss 2.4314  lr 6.65e-05  9.7 min
+step   3000  tokens     98.3M  val loss 2.6324  masked acc 0.5287  train 2.4341     9.8 min
+  step   3100  loss 2.4531  lr 6.44e-05  10.1 min
+  step   3200  loss 2.5882  lr 6.23e-05  10.3 min
+  step   3300  loss 2.3493  lr 6.03e-05  10.6 min
+  step   3400  loss 2.3278  lr 5.82e-05  10.9 min
+  step   3500  loss 2.2854  lr 5.60e-05  11.2 min
+step   3500  tokens    114.7M  val loss 2.6223  masked acc 0.5317  train 2.4008    11.3 min
+  step   3600  loss 2.3461  lr 5.39e-05  11.6 min
+  step   3700  loss 2.4788  lr 5.18e-05  11.9 min
+  step   3800  loss 2.3430  lr 4.97e-05  12.2 min
+  step   3900  loss 2.4913  lr 4.76e-05  12.5 min
+  step   4000  loss 2.4623  lr 4.56e-05  12.7 min
+step   4000  tokens    131.1M  val loss 2.6081  masked acc 0.5328  train 2.4243    12.8 min
+  step   4100  loss 2.3209  lr 4.35e-05  13.1 min
+  step   4200  loss 2.3759  lr 4.15e-05  13.4 min
+  step   4300  loss 2.5312  lr 3.95e-05  13.7 min
+  step   4400  loss 2.4910  lr 3.75e-05  14.0 min
+  step   4500  loss 2.4394  lr 3.56e-05  14.3 min
+step   4500  tokens    147.5M  val loss 2.5992  masked acc 0.5344  train 2.4317    14.4 min
+  step   4600  loss 2.5255  lr 3.37e-05  14.7 min
+  step   4700  loss 2.5821  lr 3.19e-05  14.9 min
+  step   4800  loss 2.3382  lr 3.01e-05  15.2 min
+  step   4900  loss 2.4143  lr 2.84e-05  15.5 min
+  step   5000  loss 2.3342  lr 2.67e-05  15.8 min
+step   5000  tokens    163.8M  val loss 2.5946  masked acc 0.5344  train 2.4389    15.9 min
+  step   5100  loss 2.4834  lr 2.51e-05  16.2 min
+  step   5200  loss 2.4212  lr 2.35e-05  16.5 min
+  step   5300  loss 2.3374  lr 2.21e-05  16.8 min
+  step   5400  loss 2.3426  lr 2.07e-05  17.1 min
+  step   5500  loss 2.2578  lr 1.93e-05  17.3 min
+step   5500  tokens    180.2M  val loss 2.5815  masked acc 0.5365  train 2.3685    17.4 min
+  step   5600  loss 2.3679  lr 1.81e-05  17.7 min
+  step   5700  loss 2.4808  lr 1.69e-05  18.0 min
+  step   5800  loss 2.4583  lr 1.58e-05  18.3 min
+  step   5900  loss 2.2852  lr 1.48e-05  18.6 min
+  step   6000  loss 2.3697  lr 1.39e-05  18.9 min
+step   6000  tokens    196.6M  val loss 2.5766  masked acc 0.5371  train 2.3924    19.0 min
+  step   6100  loss 2.3328  lr 1.31e-05  19.3 min
+  step   6200  loss 2.5137  lr 1.24e-05  19.5 min
+  step   6300  loss 2.3705  lr 1.18e-05  19.8 min
+  step   6400  loss 2.4297  lr 1.12e-05  20.1 min
+  step   6500  loss 2.3116  lr 1.08e-05  20.4 min
+step   6500  tokens    213.0M  val loss 2.5738  masked acc 0.5368  train 2.3916    20.5 min
+  step   6600  loss 2.4443  lr 1.04e-05  20.8 min
+  step   6700  loss 2.3342  lr 1.02e-05  21.1 min
+  step   6800  loss 2.3565  lr 1.00e-05  21.4 min
+step   6899  tokens    226.1M  val loss 2.5733  masked acc 0.5377  train 2.3783    21.7 min
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  The capital of France is [MASK].  ->  unknown, uncertain, vacant, forever, located
+  Water freezes at zero degrees [MASK].  ->  ), below, m, h, .
+  The [MASK] Ocean is the largest ocean on Earth.  ->  pacific, indian, atlantic, arctic, deep
+  He played the [MASK] in the orchestra for twenty years.  ->  part, ball, piano, bass, role
+  The film was directed by Steven [MASK].  ->  spielberg, wilson, williams, hemingway, allen
+  She was born in 1950 and died in [MASK].  ->  office, london, paris, 1951, moscow
+saved checkpoint.pt (1292 MB) and binarized.pt (114 MB) to /workspace/out/ab_ste; 21.8 min in all
