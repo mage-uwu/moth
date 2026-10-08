@@ -90,8 +90,12 @@ def prep(a):
     train = stream[: -a.val_tokens]
     train.tofile(os.path.join(a.out, "train.bin"))
     val.tofile(os.path.join(a.out, "val.bin"))
+    # vocab_size (the model's padded embedding rows), special ids and the random-replacement range, for
+    # scripts/bert_pretrain.py train (masked-LM / distillation runs on this data)
     json.dump({"tokenizer": TEACHER, "source": "HuggingFaceFW/fineweb-edu " + " ".join(a.files), "train_tokens": int(train.size),
-               "val_tokens": int(val.size)}, open(os.path.join(a.out, "meta.json"), "w"), indent=1)
+               "val_tokens": int(val.size), "vocab_size": 50368,
+               "special": {"[UNK]": 50280, "[CLS]": CLS, "[SEP]": SEP, "[PAD]": PAD, "[MASK]": MASK},
+               "random_range": [1000, 50254]}, open(os.path.join(a.out, "meta.json"), "w"), indent=1)
     print(f"train {train.size:,} tokens, val {val.size:,} ({time.time() - t0:.0f} s)", flush=True)
 
 

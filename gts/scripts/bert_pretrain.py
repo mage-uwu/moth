@@ -19,7 +19,10 @@ train: RoBERTa-style masked LM: 512-token windows of the stream starting with [C
        with the same vocabulary, run frozen in bf16) sees the same masked batch, and at the labelled positions the loss
        is alpha * T^2 * KL(teacher || student at temperature T) + (1 - alpha) * cross-entropy with the true tokens.
        Validation stays the plain masked-LM loss and accuracy at --eval-mask-prob, so it compares across runs; the
-       teacher's own validation numbers are recorded at the start.
+       teacher's own validation numbers are recorded at the start. ModernBERT teachers work too, on data in ModernBERT's
+       tokenizer (``scripts/mohawk_distill.py prep``, whose meta.json carries the vocabulary, special tokens and the
+       range random replacement tokens are drawn from); ``--init-embeddings`` starts the student's token embeddings
+       from the teacher's when the widths match.
 
 ``prep --text-file FILE`` tokenises a local text file instead, for smoke tests.
 """
@@ -181,7 +184,8 @@ def get_batch(data, a, special, gen, device, mask_prob=None):
     inputs = ids.clone()
     inputs[chosen & (r < 0.8)] = special["[MASK]"]
     rand = chosen & (r >= 0.8) & (r < 0.9)
-    inputs[rand] = torch.randint(999, V, (int(rand.sum()),), generator=gen)  # 999+: real word pieces, no [unused]
+    lo, hi = a.random_range  # BERT: 999+ (real word pieces, no [unused]); other tokenizers: from meta.json
+    inputs[rand] = torch.randint(lo, hi, (int(rand.sum()),), generator=gen)
     return inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
 
 
@@ -224,6 +228,8 @@ def teacher_logits(teacher, x, sel):
     """The teacher's logits at the positions ``sel`` (row-major, as the student's labelled_only logits): the encoder
     over the whole batch, the masked-LM head only where needed."""
     hidden = teacher.base_model(input_ids=x, attention_mask=torch.ones_like(x)).last_hidden_state
+    if hasattr(teacher, "decoder") and hasattr(teacher, "head"):  # ModernBERT: prediction head, then the tied decoder
+        return teacher.decoder(teacher.head(hidden[sel]))
     head = teacher.cls if hasattr(teacher, "cls") else teacher.lm_head  # BERT's head, or RoBERTa-style models'
     return head(hidden[sel])
 
@@ -251,16 +257,23 @@ EXAMPLES = [
 @torch.no_grad()
 def fill_mask_examples(model, a, device):
     """Top predictions at [MASK] for a few sentences, as a sanity check; also written to examples.json."""
-    tok = _tokenizer()
     out = []
+    if getattr(a, "tokenizer_repo", None):  # the data's own tokenizer (e.g. ModernBERT's), from meta.json
+        from transformers import AutoTokenizer
+
+        hf = AutoTokenizer.from_pretrained(a.tokenizer_repo)
+        encode = lambda t: hf(t.replace("[MASK]", hf.mask_token))["input_ids"]  # noqa: E731
+        mask_id, decode = hf.mask_token_id, (lambda i: hf.decode([i]).strip())
+    else:
+        tok = _tokenizer()
+        encode, mask_id, decode = (lambda t: tok.encode(t).ids), tok.token_to_id("[MASK]"), tok.id_to_token  # with [CLS] ... [SEP]
     for text in EXAMPLES:
-        enc = tok.encode(text)  # with [CLS] ... [SEP]
-        ids = torch.tensor([enc.ids], device=device)
+        enc = encode(text)
+        ids = torch.tensor([enc], device=device)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.amp):
             logits = model(ids).logits[0].float()
-        pos = enc.ids.index(tok.token_to_id("[MASK]"))
-        top = logits[pos].topk(5).indices.tolist()
-        out.append({"text": text, "top5": [tok.id_to_token(i) for i in top]})
+        top = logits[enc.index(mask_id)].topk(5).indices.tolist()
+        out.append({"text": text, "top5": [decode(i) for i in top]})
         print(f"  {text}  ->  {', '.join(out[-1]['top5'])}", flush=True)
     json.dump(out, open(os.path.join(a.out, "examples.json"), "w"), indent=1)
 
@@ -278,6 +291,8 @@ def train(a):
     t_start = time.time()
     meta = json.load(open(os.path.join(a.data, "meta.json")))
     a.vocab, special = meta["vocab_size"], meta["special"]
+    a.random_range = tuple(meta.get("random_range", (999, a.vocab)))
+    a.tokenizer_repo = meta.get("tokenizer") if "random_range" in meta else None  # data not in BERT's tokenizer
     train_data = np.memmap(os.path.join(a.data, "train.bin"), dtype=np.uint16, mode="r")
     val_data = np.memmap(os.path.join(a.data, "val.bin"), dtype=np.uint16, mode="r")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -305,6 +320,13 @@ def train(a):
         print(f"weights from {a.init_from} (step {src.get('step')}); new parameters: {sorted(missing)}", flush=True)
     model.backbone.checkpoint_loops = a.checkpoint_loops
     teacher = load_teacher(a.teacher, a.vocab, device) if a.teacher else None
+    if teacher is not None and a.init_embeddings and ck is None and not a.init_from:
+        src = teacher.get_input_embeddings().weight
+        dst = model.backbone.embedding.weight
+        assert src.shape == dst.shape, f"--init-embeddings: the teacher's embeddings {tuple(src.shape)} vs the student's {tuple(dst.shape)}"
+        with torch.no_grad():
+            dst.copy_(src.float())
+        print(f"token embeddings from {a.teacher} {tuple(src.shape)}", flush=True)
     teacher_val = None
     if teacher is not None:
         teacher_val = evaluate(model, val_data, a, special, device, teacher=teacher)
@@ -480,6 +502,8 @@ def main():
     t.add_argument("--mask-prob", type=float, default=0.15)
     t.add_argument("--eval-mask-prob", type=float, default=0.15, help="masking of the validation batches (kept fixed across runs)")
     t.add_argument("--teacher", help="Hugging Face masked LM to distil from, e.g. google-bert/bert-base-uncased")
+    t.add_argument("--init-embeddings", action="store_true", help="start the student's token embeddings (tied to its "
+                   "output layer) from the teacher's, when the vocabulary and width match (e.g. ModernBERT-base, 768)")
     t.add_argument("--distill-alpha", type=float, default=0.75, help="weight of the distillation term (the rest: true tokens)")
     t.add_argument("--distill-temp", type=float, default=2.0)
     t.add_argument("--lr", type=float, default=1e-3)
