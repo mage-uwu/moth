@@ -7,3 +7,18 @@
 # ModernBERT-large (the teacher), float32 PyTorch 2.14.1+cpu, same machine
 ModernBERT-large, float32 PyTorch, 1 thread(s), sequence 512: 3307 ms = 155 tokens/s
 ModernBERT-large, float32 PyTorch, 4 thread(s), sequence 512: 874 ms = 586 tokens/s
+
+# 2026-10-08 02:15 AMX: int8 GEMM (tile-packed activations), chunked bf16 scans, grouped tree walks with prefetch
+[1 thread(s), rank 128 AMX]   sequence 512: 344.85 ms (best of 3) = 673.5 us per token = 1485 tokens/s.  Share: in_proj 30%, scans 25%, out_proj 18%, trees 22%, linear path 5%
+[1 thread(s), rank 128 AMX]     within: LN1 + int8 3%, dt 5%, in GEMM 22%, combine + int8 10%, out GEMM 8%
+[1 thread(s), rank 128 GTSL_ROWSCALE=1]   sequence 512: 370.01 ms (best of 3) = 722.7 us per token = 1384 tokens/s.  Share: in_proj 29%, scans 26%, out_proj 17%, trees 23%, linear path 5%
+[1 thread(s), rank 128 GTSL_ROWSCALE=1]     within: LN1 + int8 3%, dt 5%, in GEMM 20%, combine + int8 10%, out GEMM 7%
+[1 thread(s), rank 128 GTSL_NOAMX=1]   sequence 512: 604.21 ms (best of 3) = 1180.1 us per token = 847 tokens/s.  Share: in_proj 45%, scans 19%, out_proj 20%, trees 12%, linear path 5%
+[1 thread(s), rank 128 GTSL_NOAMX=1]     within: LN1 + int8 2%, dt 3%, in GEMM 40%, combine + int8 6%, out GEMM 14%
+[4 thread(s), rank 128 AMX]   sequence 512: 101.17 ms (best of 3) = 197.6 us per token = 5061 tokens/s.  Share: in_proj 30%, scans 25%, out_proj 18%, trees 20%, linear path 7%
+[4 thread(s), rank 128 AMX]     within: LN1 + int8 2%, dt 5%, in GEMM 22%, combine + int8 9%, out GEMM 9%
+[4 thread(s), rank 128 GTSL_ROWSCALE=1]   sequence 512: 99.39 ms (best of 3) = 194.1 us per token = 5152 tokens/s.  Share: in_proj 27%, scans 28%, out_proj 17%, trees 20%, linear path 7%
+[4 thread(s), rank 128 GTSL_ROWSCALE=1]     within: LN1 + int8 2%, dt 5%, in GEMM 20%, combine + int8 9%, out GEMM 8%
+[4 thread(s), rank 128 GTSL_NOAMX=1]   sequence 512: 175.58 ms (best of 3) = 342.9 us per token = 2916 tokens/s.  Share: in_proj 42%, scans 19%, out_proj 21%, trees 12%, linear path 6%
+[4 thread(s), rank 128 GTSL_NOAMX=1]     within: LN1 + int8 2%, dt 3%, in GEMM 38%, combine + int8 7%, out GEMM 14%
+# ModernBERT-large, PyTorch, 4 threads, same machine: float32 586, dynamic int8 954, bf16 (AMX) 1,524 tokens/s
