@@ -58,6 +58,18 @@ def _tokenizer():
     return tok
 
 
+def gts_tokenizer(vocab_size):
+    """(encode text without special tokens, [CLS], [SEP], [MASK], [PAD]) for a GTS model by its vocabulary: BERT's
+    WordPiece (30,522) or ModernBERT's (50,368, scripts/pod kd110 runs)."""
+    if vocab_size == 50368:
+        from transformers import AutoTokenizer
+
+        hf = AutoTokenizer.from_pretrained("answerdotai/ModernBERT-base")
+        return (lambda s: hf(s, add_special_tokens=False)["input_ids"]), 50281, 50282, 50284, 50283
+    tok = _tokenizer()
+    return (lambda s: tok.encode(s, add_special_tokens=False).ids), 101, 102, 103, 0
+
+
 def _encode(texts, tok, sep):
     """One uint16 array for a list of documents, each followed by [SEP]."""
     parts = []

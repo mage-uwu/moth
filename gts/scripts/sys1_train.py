@@ -82,11 +82,9 @@ class Sys1(torch.nn.Module):
                 load_binarized(blob, lm)
             self.backbone, self.hf, d, self.config = lm.backbone, None, cfg["d_model"], cfg
             self.max_loops = cfg.get("loops", 1)
-            from bert_pretrain import _tokenizer
+            from bert_pretrain import gts_tokenizer
 
-            tok = _tokenizer()
-            self.enc = lambda s: tok.encode(s, add_special_tokens=False).ids  # noqa: E731
-            self.cls, self.sep, self.mask_id, self.pad = 101, 102, 103, 0
+            self.enc, self.cls, self.sep, self.mask_id, self.pad = gts_tokenizer(cfg["vocab_size"])  # BERT's or ModernBERT's
             hcfg = GTSConfig(**{k: v for k, v in cfg.items() if k not in ("loops", "latent_tokens")})
             hcfg.deep_depth, hcfg.n_layer = head_deep_depth, head_layers
             self.layers = torch.nn.ModuleList([GTSBlock(hcfg, i) for i in range(head_layers)])

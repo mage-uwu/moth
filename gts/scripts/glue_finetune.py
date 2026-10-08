@@ -124,13 +124,14 @@ def run_task(a, task, device):
     if a.max_eval and len(va) > a.max_eval:
         va = va.select(range(a.max_eval))
     if a.gts:
-        from bert_pretrain import _tokenizer
+        from bert_pretrain import gts_tokenizer
 
-        tok = _tokenizer()
+        blob = torch.load(a.gts, map_location="cpu", weights_only=False)
+        enc, cls, sep, _, _ = gts_tokenizer(blob["config"]["vocab_size"])  # BERT's or ModernBERT's
 
         def tokenize(x, y):
-            ids = [101] + tok.encode(x, add_special_tokens=False).ids + [102]
-            return ids + (tok.encode(y, add_special_tokens=False).ids + [102] if y is not None else [])
+            ids = [cls] + enc(x) + [sep]
+            return ids + (enc(y) + [sep] if y is not None else [])
     else:
         from transformers import AutoTokenizer
 
@@ -143,7 +144,7 @@ def run_task(a, task, device):
     if n_labels == 1:
         ytr, yva = torch.tensor(tr["label"], dtype=torch.float32), torch.tensor(va["label"], dtype=torch.float32)
     torch.manual_seed(a.seed)
-    model = (GTSClassifier(a.gts, n_labels, a.loops) if a.gts else HFClassifier(a.hf, n_labels)).to(device)
+    model = (GTSClassifier(blob, n_labels, a.loops) if a.gts else HFClassifier(a.hf, n_labels)).to(device)
     if a.compile and device == "cuda" and a.gts:
         layers = model.backbone.layers
         for i in range(len(layers)):
