@@ -32,3 +32,5 @@ ModernBERT-large, float32 PyTorch, 4 thread(s), sequence 512: 874 ms = 586 token
 #   in GEMM 26%, scans 25%, trees 24%, out GEMM 10%, linear path 7%, LN/int8/dt/combine ~8%
 # BiSSD state per head (synthetic, GTSL_SYNTH_N): 64 -> 5,647, 32 -> 5,912, 16 -> 6,611 tokens/s (+17% at 16)
 # A100 (results/gtsl_gpu_bench.json), batch 128 x 512, bf16: ModernBERT-large 138,731, GTS-L (PyTorch) 93,684 tokens/s
+# Dense (ternary/int8) GeGLU MLPs instead of trees in some layers (synthetic, GTSL_DENSE, per-row scales, 4 threads):
+#   none 5,793; layers 13,16,17: 5,267 (-9%); 11,13,15,16,17,25: 5,094 (-12%); all 28: 4,007 (-31%) tokens/s

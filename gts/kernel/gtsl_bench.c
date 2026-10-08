@@ -243,10 +243,14 @@ typedef struct {
     float *norm1, *norm2;
     TMat in, out, node_in, node_out, ldown, lup;
     TG gin, gout, gdown, gup;
+    int dense;            // this layer keeps a dense (ternary) GeGLU MLP instead of trees: the teacher's, distilled
+    TMat mi, mo; TG gmi, gmo;  // Wi (2 F x D: [input | gate]), Wo (D x F)
     float *dt_w, *dt_b, *A, *Dsk, *node_bias, *lbias;
 } Layer;
 
 static int g_gemm = 1;  // 0: per-token row dot products (the first kernel), for comparison
+static int FF = 2624;  // the dense MLP's width (ModernBERT-large's intermediate size)
+static float *HID; static signed char *HQ; static float *HSTEP;
 static int V, D, NL, H, N, P, NT, DEPTH, R, PER, NN, ZR;  // ZR: in_proj rows (2HN + D)
 static float EPS;
 static float *emb, *emb_norm, *norm_f, *head_dense, *head_norm, *dec_bias;
@@ -278,6 +282,7 @@ static void alloc_scratch(int T) {
     YF = (float *)xalloc((size_t)T * D * 4); YB = (float *)xalloc((size_t)T * D * 4);
     STEP = (float *)xalloc((size_t)T * 4); Q = (signed char *)xalloc((size_t)T * (D + 64));
     QU = (signed char *)xalloc((size_t)(T + 32) * D);
+    HID = (float *)xalloc((size_t)T * 2 * FF * 4); HQ = (signed char *)xalloc((size_t)(T + 32) * FF); HSTEP = (float *)xalloc((size_t)T * 4);
     if (R) { LZ = (float *)xalloc((size_t)T * R * 4); LQ = (signed char *)xalloc((size_t)T * (R + 64)); LQU = (signed char *)xalloc((size_t)(T + 32) * R); }
 }
 
@@ -533,7 +538,29 @@ static inline void prefetch_row(const TMat *m, int r) {  // a packed row: two bi
     _mm_prefetch((const char *)(m->scale + (size_t)r * m->ng), _MM_HINT_T0);
 }
 
+// A dense ternary GeGLU MLP over all tokens: LN2, int8, Wi on AMX, gelu(input) * gate, int8, Wo on AMX into h.
+static void ffn_dense(const Layer *L, int T) {
+    const double t0 = now();
+#pragma omp parallel for schedule(static)
+    for (int t = 0; t < T; t++) {
+        float *u = U + (size_t)t * D;
+        layernorm(X + (size_t)t * D, L->norm2, u, D);
+        STEP[t] = quant8(u, QU + (size_t)t * D, D);
+    }
+    tg_gemm(&L->gmi, QU, D, STEP, T, HID, 2 * FF, 0);
+#pragma omp parallel for schedule(static)
+    for (int t = 0; t < T; t++) {
+        float *a = HID + (size_t)t * 2 * FF, g[4096];
+        gelu_array(a, g, FF);
+        for (int c = 0; c < FF; c++) g[c] *= a[FF + c];
+        HSTEP[t] = quant8(g, HQ + (size_t)t * FF, FF);
+    }
+    tg_gemm(&L->gmo, HQ, FF, HSTEP, T, X, D, 1);
+    t_trees += now() - t0;
+}
+
 static void ffn(const Layer *L, int T) {
+    if (L->dense) { ffn_dense(L, T); return; }
     double t0 = now(), tl = 0;
     // Trees: groups of 4 tokens walk their 4 trees in lockstep, and each next node's rows are prefetched as soon as
     // the branch is known, so up to 16 independent row fetches overlap (the node tables do not fit in cache).
@@ -654,10 +681,17 @@ static void synth_layer(Layer *L, int idx) {
     tm_random(&L->node_in, NN, D); tm_random(&L->node_out, NN, D); L->node_bias = frnd(NN, 0.1f);
     if (R) { tm_random(&L->ldown, R, D); tm_random(&L->lup, D, R); L->lbias = frnd(D, 0.1f); }
     if (g_rowscale) { tm_rowscale(&L->in); tm_rowscale(&L->out); if (R) { tm_rowscale(&L->ldown); tm_rowscale(&L->lup); } }
+    const char *dl = getenv("GTSL_DENSE");  // comma-separated layers that keep a dense MLP, or "all"
+    if (dl) {
+        char buf[256]; snprintf(buf, sizeof buf, ",%s,", dl); char me[16]; snprintf(me, sizeof me, ",%d,", idx);
+        L->dense = !strcmp(dl, "all") || strstr(buf, me) != NULL;
+    }
+    if (L->dense) { tm_random(&L->mi, 2 * FF, D); tm_random(&L->mo, D, FF); if (g_rowscale) { tm_rowscale(&L->mi); tm_rowscale(&L->mo); } }
 }
 
 static void build_gemm(Layer *L) {
     tg_from_tm(&L->gin, &L->in); tg_from_tm(&L->gout, &L->out);
+    if (L->dense) { tg_from_tm(&L->gmi, &L->mi); tg_from_tm(&L->gmo, &L->mo); }
     if (R) { tg_from_tm(&L->gdown, &L->ldown); tg_from_tm(&L->gup, &L->lup); }
 }
 
