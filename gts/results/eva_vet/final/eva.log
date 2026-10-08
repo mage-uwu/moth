@@ -1,0 +1,564 @@
++ O=/workspace/out
++ D=/root/fwe
++ R=/workspace/out/eva_vet
++ mkdir -p /workspace/out /workspace/out/eva_vet
++ python3 -m pip install -q einops packaging tokenizers huggingface_hub datasets pytest pyarrow 'transformers>=4.48'
++ tail -1
++ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+NVIDIA A100-SXM4-80GB, 81920 MiB
++ python3 -m pytest -q -rf --tb=short tests/models/test_gts_l.py
++ tail -25
+.......                                                                  [100%]
+7 passed in 58.78s
++ for i in 1 2
++ '[' -f /root/fwe/meta.json ']'
++ timeout 25m python3 scripts/mohawk_distill.py prep --out /root/fwe --workers 14
+downloading sample/10BT/000_00000.parquet ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  726,000 documents in 726 row groups; tokenising with 14 workers (4 s)
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+sample/10BT/000_00000.parquet: 726,000 documents, 749,757,239 tokens so far (113 s)
+train 747,757,239 tokens, val 2,000,000 (114 s)
++ for i in 1 2
++ '[' -f /root/fwe/meta.json ']'
++ ARGS='--data /root/fwe --out /workspace/out/eva_vet --stage1-tokens 14e6 --stage2-tokens 47e6 --stage3-tokens 125e6 --ckpt-minutes 5 --eval-minutes 20 --log-every 50 --price-per-hour 1.59'
++ timeout 25m python3 scripts/mohawk_distill.py train --data /root/fwe --out /workspace/out/eva_vet --stage1-tokens 14e6 --stage2-tokens 47e6 --stage3-tokens 125e6 --ckpt-minutes 5 --eval-minutes 20 --log-every 50 --price-per-hour 1.59
++ tee -a /workspace/out/eva_vet/train.log
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+teacher answerdotai/ModernBERT-large; student GTS-L 405.4M parameters (GTSLConfig(vocab_size=50368, d_model=1024, n_layer=28, n_heads=16, d_state=64, deep_trees=4, deep_depth=9, ternary_group=128, act_bits=8, norm_eps=1e-05, chunk_size=256, pad_token_id=50283, linear_rank=0)); data 747,757,239 training tokens; budgets 14M / 47M / 125M tokens
+== stage1: 14M tokens, from 0.0M
+  [stage1] step      3       0.0M / 14M tokens      9,668 tokens/s  $45.69 per 1B tokens  matrix_rel 15.8978  gnorm 39.4427  skipped 0.0000  0.0 min, ~0.4 h left in stage
+  [stage1] step     50       0.2M / 14M tokens     15,234 tokens/s  $28.99 per 1B tokens  matrix_rel 3.0761  gnorm 4.7035  skipped 0.0000  0.2 min, ~0.3 h left in stage
+  [stage1] step    100       0.4M / 14M tokens     15,522 tokens/s  $28.45 per 1B tokens  matrix_rel 0.9426  gnorm 0.7088  skipped 0.0000  0.4 min, ~0.2 h left in stage
+  [stage1] step    150       0.6M / 14M tokens     15,622 tokens/s  $28.27 per 1B tokens  matrix_rel 0.6655  gnorm 0.7155  skipped 0.0000  0.7 min, ~0.2 h left in stage
+  [stage1] step    200       0.8M / 14M tokens     15,673 tokens/s  $28.18 per 1B tokens  matrix_rel 0.5717  gnorm 1.5164  skipped 0.0000  0.9 min, ~0.2 h left in stage
+  [stage1] step    250       1.0M / 14M tokens     15,704 tokens/s  $28.13 per 1B tokens  matrix_rel 0.5484  gnorm 2.2984  skipped 0.0000  1.1 min, ~0.2 h left in stage
+  [stage1] step    300       1.2M / 14M tokens     15,724 tokens/s  $28.09 per 1B tokens  matrix_rel 0.5284  gnorm 4.0845  skipped 0.0000  1.3 min, ~0.2 h left in stage
+  [stage1] step    350       1.4M / 14M tokens     15,739 tokens/s  $28.06 per 1B tokens  matrix_rel 0.4738  gnorm 1.9829  skipped 0.0000  1.5 min, ~0.2 h left in stage
+  [stage1] step    400       1.6M / 14M tokens     15,750 tokens/s  $28.04 per 1B tokens  matrix_rel 0.4546  gnorm 1.7654  skipped 0.0000  1.7 min, ~0.2 h left in stage
+  [stage1] step    450       1.8M / 14M tokens     15,758 tokens/s  $28.03 per 1B tokens  matrix_rel 0.4161  gnorm 1.5770  skipped 0.0000  1.9 min, ~0.2 h left in stage
+  [stage1] step    500       2.0M / 14M tokens     15,765 tokens/s  $28.02 per 1B tokens  matrix_rel 0.4096  gnorm 1.5160  skipped 0.0000  2.2 min, ~0.2 h left in stage
+  [stage1] step 528: skipped update, gradient norm 7.54
+  [stage1] step    550       2.3M / 14M tokens     15,769 tokens/s  $28.01 per 1B tokens  matrix_rel 0.4074  gnorm 1.5643  skipped 1.0000  2.4 min, ~0.2 h left in stage
+  [stage1] step    600       2.5M / 14M tokens     15,772 tokens/s  $28.00 per 1B tokens  matrix_rel 0.3908  gnorm 2.0929  skipped 1.0000  2.6 min, ~0.2 h left in stage
+  [stage1] step    650       2.7M / 14M tokens     15,777 tokens/s  $28.00 per 1B tokens  matrix_rel 0.3913  gnorm 2.1106  skipped 1.0000  2.8 min, ~0.2 h left in stage
+  [stage1] step    700       2.9M / 14M tokens     15,780 tokens/s  $27.99 per 1B tokens  matrix_rel 0.4023  gnorm 1.3847  skipped 1.0000  3.0 min, ~0.2 h left in stage
+  [stage1] step    750       3.1M / 14M tokens     15,783 tokens/s  $27.98 per 1B tokens  matrix_rel 0.3696  gnorm 1.7417  skipped 1.0000  3.2 min, ~0.2 h left in stage
+  [stage1] step    800       3.3M / 14M tokens     15,786 tokens/s  $27.98 per 1B tokens  matrix_rel 0.3644  gnorm 1.8973  skipped 1.0000  3.5 min, ~0.2 h left in stage
+  [stage1] step    850       3.5M / 14M tokens     15,789 tokens/s  $27.97 per 1B tokens  matrix_rel 0.3549  gnorm 2.5195  skipped 1.0000  3.7 min, ~0.2 h left in stage
+  [stage1] step    900       3.7M / 14M tokens     15,791 tokens/s  $27.97 per 1B tokens  matrix_rel 0.3639  gnorm 1.8688  skipped 1.0000  3.9 min, ~0.2 h left in stage
+  [stage1] step    950       3.9M / 14M tokens     15,793 tokens/s  $27.97 per 1B tokens  matrix_rel 0.3434  gnorm 1.0227  skipped 1.0000  4.1 min, ~0.2 h left in stage
+  [stage1] step   1000       4.1M / 14M tokens     15,794 tokens/s  $27.96 per 1B tokens  matrix_rel 0.3461  gnorm 1.7376  skipped 1.0000  4.3 min, ~0.2 h left in stage
+  [stage1] step   1050       4.3M / 14M tokens     15,796 tokens/s  $27.96 per 1B tokens  matrix_rel 0.3374  gnorm 1.2044  skipped 1.0000  4.5 min, ~0.2 h left in stage
+  [stage1] step   1100       4.5M / 14M tokens     15,798 tokens/s  $27.96 per 1B tokens  matrix_rel 0.3398  gnorm 1.5385  skipped 1.0000  4.8 min, ~0.2 h left in stage
+  [stage1] step   1150       4.7M / 14M tokens     15,799 tokens/s  $27.96 per 1B tokens  matrix_rel 0.3412  gnorm 2.2492  skipped 1.0000  5.0 min, ~0.2 h left in stage
+  [stage1] step   1200       4.9M / 14M tokens     15,700 tokens/s  $28.13 per 1B tokens  matrix_rel 0.3390  gnorm 2.1285  skipped 1.0000  5.2 min, ~0.2 h left in stage
+  [stage1] step   1250       5.1M / 14M tokens     15,705 tokens/s  $28.12 per 1B tokens  matrix_rel 0.3269  gnorm 1.3560  skipped 1.0000  5.4 min, ~0.2 h left in stage
+  [stage1] step   1300       5.3M / 14M tokens     15,709 tokens/s  $28.11 per 1B tokens  matrix_rel 0.3089  gnorm 2.2862  skipped 1.0000  5.6 min, ~0.2 h left in stage
+  [stage1] step   1350       5.5M / 14M tokens     15,714 tokens/s  $28.11 per 1B tokens  matrix_rel 0.3104  gnorm 1.7843  skipped 1.0000  5.9 min, ~0.1 h left in stage
+  [stage1] step   1400       5.7M / 14M tokens     15,718 tokens/s  $28.10 per 1B tokens  matrix_rel 0.3033  gnorm 1.3089  skipped 1.0000  6.1 min, ~0.1 h left in stage
+  [stage1] step   1450       5.9M / 14M tokens     15,722 tokens/s  $28.09 per 1B tokens  matrix_rel 0.3326  gnorm 1.5572  skipped 1.0000  6.3 min, ~0.1 h left in stage
+  [stage1] step   1500       6.1M / 14M tokens     15,725 tokens/s  $28.09 per 1B tokens  matrix_rel 0.3137  gnorm 1.1700  skipped 1.0000  6.5 min, ~0.1 h left in stage
+  [stage1] step   1550       6.3M / 14M tokens     15,728 tokens/s  $28.08 per 1B tokens  matrix_rel 0.3077  gnorm 0.9939  skipped 1.0000  6.7 min, ~0.1 h left in stage
+  [stage1] step   1600       6.6M / 14M tokens     15,731 tokens/s  $28.08 per 1B tokens  matrix_rel 0.2992  gnorm 0.9389  skipped 1.0000  6.9 min, ~0.1 h left in stage
+  [stage1] step   1650       6.8M / 14M tokens     15,734 tokens/s  $28.07 per 1B tokens  matrix_rel 0.3195  gnorm 1.9502  skipped 1.0000  7.2 min, ~0.1 h left in stage
+  [stage1] step   1700       7.0M / 14M tokens     15,737 tokens/s  $28.07 per 1B tokens  matrix_rel 0.2970  gnorm 0.9850  skipped 1.0000  7.4 min, ~0.1 h left in stage
+  [stage1] step   1750       7.2M / 14M tokens     15,739 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2892  gnorm 1.0354  skipped 1.0000  7.6 min, ~0.1 h left in stage
+  [stage1] step   1800       7.4M / 14M tokens     15,742 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2940  gnorm 0.9861  skipped 1.0000  7.8 min, ~0.1 h left in stage
+  [stage1] step   1850       7.6M / 14M tokens     15,744 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2827  gnorm 1.1746  skipped 1.0000  8.0 min, ~0.1 h left in stage
+  [stage1] step   1900       7.8M / 14M tokens     15,746 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2967  gnorm 1.6665  skipped 1.0000  8.2 min, ~0.1 h left in stage
+  [stage1] step   1950       8.0M / 14M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2897  gnorm 1.2936  skipped 1.0000  8.5 min, ~0.1 h left in stage
+  [stage1] step   2000       8.2M / 14M tokens     15,750 tokens/s  $28.04 per 1B tokens  matrix_rel 0.2842  gnorm 1.2737  skipped 1.0000  8.7 min, ~0.1 h left in stage
+  [stage1] step   2050       8.4M / 14M tokens     15,752 tokens/s  $28.04 per 1B tokens  matrix_rel 0.2891  gnorm 0.5555  skipped 1.0000  8.9 min, ~0.1 h left in stage
+  [stage1] step   2100       8.6M / 14M tokens     15,754 tokens/s  $28.04 per 1B tokens  matrix_rel 0.2960  gnorm 1.1879  skipped 1.0000  9.1 min, ~0.1 h left in stage
+  [stage1] step   2150       8.8M / 14M tokens     15,756 tokens/s  $28.03 per 1B tokens  matrix_rel 0.2798  gnorm 0.7010  skipped 1.0000  9.3 min, ~0.1 h left in stage
+  [stage1] step   2200       9.0M / 14M tokens     15,757 tokens/s  $28.03 per 1B tokens  matrix_rel 0.2884  gnorm 1.0453  skipped 1.0000  9.5 min, ~0.1 h left in stage
+  [stage1] step   2250       9.2M / 14M tokens     15,759 tokens/s  $28.03 per 1B tokens  matrix_rel 0.2832  gnorm 0.7373  skipped 1.0000  9.7 min, ~0.1 h left in stage
+  [stage1] step   2300       9.4M / 14M tokens     15,760 tokens/s  $28.02 per 1B tokens  matrix_rel 0.2845  gnorm 0.5380  skipped 1.0000  10.0 min, ~0.1 h left in stage
+  [stage1] step   2350       9.6M / 14M tokens     15,722 tokens/s  $28.09 per 1B tokens  matrix_rel 0.2819  gnorm 0.5946  skipped 1.0000  10.2 min, ~0.1 h left in stage
+  [stage1] step   2400       9.8M / 14M tokens     15,724 tokens/s  $28.09 per 1B tokens  matrix_rel 0.2804  gnorm 0.4567  skipped 1.0000  10.4 min, ~0.1 h left in stage
+  [stage1] step   2450      10.0M / 14M tokens     15,726 tokens/s  $28.08 per 1B tokens  matrix_rel 0.2763  gnorm 0.5956  skipped 1.0000  10.6 min, ~0.1 h left in stage
+  [stage1] step   2500      10.2M / 14M tokens     15,728 tokens/s  $28.08 per 1B tokens  matrix_rel 0.2701  gnorm 0.4889  skipped 1.0000  10.9 min, ~0.1 h left in stage
+  [stage1] step   2550      10.4M / 14M tokens     15,730 tokens/s  $28.08 per 1B tokens  matrix_rel 0.2765  gnorm 0.6959  skipped 1.0000  11.1 min, ~0.1 h left in stage
+  [stage1] step   2600      10.6M / 14M tokens     15,732 tokens/s  $28.07 per 1B tokens  matrix_rel 0.2707  gnorm 0.5859  skipped 1.0000  11.3 min, ~0.1 h left in stage
+  [stage1] step   2650      10.9M / 14M tokens     15,734 tokens/s  $28.07 per 1B tokens  matrix_rel 0.2699  gnorm 0.3029  skipped 1.0000  11.5 min, ~0.1 h left in stage
+  [stage1] step   2700      11.1M / 14M tokens     15,735 tokens/s  $28.07 per 1B tokens  matrix_rel 0.2719  gnorm 0.4100  skipped 1.0000  11.7 min, ~0.1 h left in stage
+  [stage1] step   2750      11.3M / 14M tokens     15,737 tokens/s  $28.07 per 1B tokens  matrix_rel 0.2753  gnorm 0.3160  skipped 1.0000  11.9 min, ~0.0 h left in stage
+  [stage1] step 2784: skipped update, gradient norm 10.5
+  [stage1] step   2800      11.5M / 14M tokens     15,739 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2734  gnorm 0.7169  skipped 2.0000  12.1 min, ~0.0 h left in stage
+  [stage1] step   2850      11.7M / 14M tokens     15,740 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2746  gnorm 0.2613  skipped 2.0000  12.4 min, ~0.0 h left in stage
+  [stage1] step   2900      11.9M / 14M tokens     15,742 tokens/s  $28.06 per 1B tokens  matrix_rel 0.2700  gnorm 0.3196  skipped 2.0000  12.6 min, ~0.0 h left in stage
+  [stage1] step   2950      12.1M / 14M tokens     15,743 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2762  gnorm 0.4637  skipped 2.0000  12.8 min, ~0.0 h left in stage
+  [stage1] step   3000      12.3M / 14M tokens     15,744 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2845  gnorm 0.3083  skipped 2.0000  13.0 min, ~0.0 h left in stage
+  [stage1] step   3050      12.5M / 14M tokens     15,745 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2695  gnorm 0.2626  skipped 2.0000  13.2 min, ~0.0 h left in stage
+  [stage1] step   3100      12.7M / 14M tokens     15,747 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2602  gnorm 0.2672  skipped 2.0000  13.4 min, ~0.0 h left in stage
+  [stage1] step   3150      12.9M / 14M tokens     15,748 tokens/s  $28.05 per 1B tokens  matrix_rel 0.2602  gnorm 0.1491  skipped 2.0000  13.7 min, ~0.0 h left in stage
+  [stage1] step   3200      13.1M / 14M tokens     15,749 tokens/s  $28.04 per 1B tokens  matrix_rel 0.2613  gnorm 0.1672  skipped 2.0000  13.9 min, ~0.0 h left in stage
+  [stage1] step   3250      13.3M / 14M tokens     15,750 tokens/s  $28.04 per 1B tokens  matrix_rel 0.2599  gnorm 0.1303  skipped 2.0000  14.1 min, ~0.0 h left in stage
+  [stage1] step   3300      13.5M / 14M tokens     15,751 tokens/s  $28.04 per 1B tokens  matrix_rel 0.2564  gnorm 0.1723  skipped 2.0000  14.3 min, ~0.0 h left in stage
+  [stage1] step   3350      13.7M / 14M tokens     15,753 tokens/s  $28.04 per 1B tokens  matrix_rel 0.2638  gnorm 0.0897  skipped 2.0000  14.5 min, ~0.0 h left in stage
+  [stage1] step   3400      13.9M / 14M tokens     15,754 tokens/s  $28.04 per 1B tokens  matrix_rel 0.2598  gnorm 0.0709  skipped 2.0000  14.7 min, ~0.0 h left in stage
+  [stage1] step   3418      14.0M / 14M tokens     15,754 tokens/s  $28.03 per 1B tokens  matrix_rel 0.2535  gnorm 0.0629  skipped 2.0000  14.8 min, ~-0.0 h left in stage
+== stage2: 47M tokens, from 0.0M
+  [stage2] step      3       0.0M / 47M tokens        720 tokens/s  $613.70 per 1B tokens  attn_rel 0.3418  mlp_rel 1.0017  gnorm 0.4997  skipped 0.0000  1.1 min, ~18.1 h left in stage
+  [stage2] step 39: skipped update, gradient norm 1.41
+  [stage2] step     50       0.8M / 47M tokens      8,323 tokens/s  $53.06 per 1B tokens  attn_rel 0.2632  mlp_rel 0.9748  gnorm 0.3025  skipped 1.0000  1.6 min, ~1.5 h left in stage
+  [stage2] step    100       1.6M / 47M tokens     12,556 tokens/s  $35.17 per 1B tokens  attn_rel 0.2448  mlp_rel 0.8574  gnorm 0.4213  skipped 1.0000  2.2 min, ~1.0 h left in stage
+  [stage2] step    150       2.5M / 47M tokens     15,120 tokens/s  $29.21 per 1B tokens  attn_rel 0.3002  mlp_rel 0.7221  gnorm 0.5865  skipped 1.0000  2.7 min, ~0.8 h left in stage
+  [stage2] step    200       3.3M / 47M tokens     16,838 tokens/s  $26.23 per 1B tokens  attn_rel 0.2557  mlp_rel 0.6370  gnorm 0.4044  skipped 1.0000  3.2 min, ~0.7 h left in stage
+  [stage2] step 230: skipped update, gradient norm 1.95
+  [stage2] step    250       4.1M / 47M tokens     18,062 tokens/s  $24.45 per 1B tokens  attn_rel 0.2702  mlp_rel 0.5865  gnorm 0.2552  skipped 2.0000  3.8 min, ~0.7 h left in stage
+  [stage2] step 275: skipped update, gradient norm 1.59
+  [stage2] step 282: skipped update, gradient norm 1.73
+  [stage2] step    300       4.9M / 47M tokens     18,990 tokens/s  $23.26 per 1B tokens  attn_rel 0.2567  mlp_rel 0.5335  gnorm 0.2333  skipped 4.0000  4.3 min, ~0.6 h left in stage
+  [stage2] step 322: skipped update, gradient norm 14.9
+  [stage2] step 328: skipped update, gradient norm 459
+  [stage2] step 342: skipped update, gradient norm 13
+  [stage2] step 344: skipped update, gradient norm 2.6
+  [stage2] step    350       5.7M / 47M tokens     19,715 tokens/s  $22.40 per 1B tokens  attn_rel 0.2397  mlp_rel 0.4863  gnorm 0.1905  skipped 8.0000  4.8 min, ~0.6 h left in stage
+  [stage2] step 364: skipped update, gradient norm 3.63
+  [stage2] step 369: skipped update, gradient norm 0.95
+  [stage2] step 383: skipped update, gradient norm 1.02
+  [stage2] step 392: skipped update, gradient norm 14.2
+  [stage2] step    400       6.6M / 47M tokens     20,078 tokens/s  $22.00 per 1B tokens  attn_rel 0.2343  mlp_rel 0.4557  gnorm 0.1666  skipped 12.0000  5.4 min, ~0.6 h left in stage
+  [stage2] step 404: skipped update, gradient norm 6.09
+  [stage2] step 407: skipped update, gradient norm 0.719
+  [stage2] step 431: skipped update, gradient norm 0.903
+  [stage2] step 444: skipped update, gradient norm 5.69
+  [stage2] step    450       7.4M / 47M tokens     20,568 tokens/s  $21.47 per 1B tokens  attn_rel 0.2339  mlp_rel 0.4248  gnorm 0.1310  skipped 16.0000  6.0 min, ~0.5 h left in stage
+  [stage2] step 468: skipped update, gradient norm 4.54
+  [stage2] step 476: skipped update, gradient norm 0.782
+  [stage2] step    500       8.2M / 47M tokens     20,976 tokens/s  $21.06 per 1B tokens  attn_rel 0.2047  mlp_rel 0.3974  gnorm 0.0897  skipped 18.0000  6.5 min, ~0.5 h left in stage
+  [stage2] step    550       9.0M / 47M tokens     21,322 tokens/s  $20.71 per 1B tokens  attn_rel 0.2039  mlp_rel 0.3802  gnorm 0.0814  skipped 18.0000  7.0 min, ~0.5 h left in stage
+  [stage2] step 581: skipped update, gradient norm 0.406
+  [stage2] step 595: skipped update, gradient norm 1.03
+  [stage2] step 599: skipped update, gradient norm 0.383
+  [stage2] step    600       9.8M / 47M tokens     21,620 tokens/s  $20.43 per 1B tokens  attn_rel 0.2798  mlp_rel 0.3705  gnorm 0.3828  skipped 21.0000  7.6 min, ~0.5 h left in stage
+  [stage2] step 628: skipped update, gradient norm 8.57
+  [stage2] step 632: skipped update, gradient norm 0.805
+  [stage2] step 642: skipped update, gradient norm 7.1
+  [stage2] step 647: skipped update, gradient norm 0.639
+  [stage2] step    650      10.6M / 47M tokens     21,879 tokens/s  $20.19 per 1B tokens  attn_rel 0.2034  mlp_rel 0.3489  gnorm 0.1190  skipped 25.0000  8.1 min, ~0.5 h left in stage
+  [stage2] step 670: skipped update, gradient norm 2.74
+  [stage2] step 680: skipped update, gradient norm 1.27
+  [stage2] step    700      11.5M / 47M tokens     22,105 tokens/s  $19.98 per 1B tokens  attn_rel 0.2009  mlp_rel 0.3401  gnorm 0.0779  skipped 27.0000  8.6 min, ~0.4 h left in stage
+  [stage2] step 745: skipped update, gradient norm 0.499
+  [stage2] step    750      12.3M / 47M tokens     22,305 tokens/s  $19.80 per 1B tokens  attn_rel 0.1928  mlp_rel 0.3363  gnorm 0.0819  skipped 28.0000  9.2 min, ~0.4 h left in stage
+  [stage2] step 755: skipped update, gradient norm 0.589
+  [stage2] step 780: skipped update, gradient norm 2.47
+  [stage2] step 787: skipped update, gradient norm 2.92
+  [stage2] step 794: skipped update, gradient norm 10.9
+  [stage2] step    800      13.1M / 47M tokens     22,484 tokens/s  $19.64 per 1B tokens  attn_rel 0.1891  mlp_rel 0.3298  gnorm 0.0735  skipped 32.0000  9.7 min, ~0.4 h left in stage
+  [stage2] step 802: skipped update, gradient norm 28.2
+  [stage2] step 807: skipped update, gradient norm 1.3
+  [stage2] step 808: skipped update, gradient norm 6.58
++ echo '=== killed after 25 minutes; resuming ==='
+=== killed after 25 minutes; resuming ===
++ python3 scripts/mohawk_distill.py train --data /root/fwe --out /workspace/out/eva_vet --stage1-tokens 14e6 --stage2-tokens 47e6 --stage3-tokens 125e6 --ckpt-minutes 5 --eval-minutes 20 --log-every 50 --price-per-hour 1.59
++ tee -a /workspace/out/eva_vet/train.log
+resuming: stage stage2, step 365, 6.0M tokens into it; done ['stage1']
+teacher answerdotai/ModernBERT-large; student GTS-L 405.4M parameters (GTSLConfig(vocab_size=50368, d_model=1024, n_layer=28, n_heads=16, d_state=64, deep_trees=4, deep_depth=9, ternary_group=128, act_bits=8, norm_eps=1e-05, chunk_size=256, pad_token_id=50283, linear_rank=0)); data 747,757,239 training tokens; budgets 14M / 47M / 125M tokens
+== stage2: 47M tokens, from 6.0M
+  [stage2] step 392: skipped update, gradient norm 46.5
+  [stage2] step 395: skipped update, gradient norm 1.25
+  [stage2] step 398: skipped update, gradient norm 3.34
+  [stage2] step    400       6.6M / 47M tokens     15,064 tokens/s  $29.32 per 1B tokens  attn_rel 0.3096  mlp_rel 0.4556  gnorm 0.2000  skipped 3.0000  0.6 min, ~0.7 h left in stage
+  [stage2] step 404: skipped update, gradient norm 1.47
+  [stage2] step 407: skipped update, gradient norm 1.64
+  [stage2] step 431: skipped update, gradient norm 0.636
+  [stage2] step    450       7.4M / 47M tokens     19,867 tokens/s  $22.23 per 1B tokens  attn_rel 0.2375  mlp_rel 0.4243  gnorm 0.1048  skipped 6.0000  1.2 min, ~0.6 h left in stage
+  [stage2] step 468: skipped update, gradient norm 6.03
+  [stage2] step 476: skipped update, gradient norm 0.784
+  [stage2] step    500       8.2M / 47M tokens     21,654 tokens/s  $20.40 per 1B tokens  attn_rel 0.2100  mlp_rel 0.3970  gnorm 0.1643  skipped 8.0000  1.7 min, ~0.5 h left in stage
+  [stage2] step    550       9.0M / 47M tokens     22,585 tokens/s  $19.56 per 1B tokens  attn_rel 0.2058  mlp_rel 0.3798  gnorm 0.0786  skipped 8.0000  2.2 min, ~0.5 h left in stage
+  [stage2] step 595: skipped update, gradient norm 1.53
+  [stage2] step    600       9.8M / 47M tokens     23,158 tokens/s  $19.07 per 1B tokens  attn_rel 0.2732  mlp_rel 0.3699  gnorm 0.2906  skipped 9.0000  2.8 min, ~0.4 h left in stage
+  [stage2] step 628: skipped update, gradient norm 3.58
+  [stage2] step 632: skipped update, gradient norm 9.32
+  [stage2] step 642: skipped update, gradient norm 0.741
+  [stage2] step 647: skipped update, gradient norm 0.506
+  [stage2] step    650      10.6M / 47M tokens     23,545 tokens/s  $18.76 per 1B tokens  attn_rel 0.2062  mlp_rel 0.3482  gnorm 0.0963  skipped 13.0000  3.3 min, ~0.4 h left in stage
+  [stage2] step 655: skipped update, gradient norm 0.405
+  [stage2] step 670: skipped update, gradient norm 1.63
+  [stage2] step 680: skipped update, gradient norm 1.4
+  [stage2] step    700      11.5M / 47M tokens     23,826 tokens/s  $18.54 per 1B tokens  attn_rel 0.2010  mlp_rel 0.3397  gnorm 0.0662  skipped 16.0000  3.8 min, ~0.4 h left in stage
+  [stage2] step 712: skipped update, gradient norm 0.379
+  [stage2] step    750      12.3M / 47M tokens     24,039 tokens/s  $18.37 per 1B tokens  attn_rel 0.2051  mlp_rel 0.3362  gnorm 0.1484  skipped 17.0000  4.4 min, ~0.4 h left in stage
+  [stage2] step 755: skipped update, gradient norm 1.89
+  [stage2] step 762: skipped update, gradient norm 0.499
+  [stage2] step 784: skipped update, gradient norm 0.763
+  [stage2] step 787: skipped update, gradient norm 0.848
+  [stage2] step 794: skipped update, gradient norm 0.534
+  [stage2] step    800      13.1M / 47M tokens     24,206 tokens/s  $18.25 per 1B tokens  attn_rel 0.1926  mlp_rel 0.3295  gnorm 0.0763  skipped 22.0000  4.9 min, ~0.4 h left in stage
+  [stage2] step 802: skipped update, gradient norm 1.19
+  [stage2] step 807: skipped update, gradient norm 2.15
+  [stage2] step 808: skipped update, gradient norm 0.676
+  [stage2] step 815: skipped update, gradient norm 0.313
+  [stage2] step    850      13.9M / 47M tokens     24,109 tokens/s  $18.32 per 1B tokens  attn_rel 0.1895  mlp_rel 0.3272  gnorm 0.0796  skipped 26.0000  5.5 min, ~0.4 h left in stage
+  [stage2] step 885: skipped update, gradient norm 0.284
+  [stage2] step    900      14.7M / 47M tokens     24,232 tokens/s  $18.23 per 1B tokens  attn_rel 0.1953  mlp_rel 0.3338  gnorm 0.0643  skipped 27.0000  6.0 min, ~0.4 h left in stage
+  [stage2] step 931: skipped update, gradient norm 0.797
+  [stage2] step    950      15.6M / 47M tokens     24,341 tokens/s  $18.15 per 1B tokens  attn_rel 0.1906  mlp_rel 0.3216  gnorm 0.0729  skipped 28.0000  6.6 min, ~0.4 h left in stage
+  [stage2] step 956: skipped update, gradient norm 4.38
+  [stage2] step 997: skipped update, gradient norm 0.92
+  [stage2] step 999: skipped update, gradient norm 1.36
+  [stage2] step   1000      16.4M / 47M tokens     24,432 tokens/s  $18.08 per 1B tokens  attn_rel 0.5164  mlp_rel 0.3228  gnorm 1.3555  skipped 31.0000  7.1 min, ~0.3 h left in stage
+  [stage2] step 1001: skipped update, gradient norm 3.5
+  [stage2] step 1041: skipped update, gradient norm 1.11
+  [stage2] step   1050      17.2M / 47M tokens     24,512 tokens/s  $18.02 per 1B tokens  attn_rel 0.1994  mlp_rel 0.3136  gnorm 0.1016  skipped 33.0000  7.6 min, ~0.3 h left in stage
+  [stage2] step 1075: skipped update, gradient norm 0.299
+  [stage2] step 1085: skipped update, gradient norm 0.39
+  [stage2] step 1094: skipped update, gradient norm 0.388
+  [stage2] step   1100      18.0M / 47M tokens     24,581 tokens/s  $17.97 per 1B tokens  attn_rel 0.2110  mlp_rel 0.3195  gnorm 0.0634  skipped 36.0000  8.2 min, ~0.3 h left in stage
+  [stage2] step 1131: skipped update, gradient norm 5.21
+  [stage2] step 1138: skipped update, gradient norm 0.896
+  [stage2] step 1149: skipped update, gradient norm 0.575
+  [stage2] step   1150      18.8M / 47M tokens     24,642 tokens/s  $17.92 per 1B tokens  attn_rel 0.3679  mlp_rel 0.3141  gnorm 0.5753  skipped 39.0000  8.7 min, ~0.3 h left in stage
+  [stage2] step 1150: skipped update, gradient norm 2.92
+  [stage2] step 1173: skipped update, gradient norm 0.519
+  [stage2] step 1177: skipped update, gradient norm 0.347
+  [stage2] step   1200      19.7M / 47M tokens     24,696 tokens/s  $17.88 per 1B tokens  attn_rel 0.1860  mlp_rel 0.3135  gnorm 0.0702  skipped 42.0000  9.2 min, ~0.3 h left in stage
+  [stage2] step 1211: skipped update, gradient norm 0.727
+  [stage2] step 1215: skipped update, gradient norm 0.604
+  [stage2] step 1229: skipped update, gradient norm 3.34
+  [stage2] step 1236: skipped update, gradient norm 0.313
+  [stage2] step 1247: skipped update, gradient norm 18.7
+  [stage2] step   1250      20.5M / 47M tokens     24,745 tokens/s  $17.85 per 1B tokens  attn_rel 0.1840  mlp_rel 0.3139  gnorm 0.0688  skipped 47.0000  9.8 min, ~0.3 h left in stage
+  [stage2] step 1259: skipped update, gradient norm 1.25
+  [stage2] step 1272: skipped update, gradient norm 0.799
+  [stage2] step 1291: skipped update, gradient norm 0.54
+  [stage2] step   1300      21.3M / 47M tokens     24,657 tokens/s  $17.91 per 1B tokens  attn_rel 0.1855  mlp_rel 0.3149  gnorm 0.0661  skipped 50.0000  10.4 min, ~0.3 h left in stage
+  [stage2] step 1306: skipped update, gradient norm 1.92
+  [stage2] step 1308: skipped update, gradient norm 0.859
+  [stage2] step 1314: skipped update, gradient norm 1.45
+  [stage2] step 1316: skipped update, gradient norm 0.436
+  [stage2] step 1322: skipped update, gradient norm 1.3
+  [stage2] step 1331: skipped update, gradient norm 0.325
+  [stage2] step 1333: skipped update, gradient norm 0.628
+  [stage2] step   1350      22.1M / 47M tokens     24,703 tokens/s  $17.88 per 1B tokens  attn_rel 0.1874  mlp_rel 0.3090  gnorm 0.0534  skipped 57.0000  10.9 min, ~0.3 h left in stage
+  [stage2] step 1351: skipped update, gradient norm 1.1
+  [stage2] step 1395: skipped update, gradient norm 0.471
+  [stage2] step   1400      22.9M / 47M tokens     24,743 tokens/s  $17.85 per 1B tokens  attn_rel 0.1792  mlp_rel 0.3070  gnorm 0.0548  skipped 59.0000  11.4 min, ~0.3 h left in stage
+  [stage2] step 1412: skipped update, gradient norm 0.486
+  [stage2] step 1419: skipped update, gradient norm 0.245
+  [stage2] step   1450      23.8M / 47M tokens     24,778 tokens/s  $17.83 per 1B tokens  attn_rel 0.2015  mlp_rel 0.3044  gnorm 0.1834  skipped 61.0000  12.0 min, ~0.3 h left in stage
+  [stage2] step   1500      24.6M / 47M tokens     24,811 tokens/s  $17.80 per 1B tokens  attn_rel 0.1811  mlp_rel 0.3083  gnorm 0.0679  skipped 61.0000  12.5 min, ~0.3 h left in stage
+  [stage2] step 1508: skipped update, gradient norm 0.468
+  [stage2] step 1533: skipped update, gradient norm 0.481
+  [stage2] step   1550      25.4M / 47M tokens     24,842 tokens/s  $17.78 per 1B tokens  attn_rel 0.1776  mlp_rel 0.3030  gnorm 0.0621  skipped 63.0000  13.0 min, ~0.2 h left in stage
+  [stage2] step 1562: skipped update, gradient norm 0.392
+  [stage2] step 1576: skipped update, gradient norm 0.279
+  [stage2] step 1588: skipped update, gradient norm 0.534
+  [stage2] step   1600      26.2M / 47M tokens     24,871 tokens/s  $17.76 per 1B tokens  attn_rel 0.1767  mlp_rel 0.3035  gnorm 0.0457  skipped 66.0000  13.6 min, ~0.2 h left in stage
+  [stage2] step 1612: skipped update, gradient norm 0.412
+  [stage2] step   1650      27.0M / 47M tokens     24,897 tokens/s  $17.74 per 1B tokens  attn_rel 0.1766  mlp_rel 0.2946  gnorm 0.0539  skipped 67.0000  14.1 min, ~0.2 h left in stage
+  [stage2] step   1700      27.9M / 47M tokens     24,922 tokens/s  $17.72 per 1B tokens  attn_rel 0.1735  mlp_rel 0.2991  gnorm 0.0593  skipped 67.0000  14.6 min, ~0.2 h left in stage
+  [stage2] step   1750      28.7M / 47M tokens     24,864 tokens/s  $17.76 per 1B tokens  attn_rel 0.1849  mlp_rel 0.2922  gnorm 0.0661  skipped 67.0000  15.2 min, ~0.2 h left in stage
+  [stage2] step 1773: skipped update, gradient norm 0.317
+  [stage2] step 1781: skipped update, gradient norm 0.316
+  [stage2] step 1788: skipped update, gradient norm 1.3
+  [stage2] step 1798: skipped update, gradient norm 0.313
+  [stage2] step   1800      29.5M / 47M tokens     24,889 tokens/s  $17.75 per 1B tokens  attn_rel 0.1787  mlp_rel 0.2892  gnorm 0.0786  skipped 71.0000  15.7 min, ~0.2 h left in stage
+  [stage2] step 1827: skipped update, gradient norm 1.11
+  [stage2] step 1831: skipped update, gradient norm 15.4
+  [stage2] step   1850      30.3M / 47M tokens     24,911 tokens/s  $17.73 per 1B tokens  attn_rel 0.1885  mlp_rel 0.2952  gnorm 0.0691  skipped 73.0000  16.3 min, ~0.2 h left in stage
+  [stage2] step   1900      31.1M / 47M tokens     24,932 tokens/s  $17.71 per 1B tokens  attn_rel 0.1805  mlp_rel 0.2897  gnorm 0.0602  skipped 73.0000  16.8 min, ~0.2 h left in stage
+  [stage2] step 1910: skipped update, gradient norm 0.331
+  [stage2] step   1950      31.9M / 47M tokens     24,952 tokens/s  $17.70 per 1B tokens  attn_rel 0.1715  mlp_rel 0.2882  gnorm 0.0572  skipped 74.0000  17.3 min, ~0.2 h left in stage
+  [stage2] step   2000      32.8M / 47M tokens     24,969 tokens/s  $17.69 per 1B tokens  attn_rel 0.1781  mlp_rel 0.2808  gnorm 0.0542  skipped 74.0000  17.9 min, ~0.2 h left in stage
+  [stage2] step 2042: skipped update, gradient norm 1.33
+  [stage2] step 2046: skipped update, gradient norm 65.4
+  [stage2] step   2050      33.6M / 47M tokens     24,987 tokens/s  $17.68 per 1B tokens  attn_rel 0.1760  mlp_rel 0.2830  gnorm 0.0611  skipped 76.0000  18.4 min, ~0.1 h left in stage
+  [stage2] step 2055: skipped update, gradient norm 1.09
+  [stage2] step 2057: skipped update, gradient norm 0.508
+  [stage2] step 2064: skipped update, gradient norm 0.435
+  [stage2] step 2072: skipped update, gradient norm 5.54
+  [stage2] step 2090: skipped update, gradient norm 0.242
+  [stage2] step 2094: skipped update, gradient norm 0.403
+  [stage2] step   2100      34.4M / 47M tokens     25,004 tokens/s  $17.66 per 1B tokens  attn_rel 0.1719  mlp_rel 0.2919  gnorm 0.0620  skipped 82.0000  18.9 min, ~0.1 h left in stage
+  [stage2] step 2124: skipped update, gradient norm 0.38
+  [stage2] step 2132: skipped update, gradient norm 3.6
+  [stage2] step   2150      35.2M / 47M tokens     25,019 tokens/s  $17.65 per 1B tokens  attn_rel 0.1816  mlp_rel 0.2889  gnorm 0.0547  skipped 84.0000  19.5 min, ~0.1 h left in stage
+  [stage2] step 2163: skipped update, gradient norm 1.8
+  [stage2] step 2185: skipped update, gradient norm 1.35
+  [stage2] step   2200      36.0M / 47M tokens     25,034 tokens/s  $17.64 per 1B tokens  attn_rel 0.1764  mlp_rel 0.2823  gnorm 0.0592  skipped 86.0000  20.0 min, ~0.1 h left in stage
+  [stage2] step 2223: skipped update, gradient norm 2.68
+  [stage2] step 2248: skipped update, gradient norm 1.96
+  [stage2] step   2250      36.9M / 47M tokens     24,974 tokens/s  $17.69 per 1B tokens  attn_rel 0.1703  mlp_rel 0.2878  gnorm 0.0551  skipped 88.0000  20.6 min, ~0.1 h left in stage
+  [stage2] step   2300      37.7M / 47M tokens     24,988 tokens/s  $17.67 per 1B tokens  attn_rel 0.1720  mlp_rel 0.2759  gnorm 0.0450  skipped 88.0000  21.1 min, ~0.1 h left in stage
+  [stage2] step   2350      38.5M / 47M tokens     25,003 tokens/s  $17.66 per 1B tokens  attn_rel 0.1735  mlp_rel 0.2855  gnorm 0.0585  skipped 88.0000  21.7 min, ~0.1 h left in stage
+  [stage2] step 2364: skipped update, gradient norm 0.974
+  [stage2] step   2400      39.3M / 47M tokens     25,016 tokens/s  $17.66 per 1B tokens  attn_rel 0.1823  mlp_rel 0.2790  gnorm 0.0542  skipped 89.0000  22.2 min, ~0.1 h left in stage
+  [stage2] step 2433: skipped update, gradient norm 0.392
+  [stage2] step   2450      40.1M / 47M tokens     25,029 tokens/s  $17.65 per 1B tokens  attn_rel 0.1716  mlp_rel 0.2791  gnorm 0.0545  skipped 90.0000  22.7 min, ~0.1 h left in stage
+  [stage2] step 2477: skipped update, gradient norm 0.329
+  [stage2] step   2500      41.0M / 47M tokens     25,041 tokens/s  $17.64 per 1B tokens  attn_rel 0.1729  mlp_rel 0.2804  gnorm 0.0699  skipped 91.0000  23.3 min, ~0.1 h left in stage
+  [stage2] step 2534: skipped update, gradient norm 0.285
+  [stage2] step   2550      41.8M / 47M tokens     25,053 tokens/s  $17.63 per 1B tokens  attn_rel 0.1802  mlp_rel 0.2814  gnorm 0.0739  skipped 92.0000  23.8 min, ~0.1 h left in stage
+  [stage2] step   2600      42.6M / 47M tokens     25,064 tokens/s  $17.62 per 1B tokens  attn_rel 0.1680  mlp_rel 0.2680  gnorm 0.0448  skipped 92.0000  24.3 min, ~0.0 h left in stage
+  [stage2] step 2603: skipped update, gradient norm 1.3
+  [stage2] step 2649: skipped update, gradient norm 0.522
+  [stage2] step   2650      43.4M / 47M tokens     25,074 tokens/s  $17.61 per 1B tokens  attn_rel 0.2034  mlp_rel 0.2761  gnorm 0.5219  skipped 94.0000  24.9 min, ~0.0 h left in stage
+  [stage2] step 2651: skipped update, gradient norm 0.301
+  [stage2] step 2698: skipped update, gradient norm 0.28
+  [stage2] step   2700      44.2M / 47M tokens     25,023 tokens/s  $17.65 per 1B tokens  attn_rel 0.1665  mlp_rel 0.2763  gnorm 0.0367  skipped 96.0000  25.5 min, ~0.0 h left in stage
+  [stage2] step   2750      45.1M / 47M tokens     25,033 tokens/s  $17.64 per 1B tokens  attn_rel 0.1574  mlp_rel 0.2749  gnorm 0.0401  skipped 96.0000  26.0 min, ~0.0 h left in stage
+  [stage2] step 2762: skipped update, gradient norm 0.211
+  [stage2] step 2770: skipped update, gradient norm 0.752
+  [stage2] step   2800      45.9M / 47M tokens     25,041 tokens/s  $17.64 per 1B tokens  attn_rel 0.1524  mlp_rel 0.2743  gnorm 0.0236  skipped 98.0000  26.6 min, ~0.0 h left in stage
+  [stage2] step 2831: skipped update, gradient norm 0.127
+  [stage2] step   2850      46.7M / 47M tokens     25,051 tokens/s  $17.63 per 1B tokens  attn_rel 0.1550  mlp_rel 0.2763  gnorm 0.0187  skipped 99.0000  27.1 min, ~0.0 h left in stage
+  [stage2] step   2869      47.0M / 47M tokens     25,054 tokens/s  $17.63 per 1B tokens  attn_rel 0.1497  mlp_rel 0.2772  gnorm 0.0118  skipped 99.0000  27.3 min, ~-0.0 h left in stage
+  stage 2, per layer (held out): 0:0.064  1:0.256  2:0.344  3:0.370  4:0.391  5:0.321  6:0.061  7:0.013  8:0.205  9:0.393  10:0.374  11:0.465  12:0.230  13:0.474  14:0.013  15:0.456  16:0.511  17:0.509  18:0.015  19:0.032  20:0.400  21:0.315  22:0.269  23:0.233  24:0.198  25:0.380  26:0.206  27:0.145
+  stage 2, held out: attn_rel 0.1515  mlp_rel 0.2730
+  eval before stage 3: s_ce 21.6593  t_ce 1.2878  kl 20.4620  agree 0.0001
+== stage3: 125M tokens, from 0.0M
+  [stage3] step      3       0.0M / 125M tokens     14,057 tokens/s  $31.42 per 1B tokens  kl 20.3285  ce 21.6006  quant 0.0000  hid_rel 314.7702  gnorm 18135.7246  skipped 0.0000  0.1 min, ~2.5 h left in stage
+  [stage3] step     50       0.8M / 125M tokens     21,809 tokens/s  $20.25 per 1B tokens  kl 7.1153  ce 8.2936  quant 0.0000  hid_rel 2.0287  gnorm 603.6111  skipped 0.0000  0.6 min, ~1.6 h left in stage
+  [stage3] step 66: skipped update, gradient norm 1.54e+03
+  [stage3] step 67: skipped update, gradient norm 1.16e+03
+  [stage3] step 70: skipped update, gradient norm 1.66e+03
+  [stage3] step 77: skipped update, gradient norm 789
+  [stage3] step    100       1.6M / 125M tokens     22,271 tokens/s  $19.83 per 1B tokens  kl 5.0206  ce 6.2186  quant 0.0000  hid_rel 0.8153  gnorm 8.9206  skipped 4.0000  1.2 min, ~1.5 h left in stage
+  [stage3] step 111: skipped update, gradient norm 54.4
+  [stage3] step 145: skipped update, gradient norm 49.7
+  [stage3] step    150       2.5M / 125M tokens     22,430 tokens/s  $19.69 per 1B tokens  kl 3.9780  ce 5.2118  quant 0.0000  hid_rel 0.6617  gnorm 4.5209  skipped 6.0000  1.8 min, ~1.5 h left in stage
+  [stage3] step 153: skipped update, gradient norm 202
+  [stage3] step 155: skipped update, gradient norm 22.6
+  [stage3] step    200       3.3M / 125M tokens     22,510 tokens/s  $19.62 per 1B tokens  kl 3.4888  ce 4.7615  quant 0.0000  hid_rel 0.5899  gnorm 5.5197  skipped 8.0000  2.4 min, ~1.5 h left in stage
+  [stage3] step 235: skipped update, gradient norm 36.6
+  [stage3] step    250       4.1M / 125M tokens     22,556 tokens/s  $19.58 per 1B tokens  kl 3.1102  ce 4.4175  quant 0.0000  hid_rel 0.5504  gnorm 2.8416  skipped 9.0000  3.0 min, ~1.5 h left in stage
+  [stage3] step 281: skipped update, gradient norm 16.5
+  [stage3] step 284: skipped update, gradient norm 25.3
+  [stage3] step    300       4.9M / 125M tokens     22,569 tokens/s  $19.57 per 1B tokens  kl 3.0109  ce 4.2336  quant 0.0000  hid_rel 0.5415  gnorm 2.7305  skipped 11.0000  3.6 min, ~1.5 h left in stage
+  [stage3] step 335: skipped update, gradient norm 13.2
+  [stage3] step    350       5.7M / 125M tokens     22,595 tokens/s  $19.55 per 1B tokens  kl 2.7683  ce 3.9266  quant 0.0000  hid_rel 0.5452  gnorm 2.3389  skipped 12.0000  4.2 min, ~1.5 h left in stage
+  [stage3] step 365: skipped update, gradient norm 17
+  [stage3] step    400       6.6M / 125M tokens     22,648 tokens/s  $19.50 per 1B tokens  kl 2.7034  ce 4.0049  quant 0.0000  gnorm 1.9737  skipped 13.0000  4.8 min, ~1.5 h left in stage
+  [stage3] step 415: skipped update, gradient norm 14.9
+  [stage3] step    450       7.4M / 125M tokens     22,554 tokens/s  $19.58 per 1B tokens  kl 2.5549  ce 3.8030  quant 0.0000  gnorm 1.8572  skipped 14.0000  5.4 min, ~1.4 h left in stage
+  [stage3] step    500       8.2M / 125M tokens     22,648 tokens/s  $19.50 per 1B tokens  kl 2.6339  ce 3.8229  quant 0.0000  gnorm 1.8703  skipped 14.0000  6.0 min, ~1.4 h left in stage
+  [stage3] step    550       9.0M / 125M tokens     22,726 tokens/s  $19.43 per 1B tokens  kl 2.3461  ce 3.5435  quant 0.0000  gnorm 1.5255  skipped 14.0000  6.6 min, ~1.4 h left in stage
+  [stage3] step    600       9.8M / 125M tokens     22,791 tokens/s  $19.38 per 1B tokens  kl 2.3142  ce 3.5750  quant 0.0000  gnorm 1.6708  skipped 14.0000  7.2 min, ~1.4 h left in stage
+  [stage3] step    650      10.6M / 125M tokens     22,846 tokens/s  $19.33 per 1B tokens  kl 2.3409  ce 3.6294  quant 0.0000  gnorm 1.5644  skipped 14.0000  7.8 min, ~1.4 h left in stage
+  [stage3] step 661: skipped update, gradient norm 22.4
+  [stage3] step    700      11.5M / 125M tokens     22,893 tokens/s  $19.29 per 1B tokens  kl 2.2636  ce 3.5537  quant 0.0000  gnorm 1.4644  skipped 15.0000  8.3 min, ~1.4 h left in stage
+  [stage3] step    750      12.3M / 125M tokens     22,935 tokens/s  $19.26 per 1B tokens  kl 2.2735  ce 3.5320  quant 0.0000  gnorm 1.6697  skipped 15.0000  8.9 min, ~1.4 h left in stage
+  [stage3] step    800      13.1M / 125M tokens     22,971 tokens/s  $19.23 per 1B tokens  kl 2.1950  ce 3.4394  quant 0.0000  gnorm 1.4475  skipped 15.0000  9.5 min, ~1.4 h left in stage
+  [stage3] step 846: skipped update, gradient norm 34.6
+  [stage3] step    850      13.9M / 125M tokens     22,893 tokens/s  $19.29 per 1B tokens  kl 2.2490  ce 3.5440  quant 0.0000  gnorm 1.4909  skipped 16.0000  10.1 min, ~1.3 h left in stage
+  [stage3] step    900      14.7M / 125M tokens     22,927 tokens/s  $19.26 per 1B tokens  kl 2.0669  ce 3.2723  quant 0.0000  gnorm 1.4011  skipped 16.0000  10.7 min, ~1.3 h left in stage
+  [stage3] step 921: skipped update, gradient norm 58.2
+  [stage3] step    950      15.6M / 125M tokens     22,952 tokens/s  $19.24 per 1B tokens  kl 1.9286  ce 3.1625  quant 0.0000  gnorm 1.3547  skipped 17.0000  11.3 min, ~1.3 h left in stage
+  [stage3] step   1000      16.4M / 125M tokens     22,981 tokens/s  $19.22 per 1B tokens  kl 1.9983  ce 3.3586  quant 0.0000  gnorm 1.2605  skipped 17.0000  11.9 min, ~1.3 h left in stage
+  [stage3] step   1050      17.2M / 125M tokens     23,006 tokens/s  $19.20 per 1B tokens  kl 1.9522  ce 3.2672  quant 0.0000  gnorm 1.2916  skipped 17.0000  12.5 min, ~1.3 h left in stage
+  [stage3] step   1100      18.0M / 125M tokens     23,029 tokens/s  $19.18 per 1B tokens  kl 2.0540  ce 3.2779  quant 0.0000  gnorm 1.1689  skipped 17.0000  13.0 min, ~1.3 h left in stage
+  [stage3] step 1130: skipped update, gradient norm 12.2
+  [stage3] step   1150      18.8M / 125M tokens     23,051 tokens/s  $19.16 per 1B tokens  kl 2.1581  ce 3.4327  quant 0.0000  gnorm 1.4030  skipped 18.0000  13.6 min, ~1.3 h left in stage
+  [stage3] step   1200      19.7M / 125M tokens     23,071 tokens/s  $19.14 per 1B tokens  kl 1.9055  ce 3.1356  quant 0.0000  gnorm 1.2200  skipped 18.0000  14.2 min, ~1.3 h left in stage
+  [stage3] step   1250      20.5M / 125M tokens     23,089 tokens/s  $19.13 per 1B tokens  kl 1.8723  ce 3.0832  quant 0.0000  gnorm 1.2136  skipped 18.0000  14.8 min, ~1.3 h left in stage
+  [stage3] step 1253: skipped update, gradient norm 175
+  [stage3] step   1300      21.3M / 125M tokens     23,033 tokens/s  $19.18 per 1B tokens  kl 2.0240  ce 3.3861  quant 0.0000  gnorm 1.3045  skipped 19.0000  15.4 min, ~1.3 h left in stage
+  [stage3] step   1350      22.1M / 125M tokens     23,051 tokens/s  $19.16 per 1B tokens  kl 1.9248  ce 3.1005  quant 0.0000  gnorm 1.2730  skipped 19.0000  16.0 min, ~1.2 h left in stage
+  [stage3] step   1400      22.9M / 125M tokens     23,068 tokens/s  $19.15 per 1B tokens  kl 1.9374  ce 3.1611  quant 0.0000  gnorm 1.2186  skipped 19.0000  16.6 min, ~1.2 h left in stage
+  [stage3] step 1400: skipped update, gradient norm 395
+  [stage3] step 1419: skipped update, gradient norm 88.1
+  [stage3] step   1450      23.8M / 125M tokens     23,083 tokens/s  $19.13 per 1B tokens  kl 1.8626  ce 3.1046  quant 0.0000  gnorm 1.2225  skipped 21.0000  17.2 min, ~1.2 h left in stage
+  [stage3] step   1500      24.6M / 125M tokens     23,098 tokens/s  $19.12 per 1B tokens  kl 1.8994  ce 3.0832  quant 0.0000  gnorm 1.2399  skipped 21.0000  17.7 min, ~1.2 h left in stage
+  [stage3] step   1550      25.4M / 125M tokens     23,112 tokens/s  $19.11 per 1B tokens  kl 1.8395  ce 3.0663  quant 0.0000  gnorm 1.0914  skipped 21.0000  18.3 min, ~1.2 h left in stage
+  [stage3] step   1600      26.2M / 125M tokens     23,124 tokens/s  $19.10 per 1B tokens  kl 1.9264  ce 3.2319  quant 0.0000  gnorm 1.2781  skipped 21.0000  18.9 min, ~1.2 h left in stage
+  [stage3] step   1650      27.0M / 125M tokens     23,137 tokens/s  $19.09 per 1B tokens  kl 1.8644  ce 3.1504  quant 0.0000  gnorm 1.2249  skipped 21.0000  19.5 min, ~1.2 h left in stage
+  eval (quant 0.00): s_ce 2.9860  t_ce 1.2878  kl 1.7675  agree 0.5046
+  [stage3] step   1700      27.9M / 125M tokens     23,036 tokens/s  $19.17 per 1B tokens  kl 1.7634  ce 3.0972  quant 0.0000  gnorm 1.1344  skipped 21.0000  20.2 min, ~1.2 h left in stage
+  [stage3] step   1750      28.7M / 125M tokens     23,049 tokens/s  $19.16 per 1B tokens  kl 1.7977  ce 3.0862  quant 0.0000  gnorm 1.2250  skipped 21.0000  20.7 min, ~1.2 h left in stage
+  [stage3] step   1800      29.5M / 125M tokens     23,063 tokens/s  $19.15 per 1B tokens  kl 1.7601  ce 3.0081  quant 0.0000  gnorm 1.0817  skipped 21.0000  21.3 min, ~1.2 h left in stage
+  [stage3] step   1850      30.3M / 125M tokens     23,074 tokens/s  $19.14 per 1B tokens  kl 1.8733  ce 3.2466  quant 0.0000  gnorm 1.1282  skipped 21.0000  21.9 min, ~1.1 h left in stage
+  [stage3] step   1900      31.1M / 125M tokens     23,086 tokens/s  $19.13 per 1B tokens  kl 1.7098  ce 2.9375  quant 0.0000  gnorm 1.0745  skipped 21.0000  22.5 min, ~1.1 h left in stage
+  [stage3] step   1950      31.9M / 125M tokens     23,099 tokens/s  $19.12 per 1B tokens  kl 1.6668  ce 2.9023  quant 0.0000  gnorm 1.1745  skipped 21.0000  23.1 min, ~1.1 h left in stage
+  [stage3] step   2000      32.8M / 125M tokens     23,111 tokens/s  $19.11 per 1B tokens  kl 1.7125  ce 2.9481  quant 0.0000  gnorm 1.1484  skipped 21.0000  23.6 min, ~1.1 h left in stage
+  [stage3] step   2050      33.6M / 125M tokens     23,123 tokens/s  $19.10 per 1B tokens  kl 1.8112  ce 3.0963  quant 0.0000  gnorm 1.0920  skipped 21.0000  24.2 min, ~1.1 h left in stage
+  [stage3] step   2100      34.4M / 125M tokens     23,133 tokens/s  $19.09 per 1B tokens  kl 1.7301  ce 3.0151  quant 0.0000  gnorm 1.3070  skipped 21.0000  24.8 min, ~1.1 h left in stage
+  [stage3] step   2150      35.2M / 125M tokens     23,101 tokens/s  $19.12 per 1B tokens  kl 1.7514  ce 2.8881  quant 0.0000  gnorm 1.1216  skipped 21.0000  25.4 min, ~1.1 h left in stage
+  [stage3] step   2200      36.0M / 125M tokens     23,112 tokens/s  $19.11 per 1B tokens  kl 1.6734  ce 2.9984  quant 0.0000  gnorm 1.1140  skipped 21.0000  26.0 min, ~1.1 h left in stage
+  [stage3] step   2250      36.9M / 125M tokens     23,123 tokens/s  $19.10 per 1B tokens  kl 1.6728  ce 3.0108  quant 0.0000  gnorm 1.1124  skipped 21.0000  26.6 min, ~1.1 h left in stage
+  [stage3] step   2300      37.7M / 125M tokens     23,133 tokens/s  $19.09 per 1B tokens  kl 1.7425  ce 3.0506  quant 0.0000  gnorm 1.0074  skipped 21.0000  27.2 min, ~1.0 h left in stage
+  [stage3] step   2350      38.5M / 125M tokens     23,142 tokens/s  $19.09 per 1B tokens  kl 1.6500  ce 2.8320  quant 0.0000  gnorm 1.0274  skipped 21.0000  27.7 min, ~1.0 h left in stage
+  [stage3] step   2400      39.3M / 125M tokens     23,151 tokens/s  $19.08 per 1B tokens  kl 1.7337  ce 2.9656  quant 0.0000  gnorm 1.0627  skipped 21.0000  28.3 min, ~1.0 h left in stage
+  [stage3] step 2417: skipped update, gradient norm 154
+  [stage3] step   2450      40.1M / 125M tokens     23,158 tokens/s  $19.07 per 1B tokens  kl 1.6152  ce 2.9053  quant 0.0000  gnorm 1.0590  skipped 22.0000  28.9 min, ~1.0 h left in stage
+  [stage3] step   2500      41.0M / 125M tokens     23,166 tokens/s  $19.07 per 1B tokens  kl 1.7027  ce 3.0295  quant 0.0000  gnorm 1.1319  skipped 22.0000  29.5 min, ~1.0 h left in stage
+  [stage3] step   2550      41.8M / 125M tokens     23,174 tokens/s  $19.06 per 1B tokens  kl 1.6741  ce 2.9070  quant 0.0000  gnorm 1.0513  skipped 22.0000  30.0 min, ~1.0 h left in stage
+  [stage3] step   2600      42.6M / 125M tokens     23,143 tokens/s  $19.08 per 1B tokens  kl 1.6592  ce 3.0765  quant 0.0000  gnorm 1.0430  skipped 22.0000  30.7 min, ~1.0 h left in stage
+  [stage3] step   2650      43.4M / 125M tokens     23,152 tokens/s  $19.08 per 1B tokens  kl 1.6736  ce 2.9063  quant 0.0000  gnorm 1.0246  skipped 22.0000  31.3 min, ~1.0 h left in stage
+  [stage3] step   2700      44.2M / 125M tokens     23,160 tokens/s  $19.07 per 1B tokens  kl 1.6296  ce 2.9247  quant 0.0000  gnorm 1.0660  skipped 22.0000  31.8 min, ~1.0 h left in stage
+  [stage3] step   2750      45.1M / 125M tokens     23,168 tokens/s  $19.06 per 1B tokens  kl 1.5531  ce 2.8611  quant 0.0000  gnorm 1.0807  skipped 22.0000  32.4 min, ~1.0 h left in stage
+  [stage3] step   2800      45.9M / 125M tokens     23,175 tokens/s  $19.06 per 1B tokens  kl 1.5909  ce 2.9912  quant 0.0000  gnorm 1.0138  skipped 22.0000  33.0 min, ~0.9 h left in stage
+  [stage3] step   2850      46.7M / 125M tokens     23,182 tokens/s  $19.05 per 1B tokens  kl 1.6542  ce 2.9262  quant 0.0000  gnorm 1.0863  skipped 22.0000  33.6 min, ~0.9 h left in stage
+  [stage3] step   2900      47.5M / 125M tokens     23,190 tokens/s  $19.05 per 1B tokens  kl 1.6800  ce 2.9027  quant 0.0000  gnorm 1.0173  skipped 22.0000  34.1 min, ~0.9 h left in stage
+  [stage3] step   2950      48.3M / 125M tokens     23,196 tokens/s  $19.04 per 1B tokens  kl 1.5283  ce 2.7433  quant 0.0000  gnorm 0.9559  skipped 22.0000  34.7 min, ~0.9 h left in stage
+  [stage3] step   3000      49.2M / 125M tokens     23,161 tokens/s  $19.07 per 1B tokens  kl 1.6300  ce 2.9029  quant 0.0000  gnorm 1.0419  skipped 22.0000  35.4 min, ~0.9 h left in stage
+  [stage3] step   3050      50.0M / 125M tokens     23,167 tokens/s  $19.06 per 1B tokens  kl 1.5804  ce 2.7705  quant 0.0000  gnorm 1.0518  skipped 22.0000  35.9 min, ~0.9 h left in stage
+  [stage3] step   3100      50.8M / 125M tokens     23,174 tokens/s  $19.06 per 1B tokens  kl 1.5758  ce 2.8418  quant 0.0000  gnorm 1.0228  skipped 22.0000  36.5 min, ~0.9 h left in stage
+  [stage3] step   3150      51.6M / 125M tokens     23,181 tokens/s  $19.05 per 1B tokens  kl 1.6174  ce 2.8192  quant 0.0000  gnorm 1.0648  skipped 22.0000  37.1 min, ~0.9 h left in stage
+  [stage3] step   3200      52.4M / 125M tokens     23,187 tokens/s  $19.05 per 1B tokens  kl 1.5954  ce 2.8446  quant 0.0000  gnorm 0.9632  skipped 22.0000  37.7 min, ~0.9 h left in stage
+  [stage3] step   3250      53.2M / 125M tokens     23,193 tokens/s  $19.04 per 1B tokens  kl 1.5701  ce 2.8049  quant 0.0000  gnorm 1.0472  skipped 22.0000  38.3 min, ~0.9 h left in stage
+  [stage3] step   3300      54.1M / 125M tokens     23,199 tokens/s  $19.04 per 1B tokens  kl 1.6172  ce 2.8918  quant 0.0000  gnorm 1.1625  skipped 22.0000  38.8 min, ~0.8 h left in stage
+  [stage3] step   3350      54.9M / 125M tokens     23,204 tokens/s  $19.03 per 1B tokens  kl 1.4622  ce 2.7362  quant 0.0000  gnorm 0.9438  skipped 22.0000  39.4 min, ~0.8 h left in stage
+  [stage3] step   3400      55.7M / 125M tokens     23,209 tokens/s  $19.03 per 1B tokens  kl 1.5931  ce 2.7856  quant 0.0000  gnorm 1.0645  skipped 22.0000  40.0 min, ~0.8 h left in stage
+  eval (quant 0.00): s_ce 2.7335  t_ce 1.2878  kl 1.5217  agree 0.5428
+  [stage3] step   3450      56.5M / 125M tokens     23,155 tokens/s  $19.07 per 1B tokens  kl 1.5809  ce 2.8181  quant 0.0000  gnorm 0.9784  skipped 22.0000  40.7 min, ~0.8 h left in stage
+  [stage3] step   3500      57.3M / 125M tokens     23,161 tokens/s  $19.07 per 1B tokens  kl 1.5773  ce 2.8038  quant 0.0000  gnorm 1.0836  skipped 22.0000  41.3 min, ~0.8 h left in stage
+  [stage3] step   3550      58.2M / 125M tokens     23,167 tokens/s  $19.06 per 1B tokens  kl 1.4958  ce 2.7470  quant 0.0000  gnorm 0.9324  skipped 22.0000  41.8 min, ~0.8 h left in stage
+  [stage3] step   3600      59.0M / 125M tokens     23,173 tokens/s  $19.06 per 1B tokens  kl 1.4437  ce 2.7678  quant 0.0000  gnorm 0.9911  skipped 22.0000  42.4 min, ~0.8 h left in stage
+  [stage3] step   3650      59.8M / 125M tokens     23,178 tokens/s  $19.06 per 1B tokens  kl 1.4487  ce 2.7662  quant 0.0000  gnorm 0.9633  skipped 22.0000  43.0 min, ~0.8 h left in stage
+  [stage3] step   3700      60.6M / 125M tokens     23,184 tokens/s  $19.05 per 1B tokens  kl 1.5918  ce 2.8880  quant 0.0000  gnorm 0.9988  skipped 22.0000  43.6 min, ~0.8 h left in stage
+  [stage3] step   3750      61.4M / 125M tokens     23,189 tokens/s  $19.05 per 1B tokens  kl 1.5107  ce 2.7918  quant 0.0000  gnorm 0.9600  skipped 22.0000  44.2 min, ~0.8 h left in stage
+  [stage3] step   3800      62.3M / 125M tokens     23,195 tokens/s  $19.04 per 1B tokens  kl 1.5560  ce 2.7900  quant 0.0000  gnorm 0.9846  skipped 22.0000  44.7 min, ~0.8 h left in stage
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Generating train split:   0%|          | 0/67349 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 67349/67349 [00:00<00:00, 2307257.74 examples/s]
+Generating validation split:   0%|          | 0/872 [00:00<?, ? examples/s]Generating validation split: 100%|██████████| 872/872 [00:00<00:00, 429932.18 examples/s]
+Generating test split:   0%|          | 0/1821 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 1821/1821 [00:00<00:00, 691957.56 examples/s]
+[transformers] [1mModernBertForSequenceClassification LOAD REPORT[0m from: answerdotai/ModernBERT-large
+Key               | Status     | 
+------------------+------------+-
+decoder.bias      | UNEXPECTED | 
+classifier.bias   | MISSING    | 
+classifier.weight | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+Generating train split:   0%|          | 0/392702 [00:00<?, ? examples/s]Generating train split:  41%|████      | 160000/392702 [00:00<00:00, 1594709.02 examples/s]Generating train split:  97%|█████████▋| 380000/392702 [00:00<00:00, 1948621.28 examples/s]Generating train split: 100%|██████████| 392702/392702 [00:00<00:00, 1877052.36 examples/s]
+Generating validation_matched split:   0%|          | 0/9815 [00:00<?, ? examples/s]Generating validation_matched split: 100%|██████████| 9815/9815 [00:00<00:00, 1533910.64 examples/s]
+Generating validation_mismatched split:   0%|          | 0/9832 [00:00<?, ? examples/s]Generating validation_mismatched split: 100%|██████████| 9832/9832 [00:00<00:00, 1768294.54 examples/s]
+Generating test_matched split:   0%|          | 0/9796 [00:00<?, ? examples/s]Generating test_matched split: 100%|██████████| 9796/9796 [00:00<00:00, 1802237.13 examples/s]
+Generating test_mismatched split:   0%|          | 0/9847 [00:00<?, ? examples/s]Generating test_mismatched split: 100%|██████████| 9847/9847 [00:00<00:00, 1732728.29 examples/s]
+[transformers] [1mModernBertForSequenceClassification LOAD REPORT[0m from: answerdotai/ModernBERT-large
+Key               | Status     | 
+------------------+------------+-
+decoder.bias      | UNEXPECTED | 
+classifier.bias   | MISSING    | 
+classifier.weight | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+Generating train split:   0%|          | 0/5749 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 5749/5749 [00:00<00:00, 886183.52 examples/s]
+Generating validation split:   0%|          | 0/1500 [00:00<?, ? examples/s]Generating validation split: 100%|██████████| 1500/1500 [00:00<00:00, 589197.98 examples/s]
+Generating test split:   0%|          | 0/1379 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 1379/1379 [00:00<00:00, 578568.09 examples/s]
+[transformers] [1mModernBertForSequenceClassification LOAD REPORT[0m from: answerdotai/ModernBERT-large
+Key               | Status     | 
+------------------+------------+-
+decoder.bias      | UNEXPECTED | 
+classifier.bias   | MISSING    | 
+classifier.weight | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+  downstream, teacher: SST-2 94.5  MNLI-m 86.9  STS-B 91.7  mean 91.0  (3.0 min)
+  downstream, student mid (quant 0.00): SST-2 85.7  MNLI-m 59.3  STS-B 79.2  mean 74.7  (8.8 min)
+  [stage3] step   3850      63.1M / 125M tokens     23,172 tokens/s  $19.06 per 1B tokens  kl 1.4825  ce 2.7113  quant 0.0000  gnorm 0.9742  skipped 22.0000  45.4 min, ~0.7 h left in stage
+  [stage3] step   3900      63.9M / 125M tokens     23,177 tokens/s  $19.06 per 1B tokens  kl 1.5014  ce 2.7833  quant 0.0000  gnorm 0.9928  skipped 22.0000  45.9 min, ~0.7 h left in stage
+  [stage3] step   3950      64.7M / 125M tokens     23,179 tokens/s  $19.05 per 1B tokens  kl 1.5582  ce 2.8087  quant 0.0000  gnorm 0.9448  skipped 22.0000  46.5 min, ~0.7 h left in stage
+  [stage3] step   4000      65.5M / 125M tokens     23,183 tokens/s  $19.05 per 1B tokens  kl 1.5396  ce 2.7664  quant 0.0000  gnorm 0.9684  skipped 22.0000  47.1 min, ~0.7 h left in stage
+  [stage3] step   4050      66.4M / 125M tokens     23,187 tokens/s  $19.05 per 1B tokens  kl 1.4817  ce 2.6979  quant 0.0000  gnorm 0.9555  skipped 22.0000  47.7 min, ~0.7 h left in stage
+  eval (quant 0.00): s_ce 2.6648  t_ce 1.2878  kl 1.4564  agree 0.5545
+  [stage3] step   4100      67.2M / 125M tokens     23,168 tokens/s  $19.06 per 1B tokens  kl 1.4882  ce 2.8326  quant 0.0000  gnorm 0.9738  skipped 22.0000  48.3 min, ~0.7 h left in stage
+  [stage3] step   4150      68.0M / 125M tokens     23,173 tokens/s  $19.06 per 1B tokens  kl 1.5195  ce 2.6803  quant 0.0000  gnorm 1.1079  skipped 22.0000  48.9 min, ~0.7 h left in stage
+  [stage3] step   4200      68.8M / 125M tokens     23,177 tokens/s  $19.06 per 1B tokens  kl 1.5283  ce 2.7582  quant 0.0000  gnorm 1.0056  skipped 22.0000  49.5 min, ~0.7 h left in stage
+  [stage3] step   4250      69.6M / 125M tokens     23,158 tokens/s  $19.07 per 1B tokens  kl 1.4894  ce 2.6950  quant 0.0000  gnorm 0.9917  skipped 22.0000  50.1 min, ~0.7 h left in stage
+  [stage3] step   4300      70.5M / 125M tokens     23,163 tokens/s  $19.07 per 1B tokens  kl 1.4952  ce 2.6589  quant 0.0000  gnorm 1.0632  skipped 22.0000  50.7 min, ~0.7 h left in stage
+  [stage3] step   4350      71.3M / 125M tokens     23,167 tokens/s  $19.06 per 1B tokens  kl 1.5296  ce 2.7596  quant 0.0000  gnorm 0.9727  skipped 22.0000  51.3 min, ~0.6 h left in stage
+  [stage3] step   4400      72.1M / 125M tokens     23,172 tokens/s  $19.06 per 1B tokens  kl 1.4984  ce 2.7590  quant 0.0000  gnorm 0.9861  skipped 22.0000  51.9 min, ~0.6 h left in stage
+  [stage3] step   4450      72.9M / 125M tokens     23,176 tokens/s  $19.06 per 1B tokens  kl 1.5020  ce 2.7171  quant 0.0000  gnorm 1.0019  skipped 22.0000  52.4 min, ~0.6 h left in stage
+  [stage3] step   4500      73.7M / 125M tokens     23,180 tokens/s  $19.05 per 1B tokens  kl 1.4827  ce 2.8090  quant 0.0000  gnorm 0.9908  skipped 22.0000  53.0 min, ~0.6 h left in stage
+  [stage3] step   4550      74.5M / 125M tokens     23,184 tokens/s  $19.05 per 1B tokens  kl 1.4550  ce 2.7163  quant 0.0000  gnorm 0.9995  skipped 22.0000  53.6 min, ~0.6 h left in stage
+  [stage3] step   4600      75.4M / 125M tokens     23,188 tokens/s  $19.05 per 1B tokens  kl 1.4153  ce 2.7658  quant 0.0000  gnorm 0.9693  skipped 22.0000  54.2 min, ~0.6 h left in stage
+  [stage3] step   4650      76.2M / 125M tokens     23,192 tokens/s  $19.04 per 1B tokens  kl 1.5105  ce 2.8072  quant 0.0000  gnorm 1.0098  skipped 22.0000  54.7 min, ~0.6 h left in stage
+  [stage3] step   4700      77.0M / 125M tokens     23,172 tokens/s  $19.06 per 1B tokens  kl 1.4372  ce 2.6796  quant 0.0000  gnorm 0.9405  skipped 22.0000  55.4 min, ~0.6 h left in stage
+  [stage3] step   4750      77.8M / 125M tokens     23,176 tokens/s  $19.06 per 1B tokens  kl 1.4772  ce 2.8396  quant 0.0000  gnorm 0.9062  skipped 22.0000  56.0 min, ~0.6 h left in stage
+  [stage3] step   4800      78.6M / 125M tokens     23,180 tokens/s  $19.05 per 1B tokens  kl 1.4937  ce 2.7407  quant 0.0000  gnorm 0.9180  skipped 22.0000  56.5 min, ~0.6 h left in stage
+  [stage3] step 4811: skipped update, gradient norm 3.73e+03
+  [stage3] step   4850      79.5M / 125M tokens     23,184 tokens/s  $19.05 per 1B tokens  kl 1.4355  ce 2.7197  quant 0.0000  gnorm 0.9204  skipped 23.0000  57.1 min, ~0.5 h left in stage
+  [stage3] step   4900      80.3M / 125M tokens     23,188 tokens/s  $19.05 per 1B tokens  kl 1.4406  ce 2.6117  quant 0.0000  gnorm 0.9784  skipped 23.0000  57.7 min, ~0.5 h left in stage
+  [stage3] step   4950      81.1M / 125M tokens     23,192 tokens/s  $19.04 per 1B tokens  kl 1.4084  ce 2.5824  quant 0.0000  gnorm 0.9578  skipped 23.0000  58.3 min, ~0.5 h left in stage
+  [stage3] step   5000      81.9M / 125M tokens     23,194 tokens/s  $19.04 per 1B tokens  kl 1.3599  ce 2.5714  quant 0.0000  gnorm 0.9360  skipped 23.0000  58.9 min, ~0.5 h left in stage
+  [stage3] step   5050      82.7M / 125M tokens     23,198 tokens/s  $19.04 per 1B tokens  kl 1.4421  ce 2.7406  quant 0.0000  gnorm 0.9400  skipped 23.0000  59.4 min, ~0.5 h left in stage
+  [stage3] step   5100      83.6M / 125M tokens     23,184 tokens/s  $19.05 per 1B tokens  kl 1.4124  ce 2.6993  quant 0.0000  gnorm 0.9555  skipped 23.0000  60.1 min, ~0.5 h left in stage
+  [stage3] step   5150      84.4M / 125M tokens     23,188 tokens/s  $19.05 per 1B tokens  kl 1.4197  ce 2.6681  quant 0.0000  gnorm 0.9350  skipped 23.0000  60.6 min, ~0.5 h left in stage
+  [stage3] step   5200      85.2M / 125M tokens     23,191 tokens/s  $19.04 per 1B tokens  kl 1.3694  ce 2.5959  quant 0.0000  gnorm 0.8911  skipped 23.0000  61.2 min, ~0.5 h left in stage
+  [stage3] step   5250      86.0M / 125M tokens     23,195 tokens/s  $19.04 per 1B tokens  kl 1.4584  ce 2.6590  quant 0.0000  gnorm 0.9297  skipped 23.0000  61.8 min, ~0.5 h left in stage
+  [stage3] step   5300      86.8M / 125M tokens     23,198 tokens/s  $19.04 per 1B tokens  kl 1.4362  ce 2.7276  quant 0.0000  gnorm 0.9133  skipped 23.0000  62.4 min, ~0.5 h left in stage
+  [stage3] step   5350      87.7M / 125M tokens     23,202 tokens/s  $19.04 per 1B tokens  kl 1.4321  ce 2.6654  quant 0.0000  gnorm 0.8879  skipped 23.0000  63.0 min, ~0.4 h left in stage
+  [stage3] step   5400      88.5M / 125M tokens     23,205 tokens/s  $19.03 per 1B tokens  kl 1.4562  ce 2.7944  quant 0.0000  gnorm 0.9632  skipped 23.0000  63.5 min, ~0.4 h left in stage
+  [stage3] step   5450      89.3M / 125M tokens     23,208 tokens/s  $19.03 per 1B tokens  kl 1.4709  ce 2.8082  quant 0.0000  gnorm 1.0155  skipped 23.0000  64.1 min, ~0.4 h left in stage
+  [stage3] step   5500      90.1M / 125M tokens     23,211 tokens/s  $19.03 per 1B tokens  kl 1.3821  ce 2.5994  quant 0.0000  gnorm 0.9178  skipped 23.0000  64.7 min, ~0.4 h left in stage
+  [stage3] step   5550      90.9M / 125M tokens     23,195 tokens/s  $19.04 per 1B tokens  kl 1.3739  ce 2.6611  quant 0.0000  gnorm 0.9241  skipped 23.0000  65.3 min, ~0.4 h left in stage
+  [stage3] step   5600      91.8M / 125M tokens     23,198 tokens/s  $19.04 per 1B tokens  kl 1.4295  ce 2.7160  quant 0.0000  gnorm 0.9229  skipped 23.0000  65.9 min, ~0.4 h left in stage
+  [stage3] step   5650      92.6M / 125M tokens     23,201 tokens/s  $19.04 per 1B tokens  kl 1.3114  ce 2.4963  quant 0.0000  gnorm 0.9365  skipped 23.0000  66.5 min, ~0.4 h left in stage
+  [stage3] step   5700      93.4M / 125M tokens     23,202 tokens/s  $19.04 per 1B tokens  kl 1.4662  ce 2.7531  quant 0.0000  gnorm 0.9015  skipped 23.0000  67.1 min, ~0.4 h left in stage
+  [stage3] step   5750      94.2M / 125M tokens     23,204 tokens/s  $19.03 per 1B tokens  kl 1.3824  ce 2.7324  quant 0.0000  gnorm 0.9042  skipped 23.0000  67.7 min, ~0.4 h left in stage
+  eval (quant 0.00): s_ce 2.5708  t_ce 1.2878  kl 1.3589  agree 0.5689
+  [stage3] step   5800      95.0M / 125M tokens     23,190 tokens/s  $19.05 per 1B tokens  kl 1.3715  ce 2.5585  quant 0.0000  gnorm 0.8954  skipped 23.0000  68.3 min, ~0.4 h left in stage
+  [stage3] step   5850      95.8M / 125M tokens     23,192 tokens/s  $19.04 per 1B tokens  kl 1.4163  ce 2.6699  quant 0.0000  gnorm 0.9642  skipped 23.0000  68.9 min, ~0.3 h left in stage
+  [stage3] step   5900      96.7M / 125M tokens     23,195 tokens/s  $19.04 per 1B tokens  kl 1.4005  ce 2.6017  quant 0.0000  gnorm 0.9336  skipped 23.0000  69.5 min, ~0.3 h left in stage
+  [stage3] step   5950      97.5M / 125M tokens     23,181 tokens/s  $19.05 per 1B tokens  kl 1.4118  ce 2.6475  quant 0.0000  gnorm 1.0037  skipped 23.0000  70.1 min, ~0.3 h left in stage
+  [stage3] step   6000      98.3M / 125M tokens     23,184 tokens/s  $19.05 per 1B tokens  kl 1.3366  ce 2.6104  quant 0.0000  gnorm 0.8233  skipped 23.0000  70.7 min, ~0.3 h left in stage
+  [stage3] step   6050      99.1M / 125M tokens     23,187 tokens/s  $19.05 per 1B tokens  kl 1.3476  ce 2.7193  quant 0.0000  gnorm 0.8947  skipped 23.0000  71.2 min, ~0.3 h left in stage
+  [stage3] step   6100      99.9M / 125M tokens     23,190 tokens/s  $19.05 per 1B tokens  kl 1.4465  ce 2.6992  quant 0.0000  gnorm 0.9466  skipped 23.0000  71.8 min, ~0.3 h left in stage
+  [stage3] step   6150     100.8M / 125M tokens     23,193 tokens/s  $19.04 per 1B tokens  kl 1.3732  ce 2.6558  quant 0.0000  gnorm 0.8563  skipped 23.0000  72.4 min, ~0.3 h left in stage
+  [stage3] step   6200     101.6M / 125M tokens     23,195 tokens/s  $19.04 per 1B tokens  kl 1.4114  ce 2.5946  quant 0.0000  gnorm 0.9058  skipped 23.0000  73.0 min, ~0.3 h left in stage
+  [stage3] step   6250     102.4M / 125M tokens     23,198 tokens/s  $19.04 per 1B tokens  kl 1.4523  ce 2.7490  quant 0.0000  gnorm 0.9853  skipped 23.0000  73.6 min, ~0.3 h left in stage
+  [stage3] step   6300     103.2M / 125M tokens     23,201 tokens/s  $19.04 per 1B tokens  kl 1.3408  ce 2.5718  quant 0.0000  gnorm 0.8727  skipped 23.0000  74.1 min, ~0.3 h left in stage
+  [stage3] step   6350     104.0M / 125M tokens     23,203 tokens/s  $19.03 per 1B tokens  kl 1.3181  ce 2.5696  quant 0.0000  gnorm 0.8570  skipped 23.0000  74.7 min, ~0.3 h left in stage
+  [stage3] step   6400     104.9M / 125M tokens     23,191 tokens/s  $19.05 per 1B tokens  kl 1.3256  ce 2.5955  quant 0.0000  gnorm 0.8785  skipped 23.0000  75.4 min, ~0.2 h left in stage
+  [stage3] step   6450     105.7M / 125M tokens     23,193 tokens/s  $19.04 per 1B tokens  kl 1.3448  ce 2.5727  quant 0.0000  gnorm 0.9055  skipped 23.0000  75.9 min, ~0.2 h left in stage
+  [stage3] step   6500     106.5M / 125M tokens     23,196 tokens/s  $19.04 per 1B tokens  kl 1.3585  ce 2.6482  quant 0.0000  gnorm 0.8828  skipped 23.0000  76.5 min, ~0.2 h left in stage
+  [stage3] step   6550     107.3M / 125M tokens     23,199 tokens/s  $19.04 per 1B tokens  kl 1.3296  ce 2.6454  quant 0.0000  gnorm 0.9068  skipped 23.0000  77.1 min, ~0.2 h left in stage
+W1008 03:53:54.080000 3229 torch/_dynamo/convert_frame.py:1016] [0/8] torch._dynamo hit config.recompile_limit (8)
+W1008 03:53:54.080000 3229 torch/_dynamo/convert_frame.py:1016] [0/8]    function: 'forward' (/root/moth/gts/mamba_ssm/modules/gts.py:504)
+W1008 03:53:54.080000 3229 torch/_dynamo/convert_frame.py:1016] [0/8]    last reason: 0/7: self.quant_lambda == 0.008839314285715081              
+W1008 03:53:54.080000 3229 torch/_dynamo/convert_frame.py:1016] [0/8] To log all recompilation reasons, use TORCH_LOGS="recompiles".
+W1008 03:53:54.080000 3229 torch/_dynamo/convert_frame.py:1016] [0/8] To diagnose recompilation issues, see https://pytorch.org/docs/main/torch.compiler_troubleshooting.html.
+  [stage3] step   6600     108.1M / 125M tokens     23,156 tokens/s  $19.07 per 1B tokens  kl 1.2485  ce 2.4249  quant 0.0706  gnorm 0.8767  skipped 23.0000  77.8 min, ~0.2 h left in stage
+  [stage3] step   6650     109.0M / 125M tokens     23,136 tokens/s  $19.09 per 1B tokens  kl 1.3755  ce 2.6148  quant 0.1643  gnorm 0.8938  skipped 23.0000  78.5 min, ~0.2 h left in stage
+  [stage3] step   6700     109.8M / 125M tokens     23,116 tokens/s  $19.11 per 1B tokens  kl 1.4146  ce 2.6181  quant 0.2579  gnorm 0.9462  skipped 23.0000  79.1 min, ~0.2 h left in stage
+  [stage3] step   6750     110.6M / 125M tokens     23,097 tokens/s  $19.12 per 1B tokens  kl 1.3037  ce 2.4961  quant 0.3515  gnorm 0.9390  skipped 23.0000  79.8 min, ~0.2 h left in stage
+  [stage3] step   6800     111.4M / 125M tokens     23,065 tokens/s  $19.15 per 1B tokens  kl 1.4131  ce 2.5410  quant 0.4451  gnorm 1.0209  skipped 23.0000  80.5 min, ~0.2 h left in stage
+  [stage3] step   6850     112.2M / 125M tokens     23,047 tokens/s  $19.16 per 1B tokens  kl 1.4368  ce 2.6390  quant 0.5387  gnorm 1.1260  skipped 23.0000  81.2 min, ~0.2 h left in stage
+  [stage3] step   6900     113.0M / 125M tokens     23,028 tokens/s  $19.18 per 1B tokens  kl 1.3533  ce 2.6789  quant 0.6324  gnorm 1.0619  skipped 23.0000  81.8 min, ~0.1 h left in stage
+  [stage3] step   6950     113.9M / 125M tokens     23,010 tokens/s  $19.19 per 1B tokens  kl 1.4609  ce 2.7509  quant 0.7260  gnorm 1.1323  skipped 23.0000  82.5 min, ~0.1 h left in stage
+  [stage3] step   7000     114.7M / 125M tokens     22,992 tokens/s  $19.21 per 1B tokens  kl 1.5628  ce 2.8783  quant 0.8196  gnorm 1.3175  skipped 23.0000  83.1 min, ~0.1 h left in stage
+  [stage3] step   7050     115.5M / 125M tokens     22,974 tokens/s  $19.22 per 1B tokens  kl 1.6732  ce 2.8897  quant 0.9132  gnorm 1.3488  skipped 23.0000  83.8 min, ~0.1 h left in stage
+  [stage3] step   7100     116.3M / 125M tokens     22,957 tokens/s  $19.24 per 1B tokens  kl 1.6878  ce 2.9521  quant 1.0000  gnorm 1.4046  skipped 23.0000  84.5 min, ~0.1 h left in stage
+  [stage3] step   7150     117.1M / 125M tokens     22,932 tokens/s  $19.26 per 1B tokens  kl 1.7193  ce 3.0075  quant 1.0000  gnorm 1.3133  skipped 23.0000  85.1 min, ~0.1 h left in stage
+  [stage3] step   7200     118.0M / 125M tokens     22,922 tokens/s  $19.27 per 1B tokens  kl 1.7161  ce 3.0591  quant 1.0000  gnorm 1.3036  skipped 23.0000  85.8 min, ~0.1 h left in stage
+  [stage3] step   7250     118.8M / 125M tokens     22,911 tokens/s  $19.28 per 1B tokens  kl 1.6405  ce 2.9655  quant 1.0000  gnorm 1.3613  skipped 23.0000  86.4 min, ~0.1 h left in stage
+  [stage3] step   7300     119.6M / 125M tokens     22,901 tokens/s  $19.29 per 1B tokens  kl 1.6443  ce 2.9300  quant 1.0000  gnorm 1.2667  skipped 23.0000  87.0 min, ~0.1 h left in stage
+  [stage3] step   7350     120.4M / 125M tokens     22,891 tokens/s  $19.29 per 1B tokens  kl 1.5333  ce 2.8016  quant 1.0000  gnorm 1.3019  skipped 23.0000  87.7 min, ~0.1 h left in stage
+  eval (quant 1.00): s_ce 2.7295  t_ce 1.2878  kl 1.5137  agree 0.5446
+  [stage3] step   7400     121.2M / 125M tokens     22,865 tokens/s  $19.32 per 1B tokens  kl 1.5569  ce 2.8196  quant 1.0000  gnorm 1.2404  skipped 23.0000  88.4 min, ~0.0 h left in stage
+  [stage3] step   7450     122.1M / 125M tokens     22,855 tokens/s  $19.32 per 1B tokens  kl 1.5882  ce 2.9275  quant 1.0000  gnorm 1.2944  skipped 23.0000  89.0 min, ~0.0 h left in stage
+  [stage3] step   7500     122.9M / 125M tokens     22,846 tokens/s  $19.33 per 1B tokens  kl 1.5589  ce 2.7584  quant 1.0000  gnorm 1.2689  skipped 23.0000  89.6 min, ~0.0 h left in stage
+  [stage3] step   7550     123.7M / 125M tokens     22,824 tokens/s  $19.35 per 1B tokens  kl 1.4781  ce 2.6863  quant 1.0000  gnorm 1.7284  skipped 23.0000  90.3 min, ~0.0 h left in stage
+  [stage3] step   7600     124.5M / 125M tokens     22,815 tokens/s  $19.36 per 1B tokens  kl 1.4860  ce 2.7928  quant 1.0000  gnorm 1.2428  skipped 23.0000  91.0 min, ~0.0 h left in stage
+  [stage3] step   7630     125.0M / 125M tokens     22,810 tokens/s  $19.36 per 1B tokens  kl 1.5008  ce 2.7663  quant 1.0000  gnorm 1.2505  skipped 23.0000  91.3 min, ~-0.0 h left in stage
+  final eval (ternary): s_ce 2.6616  t_ce 1.2878  kl 1.4472  agree 0.5564
+  downstream, student final (quant 1.00): SST-2 85.9  MNLI-m 61.5  STS-B 77.4  mean 74.9  (9.6 min)
+++ date -u +%T
++ echo '=== DONE 04:17:35 ==='
+=== DONE 04:17:35 ===
