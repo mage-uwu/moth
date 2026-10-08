@@ -52,12 +52,17 @@ Three phases, each resuming the previous one's weights, optimizer and sampler, r
 step counts it reached: 1.76B + 1.80B + 3.81B tokens.)
 
     python archive/nanogts.py sample --ckpt run/ckpt.pt          # fill-mask examples
-    python archive/nanogts.py selftest                           # checks the fast paths against their definitions
+    python archive/nanogts.py selftest [--kernels]               # checks the fast paths against their definitions
 
-Faithful to GTS3, not to its speed: the repository trains with Triton kernels (a chunked scan for the bank, a tree
-walk for the deep trees). Here the bank's context is the quadratic form (memory ~ length^2 per head; use
---micro-batch on smaller GPUs, gradients are accumulated exactly) and the deep trees' straight-through gradient is a
-torch.autograd.Function that walks the trees with gathers, as the kernel does.
+Speed: on a GPU with Triton installed, the repository's training kernels run (they are copied in below, verbatim):
+the bank's context as a chunked scan, linear in length; the deep trees' walk and straight-through gradient in
+registers; the ternary quantiser fused. Blocks are torch.compile'd for the gradient steps (--no-compile turns it off),
+and the deep-tree and vocabulary matrices are padded to multiples of 64 rows. That is the configuration GTS3 trained in
+(about 188K tokens/s on one A100). Without Triton, or on a CPU, the same function runs in plain PyTorch: the bank's
+context in the quadratic form (memory ~ length^2 per head; --micro-batch splits a batch, gradients accumulate exactly)
+and the deep trees through a torch.autograd.Function that walks them with gathers. ``selftest`` checks the PyTorch
+paths against their definitions in float64; ``selftest --kernels`` checks the Triton paths against the PyTorch ones
+(without a GPU: TRITON_INTERPRET=1 python archive/nanogts.py selftest --kernels).
 """
 
 import argparse
@@ -105,6 +110,8 @@ def group_size(n, g):
 def ternary(w, group):
     """BitNet b1.58's absmean quantiser per group of weights along each row, straight-through to the latent weights."""
     g = group_size(w.shape[-1], group)
+    if use_kernels(w):  # the same values in one Triton kernel
+        return absmean_ternary_fused(w, g)
     wg = w.reshape(*w.shape[:-1], -1, g)
     scale = wg.abs().mean(-1, keepdim=True).clamp(min=1e-8)
     wq = ((wg / scale).clamp(-1, 1).round() * scale).reshape(w.shape)
@@ -195,6 +202,9 @@ class Bank(Trees):
         logit = F.linear(x, self.q(self.node_in), self.node_bias)  # (b, l, trees)
         B, C_fwd, C_bwd, dt, a = self.signals(x, mask)
         src = dt.repeat_interleave(T // H, -1) * mask.unsqueeze(-1) * logit  # what each token writes to each tree
+        if use_kernels(x):  # the chunked scan, linear in length, both directions in the same launches
+            ctx = gts_scan_bi(C_fwd, C_bwd, B, src.reshape(b, length, H, T // H), a).reshape(b, length, T)
+            return ((F.gelu(logit) + ctx.to(logit.dtype)) @ self.q(self.node_out)) * mask.unsqueeze(-1)
         # weights[t, s, h] = <C[t], B[s]> * decay between s and t on head h's clock, both directions, zero at s = t
         Bf, a = _f32(B), _f32(a)
         cs = torch.cumsum(a, 1)
@@ -280,8 +290,15 @@ class Deep(Trees):
     def forward(self, u, mask):
         b, length, d = u.shape
         x = self.local_mix(u, mask)
-        L = F.linear(x, self.q(self.node_in), self.node_bias).reshape(b * length, -1)  # every node's logit
-        out = RouteSTE.apply(L, self.q(self.node_out), self.n_trees, self.depth, self.cfg.route_ste_temp)
+        w_in, w_out, bias = self.q(self.node_in), self.q(self.node_out), self.node_bias
+        if use_kernels(x):  # Triton walk; node rows padded to a multiple of 64 (4 x 1,023 misaligns every GEMM)
+            pad = -w_in.shape[0] % 64
+            w_in, w_out, bias = F.pad(w_in, (0, 0, 0, pad)), F.pad(w_out, (0, 0, 0, pad)), F.pad(bias, (0, pad))
+            L = F.linear(x, w_in, bias).reshape(b * length, -1)
+            out, _ = route_ste_out(L, w_out, self.n_trees, self.depth, "gelu", self.cfg.route_ste_temp, n_nodes=self.n_nodes)
+            return out.view(b, length, d).to(x.dtype) * mask.unsqueeze(-1)
+        L = F.linear(x, w_in, bias).reshape(b * length, -1)  # every node's logit
+        out = RouteSTE.apply(L, w_out, self.n_trees, self.depth, self.cfg.route_ste_temp)
         return out.view(b, length, d).to(x.dtype) * mask.unsqueeze(-1)
 
     def reference(self, u, mask):
@@ -329,11 +346,15 @@ class Encoder(nn.Module):
             self.embedding.weight[cfg.pad_token_id].zero_()
         self.layers = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
         self.norm_f = RMSNorm(cfg.d_model, cfg.norm_eps)
+        self.compiled = None  # compile_blocks(): torch.compile'd blocks, used for gradient steps only
+
+    def compile_blocks(self):
+        self.compiled = [torch.compile(layer, dynamic=False) for layer in self.layers]
 
     def forward(self, ids):
         mask = (ids != self.cfg.pad_token_id).float()
         x = self.embedding(ids)
-        for layer in self.layers:
+        for layer in self.compiled if self.compiled and torch.is_grad_enabled() else self.layers:
             x = layer(x, mask.to(x.dtype))
         return self.norm_f(x)
 
@@ -354,10 +375,18 @@ class GTS(nn.Module):
         at the labelled positions only, (n, vocab), in row-major order."""
         h = self.backbone(ids)
         if labels is None:
-            return self.lm_head(h)
+            return self.head(h)
         sel = labels != -100
-        logits = self.lm_head(h[sel])
+        logits = self.head(h[sel])
         return F.cross_entropy(logits.float(), labels[sel], reduction="sum"), logits
+
+    def head(self, h):
+        """The output layer; on a GPU with the vocabulary padded to a multiple of 64 rows (30,522 misaligns the GEMM)."""
+        w, bias = self.lm_head.weight, self.lm_head.bias
+        pad = -w.shape[0] % 64
+        if pad and h.is_cuda:
+            return F.linear(h, F.pad(w, (0, 0, 0, pad)), F.pad(bias, (0, pad)))[..., : w.shape[0]]
+        return F.linear(h, w, bias)
 
 
 def load(path, device="cpu"):
@@ -379,6 +408,437 @@ def load(path, device="cpu"):
     state["lm_head.weight"] = state["backbone.embedding.weight"]
     model.load_state_dict(state)
     return model.to(device)
+
+
+# ----------------------------------------------------------------------------------------------- Triton kernels
+# The repository's training kernels, verbatim (mamba_ssm/ops/ternary_fused.py, gts_scan.py, gts_route.py). On a GPU
+# with Triton they replace three PyTorch paths that compute the same values and gradients:
+#   absmean_ternary_fused  the ternary quantiser in one read and one write
+#   gts_scan_bi            the bank's bidirectional context as a chunked scan, linear in length (Mamba-2's SSD with the
+#                          token's own term excluded), instead of the quadratic form
+#   route_ste_out          the deep trees' walk and straight-through gradient, in registers, instead of gathers
+# Without a GPU they run in Triton's interpreter if TRITON_INTERPRET=1 (slow; how ``selftest --kernels`` checks them).
+
+try:
+    import triton
+    import triton.language as tl
+except ImportError:  # the PyTorch paths need nothing else
+    triton = None
+
+HAVE_TRITON = triton is not None
+USE_KERNELS = True  # False forces the PyTorch paths everywhere
+
+
+def use_kernels(t):
+    return USE_KERNELS and HAVE_TRITON and (t.is_cuda or os.environ.get("TRITON_INTERPRET") == "1")
+
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _absmean_kernel(Wp, Op, n_groups, eps, G: tl.constexpr, BLOCK_G: tl.constexpr, ROWS: tl.constexpr):
+        r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+        j = tl.arange(0, BLOCK_G)
+        ok = (r < n_groups)[:, None] & (j < G)[None, :]
+        w = tl.load(Wp + r[:, None] * G + j[None, :], mask=ok, other=0.0).to(tl.float32)
+        scale = tl.maximum(tl.sum(tl.abs(w), axis=1) / G, eps)[:, None]
+        q = w / scale
+        q = tl.minimum(tl.maximum(q, -1.0), 1.0)
+        code = tl.where(q > 0.5, 1.0, tl.where(q < -0.5, -1.0, 0.0))  # torch.round: halves go to even, so 0.5 -> 0
+        tl.store(Op + r[:, None] * G + j[None, :], code * scale, mask=ok)
+
+
+class _AbsmeanSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, w, g, eps, out_dtype):
+        wc = w.contiguous()
+        out = torch.empty(w.shape, device=w.device, dtype=out_dtype)
+        n_groups = wc.numel() // g
+        rows = 16
+        _absmean_kernel[(triton.cdiv(n_groups, rows),)](wc, out, n_groups, eps, G=g, BLOCK_G=triton.next_power_of_2(g), ROWS=rows)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, None, None, None
+
+
+def absmean_ternary_fused(w, g, eps=1e-8):
+    dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else w.dtype
+    return _AbsmeanSTE.apply(w, g, eps, dtype)
+
+
+# --- the bank's scan (gts_scan.py)
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _chunk_clock(Ap, c, i, L, s_al, rev, CHUNK: tl.constexpr, EXCL: tl.constexpr):
+        """Positions of chunk c's rows in processing order (reversed if rev), which are real, the clock relative to
+        the chunk start (inclusive or exclusive running sum of a), and the chunk's total."""
+        k = c * CHUNK + i
+        ok = k < L
+        pos = tl.where(rev != 0, L - 1 - k, k)
+        a = tl.load(Ap + pos * s_al, mask=ok, other=0.0)
+        incl = tl.cumsum(a, axis=0)
+        total = tl.sum(a, axis=0)
+        clock = incl - a if EXCL else incl
+        return ok, pos, clock, total
+
+    @triton.jit
+    def _state_kernel(
+        Kp, Vp, Ap, STp, TOTp, L, H, BH, n_chunks, rev_base,
+        s_kd, s_kb, s_kl, s_vd, s_vb, s_vl, s_vh, s_ab, s_al,
+        N: tl.constexpr, P: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_P: tl.constexpr, CHUNK: tl.constexpr,
+        EXCL: tl.constexpr, PREC: tl.constexpr,
+    ):
+        c = tl.program_id(0)
+        bh = tl.program_id(1)
+        d = tl.program_id(2)
+        b = bh // H
+        h = bh % H
+        i = tl.arange(0, CHUNK)
+        n = tl.arange(0, BLOCK_N)
+        p = tl.arange(0, BLOCK_P)
+        ok, pos, clock, total = _chunk_clock(Ap + b * s_ab + h, c, i, L, s_al, rev_base ^ d, CHUNK, EXCL)
+        k = tl.load(Kp + d * s_kd + b * s_kb + pos[:, None] * s_kl + n[None, :], mask=ok[:, None] & (n < N)[None, :], other=0.0)
+        v = tl.load(Vp + d * s_vd + b * s_vb + h * s_vh + pos[:, None] * s_vl + p[None, :], mask=ok[:, None] & (p < P)[None, :], other=0.0)
+        wk = k * tl.exp(total - clock)[:, None]  # reference: the inclusive clock at the chunk's last token
+        S = tl.dot(tl.trans(wk), v, input_precision=PREC)
+        row = (d * BH + bh) * n_chunks + c
+        tl.store(STp + row * BLOCK_N * BLOCK_P + n[:, None] * BLOCK_P + p[None, :], S)
+        tl.store(TOTp + row, total)
+
+    @triton.jit
+    def _pass_kernel(STp, TOTp, n_chunks, BLOCK_N: tl.constexpr, BLOCK_P: tl.constexpr):
+        """in[c] = exp(T[c-1]) * in[c-1] + own[c-1], in[0] = 0: the state entering each chunk, in place.
+        One program per (direction, batch * head) row of chunks."""
+        r = tl.program_id(0)
+        tile = STp + r * n_chunks * BLOCK_N * BLOCK_P + tl.arange(0, BLOCK_N)[:, None] * BLOCK_P + tl.arange(0, BLOCK_P)[None, :]
+        carry = tl.zeros((BLOCK_N, BLOCK_P), dtype=tl.float32)
+        for c in range(0, n_chunks):
+            own = tl.load(tile + c * BLOCK_N * BLOCK_P)
+            tl.store(tile + c * BLOCK_N * BLOCK_P, carry)
+            carry = carry * tl.exp(tl.load(TOTp + r * n_chunks + c)) + own
+
+    @triton.jit
+    def _out_kernel(
+        Qp, Kp, Vp, Up, Ap, STp, O1p, O2p, Yp, DCp, L, H, BH, n_chunks, rev_base,
+        s_qd, s_qb, s_ql, s_kd, s_kb, s_kl, s_vd, s_vb, s_vl, s_vh, s_ud, s_ub, s_ul, s_uh, s_ab, s_al,
+        s_o1d, s_o1b, s_o1l, s_o1h, s_o2d, s_o2b, s_o2l, s_o2h,
+        N: tl.constexpr, P: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_P: tl.constexpr, CHUNK: tl.constexpr,
+        HAS_O1: tl.constexpr, HAS_O2: tl.constexpr, HAS_DCLOCK: tl.constexpr, EXCL: tl.constexpr, PREC: tl.constexpr,
+    ):
+        """HAS_DCLOCK (the transposed pass, where V = dY, U = X and O1 = dX): also write <dY, Y> - <X, dX> per row,
+        with Y laid out like O1 and the result in DCp, (directions, b, l, h)."""
+        c = tl.program_id(0)
+        bh = tl.program_id(1)
+        d = tl.program_id(2)
+        b = bh // H
+        h = bh % H
+        i = tl.arange(0, CHUNK)
+        n = tl.arange(0, BLOCK_N)
+        p = tl.arange(0, BLOCK_P)
+        n_ok = n < N
+        p_ok = p < P
+        ok, pos, clock, total = _chunk_clock(Ap + b * s_ab + h, c, i, L, s_al, rev_base ^ d, CHUNK, EXCL)
+        row = (d * BH + bh) * n_chunks + c
+        S = tl.load(STp + row * BLOCK_N * BLOCK_P + n[:, None] * BLOCK_P + p[None, :])  # zero for c = 0
+        dec = tl.exp(clock)  # from the end of the previous chunk (clock 0) to each row
+        D = tl.exp(tl.where(i[:, None] > i[None, :], clock[:, None] - clock[None, :], -float("inf")))
+        k = tl.load(Kp + d * s_kd + b * s_kb + pos[:, None] * s_kl + n[None, :], mask=ok[:, None] & n_ok[None, :], other=0.0)
+        v = tl.load(Vp + d * s_vd + b * s_vb + h * s_vh + pos[:, None] * s_vl + p[None, :], mask=ok[:, None] & p_ok[None, :], other=0.0)
+        if HAS_O1:
+            q = tl.load(Qp + d * s_qd + b * s_qb + pos[:, None] * s_ql + n[None, :], mask=ok[:, None] & n_ok[None, :], other=0.0)
+            M = tl.dot(q, tl.trans(k), input_precision=PREC) * D
+            o1 = tl.dot(M, v, input_precision=PREC) + dec[:, None] * tl.dot(q, S, input_precision=PREC)
+            tl.store(O1p + d * s_o1d + b * s_o1b + h * s_o1h + pos[:, None] * s_o1l + p[None, :], o1, mask=ok[:, None] & p_ok[None, :])
+        if HAS_O2:
+            u = tl.load(Up + d * s_ud + b * s_ub + h * s_uh + pos[:, None] * s_ul + p[None, :], mask=ok[:, None] & p_ok[None, :], other=0.0)
+            M2 = tl.dot(u, tl.trans(v), input_precision=PREC) * D
+            o2 = tl.dot(M2, k, input_precision=PREC) + dec[:, None] * tl.dot(u, tl.trans(S), input_precision=PREC)
+            tl.store(O2p + d * s_o2d + b * s_o2b + h * s_o2h + pos[:, None] * s_o2l + n[None, :], o2, mask=ok[:, None] & n_ok[None, :])
+        if HAS_DCLOCK:
+            y = tl.load(Yp + d * s_o1d + b * s_o1b + h * s_o1h + pos[:, None] * s_o1l + p[None, :], mask=ok[:, None] & p_ok[None, :], other=0.0)
+            dc = tl.sum(v * y, axis=1) - tl.sum(u * o1, axis=1)
+            tl.store(DCp + ((d * (BH // H) + b) * L + pos) * H + h, dc, mask=ok)
+
+    @triton.jit
+    def _suffix_kernel(Dp, Op, L, H, BH, s_d, s_b, s_l, rev_base, EXCL: tl.constexpr, BLOCK: tl.constexpr):
+        """Op[k] = sum of Dp over the rows at or after k in processing order (strictly after if EXCL); one program
+        per (batch * head, direction)."""
+        bh = tl.program_id(0)
+        d = tl.program_id(1)
+        b = bh // H
+        h = bh % H
+        rev = rev_base ^ d
+        Dp += d * s_d + b * s_b + h
+        Op += d * s_d + b * s_b + h
+        i = tl.arange(0, BLOCK)
+        carry = 0.0
+        for blk in range(0, tl.cdiv(L, BLOCK)):
+            k = L - 1 - (blk * BLOCK + i)  # processing index, walked from the end
+            ok = k >= 0
+            pos = tl.where(rev != 0, L - 1 - k, k)
+            dd = tl.load(Dp + pos * s_l, mask=ok, other=0.0)
+            run = carry + tl.cumsum(dd, axis=0)
+            tl.store(Op + pos * s_l, run - dd if EXCL else run, mask=ok)
+            carry += tl.sum(dd, axis=0)
+
+
+def _blocks(n, p):
+    return max(16, triton.next_power_of_2(n)), max(16, triton.next_power_of_2(p))
+
+
+def _ds(t, nd):
+    """Direction stride: 0 for a tensor both directions share (a plain (b, l, ...) tensor), else its first stride."""
+    return t.stride(0) if t.dim() == nd + 1 else 0
+
+
+def _bl(t, nd):
+    """The (b, l, ...) strides of a tensor that may carry a leading direction axis."""
+    return t.stride()[1:] if t.dim() == nd + 1 else t.stride()
+
+
+def _states(K, V, a, rev_base, n_dir, excl, chunk, prec):
+    """K: (b, l, n) or (dirs, b, l, n); V: (b, l, h, p) or (dirs, b, l, h, p). Returns the entering states,
+    (dirs, b * h, chunks, BN, BP)."""
+    b, length, h = a.shape
+    p, n = V.shape[-1], K.shape[-1]
+    bn, bp = _blocks(n, p)
+    nc = triton.cdiv(length, chunk)
+    st = torch.empty(n_dir, b * h, nc, bn, bp, device=V.device, dtype=torch.float32)
+    tot = torch.empty(n_dir, b * h, nc, device=V.device, dtype=torch.float32)
+    kb, vb = _bl(K, 3), _bl(V, 4)
+    _state_kernel[(nc, b * h, n_dir)](
+        K, V, a, st, tot, length, h, b * h, nc, int(rev_base),
+        _ds(K, 3), kb[0], kb[1], _ds(V, 4), vb[0], vb[1], vb[2], a.stride(0), a.stride(1),
+        N=n, P=p, BLOCK_N=bn, BLOCK_P=bp, CHUNK=chunk, EXCL=excl, PREC=prec,
+    )
+    _pass_kernel[(n_dir * b * h,)](st, tot, nc, BLOCK_N=bn, BLOCK_P=bp)
+    return st
+
+
+def _outputs(Q, K, V, U, a, st, rev_base, n_dir, excl, want_o1, want_o2, chunk, prec, Y=None):
+    """Outputs per direction: O1 (dirs, b, l, h, p), O2 (dirs, b, l, h, n), and with Y the clock gradient
+    (dirs, b, l, h)."""
+    b, length, h = a.shape
+    p, n = V.shape[-1], K.shape[-1]
+    dev = V.device
+    bn, bp = _blocks(n, p)
+    nc = triton.cdiv(length, chunk)
+    o1 = torch.empty(n_dir, b, length, h, p, device=dev, dtype=torch.float32) if want_o1 else torch.empty(1, 1, 1, 1, 1, device=dev)
+    o2 = torch.empty(n_dir, b, length, h, n, device=dev, dtype=torch.float32) if want_o2 else torch.empty(1, 1, 1, 1, 1, device=dev)
+    Q = Q if want_o1 else K
+    U = U if want_o2 else V
+    dclock = torch.empty(n_dir, b, length, h, device=dev, dtype=torch.float32) if Y is not None else o1
+    qb, kb, vb, ub = _bl(Q, 3), _bl(K, 3), _bl(V, 4), _bl(U, 4)
+    _out_kernel[(nc, b * h, n_dir)](
+        Q, K, V, U, a, st, o1, o2, Y if Y is not None else o1, dclock, length, h, b * h, nc, int(rev_base),
+        _ds(Q, 3), qb[0], qb[1], _ds(K, 3), kb[0], kb[1], _ds(V, 4), vb[0], vb[1], vb[2], _ds(U, 4), ub[0], ub[1], ub[2],
+        a.stride(0), a.stride(1),
+        o1.stride(0), o1.stride(1), o1.stride(2), o1.stride(3), o2.stride(0), o2.stride(1), o2.stride(2), o2.stride(3),
+        N=n, P=p, BLOCK_N=bn, BLOCK_P=bp, CHUNK=chunk,
+        HAS_O1=want_o1, HAS_O2=want_o2, HAS_DCLOCK=Y is not None, EXCL=excl, PREC=prec,
+    )
+    return (o1 if want_o1 else None), (o2 if want_o2 else None), (dclock if Y is not None else None)
+
+
+def _suffix(d, rev_base, excl):
+    """d: (dirs, b, l, h) -> the same shape, each direction summed onwards in its own processing order."""
+    n_dir, b, length, h = d.shape
+    out = torch.empty_like(d)
+    _suffix_kernel[(b * h, n_dir)](d, out, length, h, b * h, d.stride(0), d.stride(1), d.stride(2), int(rev_base),
+                                   EXCL=excl, BLOCK=1024)
+    return out
+
+
+def _unit_last(t):
+    """float32 with a unit stride along the last dimension (the kernels take every other stride as given); GTS's B
+    and C are column slices of one projection and need no copy."""
+    t = t.float()
+    return t if t.stride(-1) == 1 else t.contiguous()
+
+
+class _GTSScan(torch.autograd.Function):
+    """One direction (n_dir = 1, C: (b, l, n)) or both (n_dir = 2, C: (2, b, l, n), direction 1 reversed relative to
+    direction 0). The output is the sum over directions."""
+
+    @staticmethod
+    def forward(ctx, C, B, X, a, reverse, excl, chunk, prec):
+        n_dir = 2 if C.dim() == 4 else 1
+        C, B, X, a = (_unit_last(t) for t in (C, B, X, a))
+        st = _states(B, X, a, reverse, n_dir, excl, chunk, prec)
+        Yd, _, _ = _outputs(C, B, X, None, a, st, reverse, n_dir, excl, True, False, chunk, prec)
+        ctx.save_for_backward(C, B, X, a, Yd, st)
+        ctx.cfg = reverse, excl, chunk, prec, n_dir
+        return Yd.sum(0) if n_dir > 1 else Yd[0]
+
+    @staticmethod
+    def backward(ctx, dY):
+        C, B, X, a, Yd, st = ctx.saved_tensors
+        r, e, chunk, prec, n_dir = ctx.cfg
+        dY = _unit_last(dY)
+        # The transposed scan runs the other way on the other clock: dX[j] = sum_i w <B[j], C[i]> dY[i] and
+        # dB[j] = sum_i w <X[j], dY[i]> C[i], one pass. dC[i] = sum_j w <dY[i], X[j]> B[j] reuses the forward's states.
+        tst = _states(C, dY, a, not r, n_dir, not e, chunk, prec)
+        dX, dB, dclock = _outputs(B, C, dY, X, a, tst, not r, n_dir, not e, True, True, chunk, prec, Yd)
+        _, dC, _ = _outputs(None, B, X, dY, a, st, r, n_dir, e, False, True, chunk, prec)
+        da = _suffix(dclock, r, e).sum(0)
+        dC = dC.sum(3)  # over heads: (dirs, b, l, n)
+        return (dC if n_dir > 1 else dC[0]), dB.sum((0, 3)), dX.sum(0), da, None, None, None, None
+
+
+def _precision(C, precision):
+    if precision is None:
+        precision = "tf32" if (C.is_cuda and torch.backends.cuda.matmul.allow_tf32) else "ieee"
+    return precision
+
+
+def gts_scan(C, B, X, a, reverse=False, excl=False, chunk=64, precision=None):
+    """C, B: (b, l, n); X: (b, l, h, p); a: (b, l, h) per-token log-decays <= 0. Returns (b, l, h, p) float32.
+
+    ``precision`` is "ieee" or "tf32" for the chunk matmuls; by default it follows
+    ``torch.backends.cuda.matmul.allow_tf32``. ``excl`` uses the exclusive running sum (the transposed scan)."""
+    if not HAVE_TRITON:
+        raise RuntimeError("gts_scan needs triton; use gts_scan_reference")
+    return _GTSScan.apply(C, B, X, a, reverse, excl, chunk, _precision(C, precision))
+
+
+def gts_scan_bi(C_fwd, C_bwd, B, X, a, chunk=64, precision=None):
+    """gts_scan(C_fwd, B, X, a) + gts_scan(C_bwd, B, X, a, reverse=True), both directions in the same launches."""
+    if not HAVE_TRITON:
+        raise RuntimeError("gts_scan_bi needs triton; use gts_scan_reference")
+    return _GTSScan.apply(torch.stack([C_fwd, C_bwd]), B, X, a, False, False, chunk, _precision(C_fwd, precision))
+
+
+# --- the deep trees' walk (gts_route.py)
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _coef(x, ACT: tl.constexpr):
+        """ACT 0: gelu (also split with no context), 1: linear."""
+        if ACT == 0:
+            return 0.5 * x * (1.0 + tl.math.erf(x * 0.7071067811865476))
+        return x
+
+    @triton.jit
+    def _dcoef(x, ACT: tl.constexpr):
+        if ACT == 0:
+            return 0.5 * (1.0 + tl.math.erf(x * 0.7071067811865476)) + x * tl.exp(-0.5 * x * x) * 0.3989422804014327
+        return tl.full(x.shape, 1.0, tl.float32)
+
+    @triton.jit
+    def _route_fwd(Lp, Ap, NODESp, n_tok, s_l, s_a, n_trees,
+                   N_NODES: tl.constexpr, DEPTH: tl.constexpr, ACT: tl.constexpr, BLOCK: tl.constexpr, STORE_NODES: tl.constexpr):
+        tok = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        tree = tl.program_id(1)
+        ok = tok < n_tok
+        base = tree * N_NODES
+        cur = tl.zeros((BLOCK,), dtype=tl.int32)
+        for k in tl.static_range(DEPTH + 1):
+            node = base + cur
+            lg = tl.load(Lp + tok * s_l + node, mask=ok, other=0.0).to(tl.float32)
+            tl.store(Ap + tok * s_a + node, _coef(lg, ACT), mask=ok)
+            if STORE_NODES:
+                tl.store(NODESp + (tok * n_trees + tree) * (DEPTH + 1) + k, node, mask=ok)
+            cur = 2 * cur + 1 + (lg > 0).to(tl.int32)
+
+    @triton.jit
+    def _route_bwd(Lp, Gp, DLp, n_tok, s_l, s_g, s_d, inv_temp,
+                   N_NODES: tl.constexpr, DEPTH: tl.constexpr, ACT: tl.constexpr, BLOCK: tl.constexpr, STE: tl.constexpr):
+        tok = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        tree = tl.program_id(1)
+        ok = tok < n_tok
+        base = tree * N_NODES
+        # pass 1: sum of coef * g over the whole path
+        cur = tl.zeros((BLOCK,), dtype=tl.int32)
+        total = tl.zeros((BLOCK,), dtype=tl.float32)
+        for k in tl.static_range(DEPTH + 1):
+            lg = tl.load(Lp + tok * s_l + base + cur, mask=ok, other=0.0).to(tl.float32)
+            total += _coef(lg, ACT) * tl.load(Gp + tok * s_g + base + cur, mask=ok, other=0.0).to(tl.float32)
+            cur = 2 * cur + 1 + (lg > 0).to(tl.int32)
+        # pass 2: each path node's gradient
+        cur = tl.zeros((BLOCK,), dtype=tl.int32)
+        done = tl.zeros((BLOCK,), dtype=tl.float32)  # coef * g summed over the path down to this node
+        for k in tl.static_range(DEPTH + 1):
+            lg = tl.load(Lp + tok * s_l + base + cur, mask=ok, other=0.0).to(tl.float32)
+            gk = tl.load(Gp + tok * s_g + base + cur, mask=ok, other=0.0).to(tl.float32)
+            done += _coef(lg, ACT) * gk
+            d = _dcoef(lg, ACT) * gk
+            right = lg > 0
+            if STE and k < DEPTH:  # without route_ste, hard branches get no gradient (FFF): only coef' * g
+                on = total - done  # the path below this node
+                s = 2 * cur + 2 - right.to(tl.int32)  # the other child
+                alt = tl.zeros((BLOCK,), dtype=tl.float32)
+                for j in tl.static_range(DEPTH - k):
+                    ls = tl.load(Lp + tok * s_l + base + s, mask=ok, other=0.0).to(tl.float32)
+                    alt += _coef(ls, ACT) * tl.load(Gp + tok * s_g + base + s, mask=ok, other=0.0).to(tl.float32)
+                    s = 2 * s + 1 + (ls > 0).to(tl.int32)
+                p = 1.0 / (1.0 + tl.exp(-lg * inv_temp))
+                d += tl.where(right, on - alt, alt - on) * p * (1.0 - p) * inv_temp
+            tl.store(DLp + tok * s_d + base + cur, d, mask=ok)
+            cur = 2 * cur + 1 + right.to(tl.int32)
+
+
+def _grid(n_tok, n_trees, block):
+    return (triton.cdiv(n_tok, block), n_trees)
+
+
+class _RouteSTE(torch.autograd.Function):
+    @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
+    def forward(ctx, L, W, n_trees, n_nodes, depth, act, temp, want_nodes, ste):
+        n_tok = L.shape[0]
+        L = L.contiguous()
+        A = torch.zeros_like(L)
+        nodes = torch.empty(n_tok, n_trees, depth + 1, device=L.device, dtype=torch.int32) if want_nodes else A
+        block = 128
+        _route_fwd[_grid(n_tok, n_trees, block)](L, A, nodes, n_tok, L.stride(0), A.stride(0), n_trees,
+                                                 N_NODES=n_nodes, DEPTH=depth, ACT=act, BLOCK=block, STORE_NODES=want_nodes)
+        ctx.save_for_backward(L, W)
+        ctx.cfg = n_trees, n_nodes, depth, act, temp, ste
+        out = A @ W
+        if want_nodes:
+            ctx.mark_non_differentiable(nodes)
+        return out, (nodes if want_nodes else None)
+
+    @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
+    def backward(ctx, dout, _dnodes):
+        L, W = ctx.saved_tensors
+        n_trees, n_nodes, depth, act, temp, ste = ctx.cfg
+        n_tok = L.shape[0]
+        dout = dout.contiguous()
+        block = 128
+        dW = None
+        if ctx.needs_input_grad[1]:
+            A = torch.zeros_like(L)
+            _route_fwd[_grid(n_tok, n_trees, block)](L, A, A, n_tok, L.stride(0), A.stride(0), n_trees,
+                                                     N_NODES=n_nodes, DEPTH=depth, ACT=act, BLOCK=block, STORE_NODES=False)
+            dW = A.t() @ dout
+        dL = None
+        if ctx.needs_input_grad[0]:
+            G = dout @ W.t()
+            dL = torch.zeros_like(L)
+            _route_bwd[_grid(n_tok, n_trees, block)](L, G, dL, n_tok, L.stride(0), G.stride(0), dL.stride(0), 1.0 / temp,
+                                                     N_NODES=n_nodes, DEPTH=depth, ACT=act, BLOCK=block, STE=ste)
+        return dL, dW, None, None, None, None, None, None, None
+
+
+def route_ste_out(L, W, n_trees, depth, act="gelu", temp=1.0, want_nodes=False, n_nodes=None, ste=True):
+    """L: (tokens, trees * nodes) every node's logit, in any float dtype (the kernels work in float32; under bf16
+    autocast the (tokens x nodes) buffers stay bf16 and the matmuls run in bf16); W: (trees * nodes, d) output rows. Returns (out, nodes): out is
+    (tokens, d), the stateless trees' output with the straight-through routing gradient; nodes is (tokens, trees,
+    depth + 1) int32 global node ids along each path if ``want_nodes``, else None. ``act`` is "gelu", "split"
+    (the same with no context) or "linear". ``ste=False`` is plain FFF routing: the same forward pass, and hard
+    branches get no gradient."""
+    if not HAVE_TRITON:
+        raise RuntimeError("route_ste_out needs triton")
+    code = {"gelu": 0, "split": 0, "linear": 1}[act]
+    n_nodes = n_nodes or L.shape[1] // n_trees  # L and W may carry padding columns/rows after the trees
+    return _RouteSTE.apply(L, W, n_trees, n_nodes, depth, code, float(temp), want_nodes, bool(ste))
 
 
 # -------------------------------------------------------------------------------------------------------------- data
@@ -475,6 +935,8 @@ def train(a):
     train_data = np.memmap(os.path.join(a.data, "train.bin"), dtype=np.uint16, mode="r")
     val_data = np.memmap(os.path.join(a.data, "val.bin"), dtype=np.uint16, mode="r")
     model = GTS(GTSConfig()).to(device)
+    if device == "cuda" and a.compile:
+        model.backbone.compile_blocks()
     decay = [p for p in model.parameters() if p.ndim >= 2 and not getattr(p, "_no_weight_decay", False)]
     rest = [p for p in model.parameters() if not (p.ndim >= 2 and not getattr(p, "_no_weight_decay", False))]
     opt = torch.optim.AdamW([{"params": decay, "weight_decay": 0.01}, {"params": rest, "weight_decay": 0.0}],
@@ -546,8 +1008,10 @@ def sample(a):
 # ---------------------------------------------------------------------------------------------------------- selftest
 
 
-def selftest():
-    """The fast paths against their definitions, in float64 on a small model."""
+def selftest(kernels=False):
+    """The PyTorch fast paths against their definitions, in float64 on a small model."""
+    global USE_KERNELS
+    USE_KERNELS = False
     torch.manual_seed(0)
     cfg = GTSConfig(d_model=64, n_layer=1, vocab_size=100, bank_trees=8, bank_heads=2, bank_state=4, deep_trees=2,
                     deep_depth=4, ternary_group=32)
@@ -585,6 +1049,40 @@ def selftest():
         want = ((F.gelu(logit) + ctx) @ bank.q(bank.node_out)) * mask.unsqueeze(-1)
         assert torch.allclose(bank(u, mask), want, atol=1e-9), "bank: context"
     print("selftest passed: deep-tree straight-through walk == path-weight definition; bank quadratic form == recurrence")
+    USE_KERNELS = True
+    if kernels:
+        selftest_kernels()
+
+
+def selftest_kernels():
+    """The Triton paths against the PyTorch ones, values and gradients, in float32 (the kernels' precision). Without a
+    GPU run as ``TRITON_INTERPRET=1 python nanogts.py selftest --kernels``."""
+    global USE_KERNELS
+    assert HAVE_TRITON, "needs triton"
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    assert dev == "cuda" or os.environ.get("TRITON_INTERPRET") == "1", "no GPU: set TRITON_INTERPRET=1"
+    torch.manual_seed(0)
+    cfg = GTSConfig(d_model=64, n_layer=2, vocab_size=1100, bank_trees=8, bank_heads=2, bank_state=16, deep_trees=2,
+                    deep_depth=4, ternary_group=32)
+    model = GTS(cfg).to(dev)
+    ids = torch.randint(999, 1100, (2, 150), device=dev)  # 150 tokens: three chunks of the scan
+    ids[1, 120:] = 0
+    labels = torch.where(torch.rand(ids.shape, device=dev) < 0.3, ids, torch.full_like(ids, -100))
+    labels[ids == 0] = -100
+    results = []
+    for k in (False, True):
+        USE_KERNELS = k
+        model.zero_grad()
+        loss, logits = model(ids, labels)
+        loss.backward()
+        results.append((logits.detach(), {n: p.grad.clone() for n, p in model.named_parameters()}))
+    USE_KERNELS = True
+    (l0, g0), (l1, g1) = results
+    rel = lambda x, y: ((x - y).norm() / (y.norm() + 1e-30)).item()  # noqa: E731
+    worst = max((rel(g1[n], g0[n]), n) for n in g0)
+    print(f"kernels vs PyTorch: logits {rel(l1, l0):.1e}, worst gradient {worst[0]:.1e} ({worst[1]}) relative")
+    assert rel(l1, l0) < 1e-4 and worst[0] < 1e-3, "the Triton paths disagree with the PyTorch ones"
+    print("selftest --kernels passed")
 
 
 def main():
@@ -608,11 +1106,13 @@ def main():
     t.add_argument("--eval-batches", type=int, default=20)
     t.add_argument("--log-every", type=int, default=100)
     t.add_argument("--seed", type=int, default=0)
+    t.add_argument("--no-compile", dest="compile", action="store_false")
     s = sub.add_parser("sample")
     s.add_argument("--ckpt", required=True)
-    sub.add_parser("selftest")
+    st = sub.add_parser("selftest")
+    st.add_argument("--kernels", action="store_true", help="also check the Triton paths against the PyTorch ones")
     a = p.parse_args()
-    {"prep": prep, "train": train, "sample": sample, "selftest": lambda _: selftest()}[a.cmd](a)
+    {"prep": prep, "train": train, "sample": sample, "selftest": lambda a: selftest(a.kernels)}[a.cmd](a)
 
 
 if __name__ == "__main__":
