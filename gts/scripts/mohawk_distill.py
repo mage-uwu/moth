@@ -341,7 +341,7 @@ def train(a):
         save_state(name, step, n_tok, None)
 
     mixers = [p for layer in student.layers for p in layer.mixer.parameters()]
-    trees = [p for m in deep_mods for p in m.parameters()]
+    trees = [p for layer in student.layers for p in layer.ffn_parameters()]  # the trees (and linear paths)
 
     # Stage 1: matrix orientation (the teacher's attention probabilities need its eager attention path)
     def stage1(frac):
@@ -369,13 +369,52 @@ def train(a):
         for i, layer in enumerate(student.layers):
             with torch.autocast(**amp):
                 ya = layer.mixer(teacher.rec[("a_in", i)].detach().float())
-                ym = layer.deep(teacher.rec[("m_in", i)].detach().float())
+                ym = layer.ffn(teacher.rec[("m_in", i)].detach().float())
             la = la + rel(ya, teacher.rec[("a_out", i)])
             lm = lm + rel(ym, teacher.rec[("m_out", i)])
         L = len(student.layers)
         return (la + a.mlp_weight * lm) / L, {"attn_rel": (la / L).item(), "mlp_rel": (lm / L).item()}
 
+    if cfg.linear_rank and "lin_init" not in done and a.stage2_tokens > 0:
+        # the linear paths from the least-squares affine fit of each teacher MLP, before Stage 2 fits the trees
+        t = time.time()
+        L = len(student.layers)
+        xtx = torch.zeros(L, cfg.d_model + 1, cfg.d_model + 1, dtype=torch.float64, device=device)
+        xty = torch.zeros(L, cfg.d_model + 1, cfg.d_model, dtype=torch.float64, device=device)
+        with torch.no_grad():
+            for _ in range(a.lin_init_batches):
+                teacher.run(batch(tr, a.batch_size, a.seq_len, g, device), want=("mlp",))
+                for i in range(L):
+                    x = teacher.rec[("m_in", i)].reshape(-1, cfg.d_model).double()
+                    x = torch.cat([x, torch.ones(len(x), 1, dtype=x.dtype, device=device)], 1)
+                    xtx[i] += x.T @ x
+                    xty[i] += x.T @ teacher.rec[("m_out", i)].reshape(-1, cfg.d_model).double()
+            for i, layer in enumerate(student.layers):
+                layer.init_linear(xtx[i], xty[i])
+        del xtx, xty
+        done.append("lin_init")
+        print(f"  linear paths (rank {cfg.linear_rank}) from the teacher's affine fits, "
+              f"{a.lin_init_batches * a.batch_size * a.seq_len / 1e6:.1f}M tokens ({time.time() - t:.0f} s)", flush=True)
+
     run_stage("stage2", a.stage2_tokens, mixers + trees, a.lr2, stage2, a.batch_size, 0.1, 0.1)
+
+    if "stage2_layers" not in log and a.stage2_tokens > 0:  # every layer's Stage 2 errors on held-out text
+        sums = torch.zeros(len(student.layers), 4, device=device)
+        g_val = torch.Generator().manual_seed(1)
+        with torch.no_grad():
+            for _ in range(a.eval_batches):
+                teacher.run(batch(val, a.batch_size, a.seq_len, g_val, device), want=("attn", "mlp"))
+                for i, layer in enumerate(student.layers):
+                    with torch.autocast(**amp):
+                        ya = layer.mixer(teacher.rec[("a_in", i)].float()).float()
+                        ym = layer.ffn(teacher.rec[("m_in", i)].float()).float()
+                    ta, tm = teacher.rec[("a_out", i)].float(), teacher.rec[("m_out", i)].float()
+                    sums[i] += torch.stack([(ya - ta).pow(2).sum(), ta.pow(2).sum(), (ym - tm).pow(2).sum(), tm.pow(2).sum()])
+        per = [{"layer": i, "attn_rel": (s[0] / s[1]).item(), "mlp_rel": (s[2] / s[3]).item()} for i, s in enumerate(sums)]
+        log["stage2_layers"] = per
+        print("  stage 2, per layer (held out): " + "  ".join(f"{p['layer']}:{p['mlp_rel']:.3f}" for p in per), flush=True)
+        print(f"  stage 2, held out: attn_rel {sum(p['attn_rel'] for p in per) / len(per):.4f}  "
+              f"mlp_rel {sum(p['mlp_rel'] for p in per) / len(per):.4f}", flush=True)
 
     if "eval_after_stage2" not in log:
         ev = evaluate(student, teacher, val, a, device)
@@ -464,6 +503,7 @@ def main():
     t.add_argument("--quant-len", type=float, default=0.07, help="Stage 3 fraction the ramp takes (then held at 1)")
     t.add_argument("--hidden-weight", type=float, default=1.0, help="Stage 3: initial weight of the layer-by-layer term")
     t.add_argument("--hidden-frac", type=float, default=0.05, help="Stage 3 fraction over which that term decays to 0")
+    t.add_argument("--lin-init-batches", type=int, default=16, help="batches for the linear paths' least-squares fit")
     t.add_argument("--batch-size", type=int, default=32)
     t.add_argument("--s1-batch", type=int, default=8, help="Stage 1 batch (it holds every layer's attention matrices)")
     t.add_argument("--seq-len", type=int, default=512)

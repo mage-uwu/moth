@@ -102,3 +102,21 @@ def test_init_from_modernbert():
     assert torch.equal(s.decoder_bias, t.decoder.bias) and torch.equal(s.head_dense.weight, t.head.dense.weight)
     ids = torch.randint(0, 50000, (2, 20))
     assert s(ids).shape == (2, 20, 50368)
+
+
+def test_linear_path_init_recovers_a_low_rank_affine_map():
+    """init_linear on the sums of an exactly rank-r affine map recovers it (the linear path alone, full precision)."""
+    from mamba_ssm.models.gts_l import GTSLBlock
+
+    torch.manual_seed(0)
+    c = GTSLConfig(d_model=64, n_heads=2, d_state=8, n_layer=1, deep_trees=1, deep_depth=1, ternary_group=32, linear_rank=8)
+    blk = GTSLBlock(c, 1)
+    x = torch.randn(4096, 64, dtype=torch.float64)
+    A = torch.randn(64, 8, dtype=torch.float64) @ torch.randn(8, 64, dtype=torch.float64) / 8
+    b = torch.randn(64, dtype=torch.float64)
+    y = x @ A + b
+    x1 = torch.cat([x, torch.ones(len(x), 1, dtype=x.dtype)], 1)
+    blk.init_linear(x1.T @ x1, x1.T @ y, eps=1e-9)
+    with torch.no_grad():
+        got = blk.lin_up(blk.lin_down(x.float())) + blk.lin_bias
+    torch.testing.assert_close(got.double(), y, rtol=1e-3, atol=1e-3)

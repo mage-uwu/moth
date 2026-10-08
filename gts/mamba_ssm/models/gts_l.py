@@ -43,6 +43,7 @@ class GTSLConfig:
     norm_eps: float = 1e-5
     chunk_size: int = 256
     pad_token_id: int = 50283
+    linear_rank: int = 0  # > 0: a rank-r ternary linear path beside the trees (the MLP's affine part)
 
 
 class TernaryLinear(nn.Linear):
@@ -135,13 +136,48 @@ class GTSLBlock(nn.Module):
         self.norm2 = nn.LayerNorm(d, eps=cfg.norm_eps, bias=False)
         self.deep = GTS(d, depth=cfg.deep_depth, n_trees=cfg.deep_trees, use_context=False, d_conv=0, route_ste=True, dense_walk=True,
                         ternary=True, ternary_group=cfg.ternary_group, act_bits=cfg.act_bits, layer_idx=idx)
+        r = cfg.linear_rank
+        if r:  # x -> up(down(x)) + bias, beside the trees: the teacher MLP's affine part, so the trees fit the rest
+            self.lin_down = TernaryLinear(d, r, cfg.ternary_group, cfg.act_bits)
+            self.lin_up = TernaryLinear(r, d, min(cfg.ternary_group, r), cfg.act_bits)
+            self.lin_bias = nn.Parameter(torch.zeros(d))
+            nn.init.normal_(self.lin_down.weight, std=d ** -0.5)
+            nn.init.zeros_(self.lin_up.weight)
+
+    def ffn(self, x, mask=None):
+        """The MLP replacement: the deep trees, plus the linear path when there is one."""
+        y = self.deep(x) if mask is None else self.deep(x, attention_mask=mask)
+        if hasattr(self, "lin_up"):
+            y = y + self.lin_up(self.lin_down(x)) + self.lin_bias
+        return y
+
+    def ffn_parameters(self):
+        return list(self.deep.parameters()) + ([self.lin_down.weight, self.lin_up.weight, self.lin_bias] if hasattr(self, "lin_up") else [])
+
+    @torch.no_grad()
+    def init_linear(self, xtx, xty, eps=1e-3):
+        """The linear path from the least-squares affine fit of the teacher's MLP (sums over its inputs x and
+        outputs y: xtx = [x 1]^T [x 1], xty = [x 1]^T y, float64), reduced to rank r along the top directions of
+        the fit's centred outputs (reduced-rank regression); the constant part stays whole in the bias."""
+        d, r = xty.shape[1], self.lin_up.weight.shape[1]
+        lam = eps * torch.diagonal(xtx).mean()
+        W = torch.linalg.solve(xtx + lam * torch.eye(len(xtx), dtype=xtx.dtype, device=xtx.device), xty)  # (d+1, d)
+        Wx, b = W[:d], W[d]
+        n = xtx[d, d]
+        mu = xtx[d, :d] / n
+        cov = xtx[:d, :d] / n - torch.outer(mu, mu)
+        V = torch.linalg.eigh(Wx.T @ cov @ Wx).eigenvectors[:, -r:]  # (d, r): the fit's top output directions
+        # y ~ (x - mu) Wx V V^T + mu Wx + b: the varying part at rank r, the constant part in full in the bias
+        self.lin_down.weight.copy_((Wx @ V).T)
+        self.lin_up.weight.copy_(V)
+        self.lin_bias.copy_(b + mu @ Wx - mu @ Wx @ V @ V.T)
 
     def forward(self, h, mask=None):
         if mask is None:
             h = h + self.mixer(self.norm1(h))
-            return h + self.deep(self.norm2(h))
+            return h + self.ffn(self.norm2(h))
         h = h + self.mixer(self.norm1(h), mask)
-        return h + self.deep(self.norm2(h), attention_mask=mask)
+        return h + self.ffn(self.norm2(h), mask)
 
 
 class GTSLForMaskedLM(nn.Module):
