@@ -15,8 +15,11 @@ to imitate (MOHAWK, Bick et al. 2024):
 * DeepTrees are GTS stateless trees (4 trees of depth 9, hard routing, ~8.4M parameters a layer like the teacher's
   MLP, ~40 node rows touched per token): the conditional-compute replacement for the dense MLP.
 * Embeddings, the norms, the prediction head and the tied decoder are copied from the teacher (weight transfer).
-* Projections and tree tables are ternary (absmean, group 128) with 8-bit activations; ``set_quant(lam)`` ramps the
-  quantisation in from full precision (lam=0) to ternary (lam=1).
+* Projections and tree tables are ternary (absmean; trees in groups of 128, projections in groups of ``proj_group``
+  or, with 0, one scale per row as BitNet) with 8-bit activations; ``set_quant(lam)`` ramps the quantisation in from
+  full precision (lam=0) to ternary (lam=1).
+* Optional (``linear_rank``): a rank-r ternary linear path beside each layer's trees, initialised from the
+  least-squares affine fit of the teacher's MLP, so the trees fit only the MLP's nonlinear rest.
 """
 import math
 from dataclasses import asdict, dataclass
@@ -44,6 +47,8 @@ class GTSLConfig:
     chunk_size: int = 256
     pad_token_id: int = 50283
     linear_rank: int = 0  # > 0: a rank-r ternary linear path beside the trees (the MLP's affine part)
+    proj_group: int = 128  # the BiSSD's and linear path's ternary scale groups; 0: one scale per row (the trees keep
+    # ternary_group). One scale per row lets the CPU runtime's AMX GEMM sum a whole row in integers (~25% faster).
 
 
 class TernaryLinear(nn.Linear):
@@ -66,11 +71,12 @@ class BiSSD(nn.Module):
         d, H = cfg.d_model, cfg.n_heads
         self.H, self.P, self.N, self.chunk = H, d // H, cfg.d_state, cfg.chunk_size
         assert self.P * H == d
-        self.in_proj = TernaryLinear(d, 2 * H * self.N + d, cfg.ternary_group, cfg.act_bits)  # [C | B | x]
+        pg = cfg.proj_group or None  # None: one scale per row
+        self.in_proj = TernaryLinear(d, 2 * H * self.N + d, pg, cfg.act_bits)  # [C | B | x]
         self.dt_proj = nn.Linear(d, H, bias=True)
         self.A_log = nn.Parameter(torch.log(torch.full((H,), 0.2)))
         self.D = nn.Parameter(torch.zeros(H))
-        self.out_proj = TernaryLinear(d, d, cfg.ternary_group, cfg.act_bits)
+        self.out_proj = TernaryLinear(d, d, pg, cfg.act_bits)
         with torch.no_grad():  # dt ~ 0.05 at init, so the decay per token exp(-0.2 * 0.05) ~ 0.99
             self.dt_proj.weight.mul_(0.01)
             self.dt_proj.bias.fill_(math.log(math.expm1(0.05)))
@@ -138,8 +144,9 @@ class GTSLBlock(nn.Module):
                         ternary=True, ternary_group=cfg.ternary_group, act_bits=cfg.act_bits, layer_idx=idx)
         r = cfg.linear_rank
         if r:  # x -> up(down(x)) + bias, beside the trees: the teacher MLP's affine part, so the trees fit the rest
-            self.lin_down = TernaryLinear(d, r, cfg.ternary_group, cfg.act_bits)
-            self.lin_up = TernaryLinear(r, d, min(cfg.ternary_group, r), cfg.act_bits)
+            pg = cfg.proj_group or None
+            self.lin_down = TernaryLinear(d, r, pg, cfg.act_bits)
+            self.lin_up = TernaryLinear(r, d, min(pg, r) if pg else None, cfg.act_bits)
             self.lin_bias = nn.Parameter(torch.zeros(d))
             nn.init.normal_(self.lin_down.weight, std=d ** -0.5)
             nn.init.zeros_(self.lin_up.weight)
@@ -166,10 +173,12 @@ class GTSLBlock(nn.Module):
         n = xtx[d, d]
         mu = xtx[d, :d] / n
         cov = xtx[:d, :d] / n - torch.outer(mu, mu)
-        V = torch.linalg.eigh(Wx.T @ cov @ Wx).eigenvectors[:, -r:]  # (d, r): the fit's top output directions
+        k = min(r, d)  # (a rank above the width: the extra directions start at zero)
+        V = torch.linalg.eigh(Wx.T @ cov @ Wx).eigenvectors[:, -k:]  # (d, k): the fit's top output directions
         # y ~ (x - mu) Wx V V^T + mu Wx + b: the varying part at rank r, the constant part in full in the bias
-        self.lin_down.weight.copy_((Wx @ V).T)
-        self.lin_up.weight.copy_(V)
+        self.lin_down.weight.zero_(); self.lin_up.weight.zero_()
+        self.lin_down.weight[:k].copy_((Wx @ V).T)
+        self.lin_up.weight[:, :k].copy_(V)
         self.lin_bias.copy_(b + mu @ Wx - mu @ Wx @ V @ V.T)
 
     def forward(self, h, mask=None):

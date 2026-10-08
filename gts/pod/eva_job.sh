@@ -1,5 +1,6 @@
 #!/bin/bash
-# EVA: MOHAWK distillation of ModernBERT-large into GTS-L, 3.0B tokens (80M / 300M / 2.62B), full precision until the
+# EVA: MOHAWK distillation of ModernBERT-large into GTS-L (with the linear path beside the trees, one ternary scale per
+# projection row: mohawk_distill.EVA_CONFIG), 3.0B tokens (80M / 300M / 2.62B), full precision until the
 # last 14% of Stage 3, then ternary. Usage: bash eva_job.sh OUT_DIR   (OUT_DIR persists: data, checkpoints, logs).
 # Rerunning with the same OUT_DIR resumes from the last checkpoint (every 30 minutes), e.g. after a spot preemption.
 # RunPod: PRICE=1.59 bash pod/eva_job.sh /workspace/eva with /workspace a persistent volume.

@@ -18,6 +18,9 @@ Optimizer as MOHAWK: AdamW (0.9, 0.95), weight decay 0.1 (none on gains, biases 
 and the cost per billion tokens at --price-per-hour. Downstream check (scripts/downstream_check.py: short SST-2, MNLI
 and STS-B fine-tunes of a copy of the student) at the middle of Stage 3 and at the end, and once on the teacher for
 reference; ~5 minutes each on an A100, not counted in tokens/s.
+Student (EVA_CONFIG): a rank-128 ternary linear path beside every layer's trees, set before Stage 2 from the
+least-squares affine fit of the teacher MLP so the trees fit only its nonlinear rest; projections with one ternary
+scale per row.
 
     python scripts/mohawk_distill.py prep --out /root/fwe
     python scripts/mohawk_distill.py train --data /root/fwe --out /root/run
@@ -162,6 +165,12 @@ class Teacher:
 
 
 # ------------------------------------------------------------------------------------------------------- training
+# EVA's student: GTSLConfig plus the linear path beside the trees (least-squares init from the teacher's MLPs before
+# Stage 2: Stage 2 tree error 0.277 -> 0.191 in results/lin_ab) and one ternary scale per row for the projections.
+# --config overrides any field (e.g. '{"linear_rank": 0, "proj_group": 128}' for pilot 1's student).
+EVA_CONFIG = {"linear_rank": 128, "proj_group": 0}
+
+
 def clean_state(sd):
     """A state_dict without torch.compile's ``_orig_mod.`` wrapper prefix (checkpoints saved before the in-place
     compile carry it)."""
@@ -244,7 +253,7 @@ def train(a):
     os.makedirs(a.out, exist_ok=True)
     state_path = os.path.join(a.out, "state.pt")
     teacher = Teacher(device)
-    cfg = GTSLConfig(**json.loads(a.config)) if a.config else GTSLConfig()
+    cfg = GTSLConfig(**{**EVA_CONFIG, **json.loads(a.config or "{}")})
     student = GTSLForMaskedLM(cfg).to(device)
     st = torch.load(state_path, map_location="cpu", weights_only=False) if os.path.exists(state_path) else None
     if st is not None:
@@ -504,7 +513,7 @@ def main():
     t = sub.add_parser("train")
     t.add_argument("--data", required=True)
     t.add_argument("--out", required=True)
-    t.add_argument("--config", help="GTSLConfig overrides as JSON (tests use a tiny model)")
+    t.add_argument("--config", help="GTSLConfig fields as JSON, over EVA_CONFIG (tests use a tiny model)")
     t.add_argument("--init", help="a stage checkpoint (.pt with 'model') to start from instead of the teacher's weights")
     t.add_argument("--stage1-tokens", type=float, default=80e6)
     t.add_argument("--stage2-tokens", type=float, default=300e6)

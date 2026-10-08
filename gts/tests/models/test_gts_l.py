@@ -120,3 +120,19 @@ def test_linear_path_init_recovers_a_low_rank_affine_map():
     with torch.no_grad():
         got = blk.lin_up(blk.lin_down(x.float())) + blk.lin_bias
     torch.testing.assert_close(got.double(), y, rtol=1e-3, atol=1e-3)
+
+
+def test_proj_group_zero_is_one_scale_per_row():
+    """proj_group=0: the BiSSD's and the linear path's ternary weights have one scale per row; the trees keep groups."""
+    from mamba_ssm.modules.ternary import absmean_ternary
+
+    torch.manual_seed(0)
+    c = GTSLConfig(d_model=256, n_heads=4, d_state=16, n_layer=1, deep_trees=1, deep_depth=1, linear_rank=64, proj_group=0)
+    blk = GTSLForMaskedLM(c).layers[0]
+    for lin in (blk.mixer.in_proj, blk.mixer.out_proj, blk.lin_down, blk.lin_up):
+        assert lin.group is None
+        q = absmean_ternary(torch.randn_like(lin.weight), lin.group, 1.0)  # (lin_up starts at zero)
+        mags = q.abs().masked_fill(q == 0, float("nan"))
+        spread = mags.nan_to_num(0).amax(1) - mags.nan_to_num(float("inf")).amin(1)
+        assert spread.abs().max() < 1e-6  # every nonzero entry of a row has the same magnitude
+    assert blk.deep.ternary_group == c.ternary_group

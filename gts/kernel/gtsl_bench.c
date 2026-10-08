@@ -42,9 +42,16 @@ typedef struct { int rows, rows_pad, K, gsz, ng; signed char *w; float *scale, *
 
 static void tg_from_tm(TG *g, const TMat *m) {  // from a packed TMat: same codes and scales
     g->rows = m->rows; g->rows_pad = (m->rows + 31) / 32 * 32; g->K = m->cols; g->gsz = m->gch * 16; g->ng = m->ng;
-    int one = 1;  // every row's groups share one scale (weights trained with a scale per row): one group of K inputs
+    // Every row's groups share one scale (weights trained with one scale per row): one group of K inputs. A group whose
+    // codes are all zero packs with scale 0; it does not count against this.
+    int one = 1;
+    float *rs = (float *)xalloc((size_t)m->rows * 4);
     for (int r = 0; r < m->rows && one; r++)
-        for (int gi = 1; gi < m->ng; gi++) if (m->scale[(size_t)r * m->ng + gi] != m->scale[(size_t)r * m->ng]) { one = 0; break; }
+        for (int gi = 0; gi < m->ng; gi++) {
+            const float sc = m->scale[(size_t)r * m->ng + gi];
+            if (sc == 0) continue;
+            if (rs[r] == 0) rs[r] = sc; else if (sc != rs[r]) { one = 0; break; }
+        }
     const int ng_src = m->ng;
     if (one) { g->gsz = g->K; g->ng = 1; }
     const int K4 = g->K / 4;
@@ -61,12 +68,13 @@ static void tg_from_tm(TG *g, const TMat *m) {  // from a packed TMat: same code
                 g->w[(((size_t)(r / 16) * K4 + k / 4) * 16 + r % 16) * 4 + k % 4] = (signed char)c;
                 csum += c;
             }
-            const float sc = m->scale[(size_t)r * ng_src + (one ? 0 : gi)];
+            const float sc = one ? rs[r] : m->scale[(size_t)r * ng_src + gi];
             g->scale[((size_t)(r / 16) * g->ng + gi) * 16 + r % 16] = sc;
             off += 128.0f * csum * sc;
         }
         g->off[r] = off;
     }
+    free(rs);
 }
 
 // out[t * ldo + r] (=, or += with acc) step[t] * sum_k w[r, k] x[t, k], for x the int8 codes (xs, ldx bytes per token)
