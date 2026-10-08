@@ -22,3 +22,9 @@ ModernBERT-large, float32 PyTorch, 4 thread(s), sequence 512: 874 ms = 586 token
 [4 thread(s), rank 128 GTSL_NOAMX=1]   sequence 512: 175.58 ms (best of 3) = 342.9 us per token = 2916 tokens/s.  Share: in_proj 42%, scans 19%, out_proj 21%, trees 12%, linear path 6%
 [4 thread(s), rank 128 GTSL_NOAMX=1]     within: LN1 + int8 2%, dt 3%, in GEMM 38%, combine + int8 7%, out GEMM 14%
 # ModernBERT-large, PyTorch, 4 threads, same machine: float32 586, dynamic int8 954, bf16 (AMX) 1,524 tokens/s
+# ModernBERT-large, OpenVINO 2026.4 + NNCF 3.4, same machine (4 vCPUs, AMX), sequence 512, 4 threads:
+#   float32 666, bf16 (AMX) 1,942, int8 weights + activations (NNCF, rest float32) 2,370, int8 + bf16 2,782 tokens/s (latency mode)
+#   throughput mode (2 requests in flight): bf16 2,378, int8 + bf16 3,264 tokens/s
+#   -> GTS-L (5,061, one sequence at a time) is 1.55x the best ModernBERT-large pipeline measured here. Per multiply-add,
+#      OpenVINO's ModernBERT-large runs ~1.24 TMAC/s (~380M MAC/token) vs GTS-L's ~0.68 TMAC/s (~134M MAC/token):
+#      GTS-L's non-GEMM parts (scans, trees, elementwise) are where the runtime still trails.
