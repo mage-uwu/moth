@@ -34,3 +34,14 @@ ModernBERT-large, float32 PyTorch, 4 thread(s), sequence 512: 874 ms = 586 token
 # A100 (results/gtsl_gpu_bench.json), batch 128 x 512, bf16: ModernBERT-large 138,731, GTS-L (PyTorch) 93,684 tokens/s
 # Dense (ternary/int8) GeGLU MLPs instead of trees in some layers (synthetic, GTSL_DENSE, per-row scales, 4 threads):
 #   none 5,793; layers 13,16,17: 5,267 (-9%); 11,13,15,16,17,25: 5,094 (-12%); all 28: 4,007 (-31%) tokens/s
+# Speed-quality frontier, same machine (4 vCPUs, AMX), OpenVINO 2026.4 int8 (NNCF) + bf16, throughput mode, seq 512:
+#   MiniLM-L12-H384 18,877; BERT-base 10,944; ModernBERT-base 6,541 (6,813 in the length sweep); ModernBERT-large 3,264-3,385 tokens/s
+#   (GLUE MNLI-m, our harness results/glue: BERT-base 81.2, DistilBERT 78.9, TinyBERT-4L 77.9, GTS3 62.9)
+# Sequence length (4 threads; OpenVINO int8 latency / throughput; GTS-L synthetic, per-row scales, rank-128 path):
+#   len    GTS-L                    ModernBERT-base int8         ModernBERT-large int8
+#   32     9.6 ms, 3,339 tok/s      10.7 ms, 5,280 tok/s         23.5 ms, 1,891 tok/s
+#   512    93.9 ms, 5,455 tok/s     85.7 ms, 6,813 tok/s         164.7 ms, 3,385 tok/s
+#   2048   336 ms, 6,102 tok/s      556 ms, 3,775 tok/s          1,108 ms, 2,037 tok/s
+#   8192   1,580 ms, 5,186 tok/s    6,552 ms, 1,175 tok/s        12,040 ms, 666 tok/s
+# (OpenVINO may run ModernBERT's 128-token local attention as masked full attention; a runtime with true sliding
+#  windows would scale better in its local layers, the global ones stay quadratic.)

@@ -697,11 +697,18 @@ static void build_gemm(Layer *L) {
 
 static void set_shape(void) { PER = (1 << (DEPTH + 1)) - 1; NN = NT * PER; ZR = 2 * H * N + D; }
 
+static int g_lens[16] = {128, 512}, g_nlens = 2, g_maxlen = 512;  // GTSL_LENS="32,512,8192"
+static void parse_lens(void) {
+    const char *e = getenv("GTSL_LENS");
+    if (!e) return;
+    g_nlens = 0; g_maxlen = 512;
+    for (const char *p = e; *p && g_nlens < 16;) { g_lens[g_nlens] = atoi(p); if (g_lens[g_nlens] > g_maxlen) g_maxlen = g_lens[g_nlens]; g_nlens++; while (*p && *p != ',') p++; if (*p) p++; }
+}
 static void time_it(const int *ids, int T, int reps, float *hidden) {
-    int *seq = (int *)xalloc(512 * 4);
-    for (int t = 0; t < 512; t++) seq[t] = ids[t % T];
-    const int lens[2] = {128, 512};
-    for (int li = 0; li < 2; li++) {
+    int *seq = (int *)xalloc((size_t)g_maxlen * 4);
+    for (int t = 0; t < g_maxlen; t++) seq[t] = ids[t % T];
+    const int *lens = g_lens;
+    for (int li = 0; li < g_nlens; li++) {
         const int L = lens[li];
         encode(seq, L, hidden);  // warm
         double best = 1e30;
@@ -733,13 +740,14 @@ int main(int argc, char **argv) {
         for (int c = 0; c < D; c++) emb_norm[c] = 1;
         layers = (Layer *)xalloc(NL * sizeof(Layer));
         for (int l = 0; l < NL; l++) { synth_layer(&layers[l], l); build_gemm(&layers[l]); }
-        alloc_scratch(512);
+        parse_lens();
+        alloc_scratch(g_maxlen);
         printf("%s. ", g_amx ? "AMX int8" : "AVX-512 VNNI");
         printf("%d thread(s). Synthetic GTS-L: %d layers, width %d, BiSSD %d heads x (state %d, head %d), %d trees of depth %d, linear rank %d\n",
                threads, NL, D, H, N, P, NT, DEPTH, R);
-        int ids[512];
-        for (int t = 0; t < 512; t++) ids[t] = 1000 + t;
-        float *hidden = (float *)xalloc((size_t)512 * D * 4);
+        int *ids = (int *)xalloc((size_t)g_maxlen * 4);
+        for (int t = 0; t < g_maxlen; t++) ids[t] = 1000 + t % 30000;
+        float *hidden = (float *)xalloc((size_t)g_maxlen * D * 4);
         if (getenv("GTSL_GEMMBENCH")) {  // in_proj's GEMM alone, 512 tokens
             for (size_t i = 0; i < (size_t)512 * D; i++) QU[i] = (signed char)((int)(rnd64() % 255) - 127);
             for (int t = 0; t < 512; t++) STEP[t] = 0.01f;
@@ -750,7 +758,7 @@ int main(int argc, char **argv) {
             printf("  in_proj GEMM, 512 tokens: %.3f ms = %.1f GMAC/s (%.1f us per token)\n", dt * 1e3, 512.0 * ZR * D / dt / 1e9, dt / 512 * 1e6);
             return 0;
         }
-        time_it(ids, 512, 3, hidden);
+        time_it(ids, g_maxlen, 3, hidden);
         return 0;
     }
     const int reps = argc > 2 ? atoi(argv[2]) : 3;
