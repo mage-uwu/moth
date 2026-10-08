@@ -12,8 +12,9 @@
            KL(teacher || student) on the masked positions plus 0.1 x cross-entropy with the true tokens; the
            transferred embeddings and head stay frozen; a decaying layer-by-layer hidden-state term for the first
            --hidden-frac; full precision until --quant-start, then the ternary quantisation ramps in and is held.
-Optimizer as MOHAWK: AdamW (0.9, 0.95), weight decay 0.1, clipping 1.0, warmup-stable-decay; learning rates
-5e-4 / 2e-3 / 3e-4 here (MOHAWK: 5e-4 / 2e-3 / 2e-4..5e-4). Each stage runs for a token budget; the log reports tokens/s
+Optimizer as MOHAWK: AdamW (0.9, 0.95), weight decay 0.1 (none on gains, biases and the SSM's scalars), clipping
+1.0, updates whose gradient norm spikes past --spike-factor x the recent median skipped, warmup-stable-decay; learning rates
+5e-4 / 2e-3 / 2e-4 here (MOHAWK: 5e-4 / 2e-3 / 2e-4..5e-4). Each stage runs for a token budget; the log reports tokens/s
 and the cost per billion tokens at --price-per-hour. Downstream check (scripts/downstream_check.py: short SST-2, MNLI
 and STS-B fine-tunes of a copy of the student) at the middle of Stage 3 and at the end, and once on the teacher for
 reference; ~5 minutes each on an A100, not counted in tokens/s.
@@ -294,7 +295,10 @@ def train(a):
     def run_stage(name, budget, params, lr, step_fn, bsz, warm, decay):
         if budget <= 0 or name in done:
             return
-        opt = torch.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=0.1, fused=device == "cuda")
+        # no weight decay on gains, biases and the SSM's scalars (A_log, D, dt bias), as in Mamba and MOHAWK
+        groups = [{"params": [p for p in params if p.ndim >= 2]},
+                  {"params": [p for p in params if p.ndim < 2], "weight_decay": 0.0}]
+        opt = torch.optim.AdamW(groups, lr=lr, betas=(0.9, 0.95), weight_decay=0.1, fused=device == "cuda")
         step, n_tok = 0, 0
         if st is not None and st["stage"] == name:
             step, n_tok = st["step"], st["tokens"]
@@ -305,6 +309,7 @@ def train(a):
         paused[0] = 0.0
         curve = log["stages"].setdefault(name, {}).setdefault("curve", [])
         parts, rate, usd = {}, 0.0, 0.0
+        norms, skipped = [], 0  # recent accepted gradient norms, for the spike guard
         while n_tok < budget:
             frac = n_tok / budget
             for gr in opt.param_groups:
@@ -312,8 +317,15 @@ def train(a):
             loss, parts = step_fn(frac)
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(params, 1.0)
-            opt.step()
+            gn = torch.nn.utils.clip_grad_norm_(params, 1.0).item()
+            med = sorted(norms)[len(norms) // 2] if len(norms) >= 50 else None
+            if not math.isfinite(gn) or (a.spike_factor > 0 and med is not None and gn > a.spike_factor * med):
+                skipped += 1  # a spike: drop this update rather than let it knock the student off course
+                print(f"  [{name}] step {step}: skipped update, gradient norm {gn:.3g} (median {med or 0:.3g})", flush=True)
+            else:
+                opt.step()
+                norms = (norms + [gn])[-200:]
+            parts = {**parts, "gnorm": gn, "skipped": skipped}
             step += 1
             n_tok += bsz * a.seq_len
             if step % a.log_every == 0 or step == 3:
@@ -442,7 +454,9 @@ def main():
     t.add_argument("--stage3-tokens", type=float, default=2.62e9)
     t.add_argument("--lr1", type=float, default=5e-4)
     t.add_argument("--lr2", type=float, default=2e-3)
-    t.add_argument("--lr3", type=float, default=3e-4)
+    t.add_argument("--lr3", type=float, default=2e-4)
+    t.add_argument("--spike-factor", type=float, default=4.0,
+                   help="skip an update whose gradient norm exceeds this x the median of the last 200 (0: off)")
     t.add_argument("--warm3", type=float, default=0.05, help="Stage 3 warmup fraction")
     t.add_argument("--decay3", type=float, default=0.07, help="Stage 3 final decay fraction (the ternary hold)")
     t.add_argument("--mlp-weight", type=float, default=2.0, help="Stage 2: weight of the trees' alignment term")

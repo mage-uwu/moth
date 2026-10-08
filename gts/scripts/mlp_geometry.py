@@ -35,11 +35,21 @@ def collect(n_tokens, layers, seq=512):
     tok = AutoTokenizer.from_pretrained(TEACHER)
     m = AutoModelForMaskedLM.from_pretrained(TEACHER, dtype=torch.float32, attn_implementation="sdpa").eval()
     rec = {i: {"x": [], "h": [], "y": []} for i in layers}
+    def io_hook(i):
+        def hook(mod, args, out):  # returns None: a forward hook's return value would replace the output
+            rec[i]["x"].append(args[0].reshape(-1, args[0].shape[-1]))
+            rec[i]["y"].append(out.reshape(-1, out.shape[-1]))
+        return hook
+
+    def h_hook(i):
+        def hook(mod, args):
+            rec[i]["h"].append(args[0].reshape(-1, args[0].shape[-1]))
+        return hook
+
     for i in layers:
         mlp = m.model.layers[i].mlp
-        mlp.register_forward_hook(lambda mod, args, out, i=i: (rec[i]["x"].append(args[0].reshape(-1, args[0].shape[-1])),
-                                                               rec[i]["y"].append(out.reshape(-1, out.shape[-1]))))
-        mlp.Wo.register_forward_pre_hook(lambda mod, args, i=i: rec[i]["h"].append(args[0].reshape(-1, args[0].shape[-1])))
+        mlp.register_forward_hook(io_hook(i))
+        mlp.Wo.register_forward_pre_hook(h_hook(i))
     buf, n, t0 = [], 0, time.time()
     stream = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True)
     with torch.no_grad():
