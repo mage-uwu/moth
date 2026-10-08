@@ -1,0 +1,67 @@
+{
+  "source_commit": "e77f93616d4b5891b971535fdcad328d4ff4c268",
+  "backend_measured": "standalone reduced CPU reference; original-package parity unverified",
+  "parameters": 9967276,
+  "training": {
+    "records": 10800,
+    "steps": 900,
+    "seed": 1701,
+    "batch": 12,
+    "working_sets": [4, 8, 16, 32],
+    "game_data": false,
+    "elapsed_through_step900_seconds": 342.7318,
+    "cpu_threads": 2
+  },
+  "master_checkpoint_sha256": "505eae42b7f9c1198c79198950fa3ba234dae4027c38a78bebe8e1b31da0e85e",
+  "fresh_complete_effect_tests": {
+    "4_slots": [256, 256],
+    "8_slots": [256, 256],
+    "16_slots": [256, 256],
+    "32_slots": [256, 256],
+    "64_slots_unseen_size": [253, 256]
+  },
+  "ablation_complete_effect_accuracy_256_records": {
+    "trained": 1.0,
+    "backbone_bypassed": 0.0,
+    "random_weights": 0.0
+  },
+  "native_vs_torch": {
+    "agreeing_typed_effects": 128,
+    "probes": 128,
+    "max_abs_logit_error": 2.147991180419922,
+    "strict_numerical_parity": false
+  },
+  "effect_query_timing_us_21_tokens_one_thread": {
+    "dense_torch_median": 22122.459999991406,
+    "dense_torch_p95": 30835.823999973392,
+    "sparse_c_plus_torch_bridge_median": 2934.893000201555,
+    "sparse_c_plus_torch_bridge_p95": 4149.047600003541,
+    "samples_after_warmup": 123
+  },
+  "game_budget": "3 seeds per mode, 100 steps/pieces; fixed hand-written programs, structured toy games",
+  "game_means_neural_installed_and_exact_each": {
+    "pong_returns": 2.0,
+    "pong_misses": 0.0,
+    "tetris_lines": 36.666666666666664,
+    "tetris_pieces": 100.0,
+    "lane_shooter_kills": 12.666666666666666
+  },
+  "game_random_means": {
+    "pong_returns": 0.6666666666666666,
+    "pong_misses": 2.3333333333333335,
+    "tetris_lines": 0.6666666666666666,
+    "tetris_pieces": 29.666666666666668,
+    "lane_shooter_kills": 4.666666666666667
+  },
+  "median_of_episode_median_decision_ms": {
+    "pong_neural": 66.62757950016385,
+    "pong_installed": 0.05727450002268597,
+    "tetris_neural": 81.02782349988047,
+    "tetris_installed": 0.11258149993409461,
+    "shooter_neural": 109.55984499992155,
+    "shooter_installed": 0.0679139999419931
+  },
+  "installed_mode_warning": "No neural inference during ticks; neural decoding and compilation charged separately",
+  "packed_storage_bytes": 3872315,
+  "test_status": "29 standalone tests passed; one optional original-package equivalence test skipped; repository-native tests not run locally"
+}
