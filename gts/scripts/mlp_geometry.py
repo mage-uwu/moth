@@ -13,6 +13,9 @@ metric, ||y - y_hat||^2 / ||y||^2, on held-out tokens) of:
   region    the same 40-neuron budget with a fixed subset per region: k-means on x into 512 regions (the trees' leaf
             count), each region keeps the 40 neurons with the most output energy on its training tokens (a hard-routed
             "neuron transplant" without the hierarchy constraint)
+  affine_rN the affine map restricted to rank N (reduced-rank regression), for a cheap linear path beside the trees
+  top1_share  the output energy in the single largest output direction (massive activations), and affine_wo_top1
+            the affine error with that direction removed
   rank90    output principal components holding 90% of the output energy
 
     python scripts/mlp_geometry.py --tokens 32768 --layers 1 7 14 21 27 --out results/mlp_geometry.json
@@ -90,6 +93,14 @@ def analyse(x, h, y, Wo, k_list=(10, 40, 160, 640), regions=512, budget=40):
     lam = 1e-3 * X.pow(2).sum() / len(X)
     W = torch.linalg.solve(X.T @ X + lam * torch.eye(X.shape[1]), X.T @ y[tr])
     out["affine"] = rel(torch.cat([x[te], torch.ones(len(x[te]), 1)], 1) @ W, y[te])
+    Xte = torch.cat([x[te], torch.ones(len(x[te]), 1)], 1)
+    V = torch.linalg.svd(X @ W, full_matrices=False).Vh  # reduced-rank regression: the fit projected on its top outputs
+    for r in (32, 128, 256):
+        out[f"affine_r{r}"] = rel(Xte @ W @ V[:r].T @ V[:r], y[te])
+    top = torch.linalg.svd(y[tr] - y[tr].mean(0), full_matrices=False).Vh[:1]  # the largest output direction
+    yr, fr = y[te] - (y[te] @ top.T) @ top, Xte @ W
+    out["affine_wo_top1"] = rel(fr - (fr @ top.T) @ top, yr)  # the affine fit without a massive-activation direction
+    out["top1_share"] = float((y[te] @ top.T).pow(2).sum() / y[te].pow(2).sum())
     on = Wo.norm(dim=0)  # (inter,): each neuron's output-vector norm
     score = h[te].abs() * on
     for k in k_list:
