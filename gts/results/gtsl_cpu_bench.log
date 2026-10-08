@@ -1,0 +1,9 @@
+# GTS-L CPU runtime (kernel/gtsl_bench.c), 2026-10-08, Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, AVX-512 VNNI
+# full GTS-L shape (28 layers, width 1024, BiSSD 16 x 64x64, trees 4 x depth 9), random ternary weights, sequence 512
+[1 thread(s), linear rank 0]   sequence 512: 552.20 ms (best of 3) = 1078.5 us per token = 927 tokens/s.  Share: in_proj 44%, scans 19%, out_proj 20%, trees 18%, linear path 0%
+[1 thread(s), linear rank 128]   sequence 512: 596.22 ms (best of 3) = 1164.5 us per token = 859 tokens/s.  Share: in_proj 41%, scans 18%, out_proj 19%, trees 17%, linear path 5%
+[4 thread(s), linear rank 0]   sequence 512: 171.03 ms (best of 3) = 334.0 us per token = 2994 tokens/s.  Share: in_proj 43%, scans 19%, out_proj 21%, trees 17%, linear path 0%
+[4 thread(s), linear rank 128]   sequence 512: 169.05 ms (best of 3) = 330.2 us per token = 3029 tokens/s.  Share: in_proj 39%, scans 19%, out_proj 19%, trees 17%, linear path 6%
+# ModernBERT-large (the teacher), float32 PyTorch 2.14.1+cpu, same machine
+ModernBERT-large, float32 PyTorch, 1 thread(s), sequence 512: 3307 ms = 155 tokens/s
+ModernBERT-large, float32 PyTorch, 4 thread(s), sequence 512: 874 ms = 586 tokens/s

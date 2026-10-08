@@ -178,25 +178,42 @@ static void bissd(const Layer *L, int T) {
         __m512 S[64][4];
         for (int n = 0; n < N; n++) for (int v = 0; v < PV; v++) S[n][v] = _mm512_setzero_ps();
         float *Y = dir ? YB : YF;
-        for (int k = 0; k < T; k++) {
-            const int t = dir ? T - 1 - k : k;
-            const float *z = Z + (size_t)t * ZR, *C = z + h * N, *B = z + H * N + h * N, *x = z + 2 * H * N + h * P;
-            const float dt = DT[(size_t)t * H + h];
-            const __m512 a = _mm512_set1_ps(expf(dt * L->A[h]));
-            __m512 xv[4], y[4];
-            for (int v = 0; v < PV; v++) { xv[v] = _mm512_loadu_ps(x + 16 * v); y[v] = _mm512_setzero_ps(); }
-            if (!dir) {
-                for (int n = 0; n < N; n++) {
-                    const __m512 b = _mm512_set1_ps(dt * B[n]), c = _mm512_set1_ps(C[n]);
-                    for (int v = 0; v < PV; v++) { S[n][v] = _mm512_fmadd_ps(S[n][v], a, _mm512_mul_ps(b, xv[v])); y[v] = _mm512_fmadd_ps(c, S[n][v], y[v]); }
-                }
-            } else {
-                for (int n = 0; n < N; n++) {
-                    const __m512 b = _mm512_set1_ps(dt * B[n]), c = _mm512_set1_ps(C[n]);
-                    for (int v = 0; v < PV; v++) { S[n][v] = _mm512_mul_ps(S[n][v], a); y[v] = _mm512_fmadd_ps(c, S[n][v], y[v]); S[n][v] = _mm512_fmadd_ps(b, xv[v], S[n][v]); }
-                }
+        // Two tokens per sweep over the state: each row of S is loaded once, updated by token t, read, updated by the
+        // next token, read, and stored once (S does not fit in registers, so its L1 traffic is the cost).
+        for (int k = 0; k < T; k += 2) {
+            const int two = k + 1 < T, t0 = dir ? T - 1 - k : k, t1 = dir ? t0 - 1 : t0 + 1;
+            const int tt[2] = {t0, two ? t1 : t0};
+            const float *C[2], *B[2], *x[2];
+            float dt[2];
+            __m512 a[2], xv[2][4], y[2][4];
+            for (int j = 0; j < 2; j++) {
+                const float *z = Z + (size_t)tt[j] * ZR;
+                C[j] = z + h * N; B[j] = z + H * N + h * N; x[j] = z + 2 * H * N + h * P;
+                dt[j] = DT[(size_t)tt[j] * H + h];
+                a[j] = _mm512_set1_ps(expf(dt[j] * L->A[h]));
+                for (int v = 0; v < PV; v++) { xv[j][v] = _mm512_loadu_ps(x[j] + 16 * v); y[j][v] = _mm512_setzero_ps(); }
             }
-            for (int v = 0; v < PV; v++) _mm512_storeu_ps(Y + (size_t)t * D + h * P + 16 * v, y[v]);
+            for (int n = 0; n < N; n++) {
+                __m512 s0 = S[n][0], s1 = S[n][1], s2 = S[n][2], s3 = S[n][3];
+                for (int j = 0; j < 1 + two; j++) {
+                    const __m512 b = _mm512_set1_ps(dt[j] * B[j][n]), c = _mm512_set1_ps(C[j][n]);
+                    if (!dir) {  // decay, write, read
+                        s0 = _mm512_fmadd_ps(s0, a[j], _mm512_mul_ps(b, xv[j][0])); s1 = _mm512_fmadd_ps(s1, a[j], _mm512_mul_ps(b, xv[j][1]));
+                        s2 = _mm512_fmadd_ps(s2, a[j], _mm512_mul_ps(b, xv[j][2])); s3 = _mm512_fmadd_ps(s3, a[j], _mm512_mul_ps(b, xv[j][3]));
+                        y[j][0] = _mm512_fmadd_ps(c, s0, y[j][0]); y[j][1] = _mm512_fmadd_ps(c, s1, y[j][1]);
+                        y[j][2] = _mm512_fmadd_ps(c, s2, y[j][2]); y[j][3] = _mm512_fmadd_ps(c, s3, y[j][3]);
+                    } else {  // decay, read, write
+                        s0 = _mm512_mul_ps(s0, a[j]); s1 = _mm512_mul_ps(s1, a[j]); s2 = _mm512_mul_ps(s2, a[j]); s3 = _mm512_mul_ps(s3, a[j]);
+                        y[j][0] = _mm512_fmadd_ps(c, s0, y[j][0]); y[j][1] = _mm512_fmadd_ps(c, s1, y[j][1]);
+                        y[j][2] = _mm512_fmadd_ps(c, s2, y[j][2]); y[j][3] = _mm512_fmadd_ps(c, s3, y[j][3]);
+                        s0 = _mm512_fmadd_ps(b, xv[j][0], s0); s1 = _mm512_fmadd_ps(b, xv[j][1], s1);
+                        s2 = _mm512_fmadd_ps(b, xv[j][2], s2); s3 = _mm512_fmadd_ps(b, xv[j][3], s3);
+                    }
+                }
+                S[n][0] = s0; S[n][1] = s1; S[n][2] = s2; S[n][3] = s3;
+            }
+            for (int j = 0; j < 1 + two; j++)
+                for (int v = 0; v < PV; v++) _mm512_storeu_ps(Y + (size_t)tt[j] * D + h * P + 16 * v, y[j][v]);
         }
     }
     double t2 = now();
