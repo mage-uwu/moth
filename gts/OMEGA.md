@@ -107,7 +107,7 @@ What the rows say:
   than f and cancel (cos -0.41 to -0.86; layer 14 the exception). Most gates are off (b < 0), where h(b) ~ 0 and the
   term's halves +-ab/2 cancel. Q itself needs ~1,000 teacher terms or CP rank > 256 for ~0.06-0.14 error on Q.
 - **The routing algebra is high-dimensional.** 2,000-2,500 of 2,624 gates sit in |b| < 1 on every token, the sign
-  pattern needs ~1,350-1,470 dimensions for 90% of its variance, and only 25-356 gates are effectively constant. The
+  pattern needs ~1,340-1,470 dimensions for 90% of its variance, and only 25-356 gates are effectively constant. The
   sign-region family's floor (ReGLU) is 0.18-0.30 error except at layers 14 and 24.
 - **Regional corrections are not small enough to pay.** Sign-region quadratics along a greedy predicate tree improve
   from depth 0 to 8 by 0.06-0.19 (layer 14: 0.85 -> 0.004, its massive direction comes from a few switching neurons),
