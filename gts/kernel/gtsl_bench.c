@@ -456,12 +456,24 @@ static void bissd(const Layer *L, int T) {
     double ta = now(); t_sub[0] += ta - t0;
     // dt = softplus(dt_proj u), in float, 16 tokens at a time so each weight row is read once per block
 #pragma omp parallel for schedule(static)
-    for (int t0 = 0; t0 < T; t0 += 16) {
-        const int nb = T - t0 < 16 ? T - t0 : 16;
-        float pre[16][64], tmp[64];
-        for (int h = 0; h < H; h++) {
-            const float *w = L->dt_w + (size_t)h * D;
-            for (int j = 0; j < nb; j++) pre[j][h] = dot(w, U + (size_t)(t0 + j) * D, D) + L->dt_b[h];
+    for (int t0 = 0; t0 < T; t0 += 4) {  // 4 tokens x 4 rows of 16 accumulators each: 16 independent FMA chains
+        const int nb = T - t0 < 4 ? T - t0 : 4;
+        const float *u[4];
+        for (int j = 0; j < 4; j++) u[j] = U + (size_t)(t0 + (j < nb ? j : 0)) * D;
+        float pre[4][64], tmp[64];
+        for (int h = 0; h < H; h += 4) {
+            __m512 acc[4][4];
+            for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) acc[j][i] = _mm512_setzero_ps();
+            const float *w0 = L->dt_w + (size_t)h * D;
+            for (int k = 0; k < D; k += 16) {
+                __m512 wv[4];
+                for (int i = 0; i < 4; i++) wv[i] = _mm512_loadu_ps(w0 + (size_t)i * D + k);
+                for (int j = 0; j < 4; j++) {
+                    const __m512 uv = _mm512_loadu_ps(u[j] + k);
+                    for (int i = 0; i < 4; i++) acc[j][i] = _mm512_fmadd_ps(uv, wv[i], acc[j][i]);
+                }
+            }
+            for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) pre[j][h + i] = _mm512_reduce_add_ps(acc[j][i]) + L->dt_b[h + i];
         }
         for (int j = 0; j < nb; j++) softplus_array(pre[j], DT + (size_t)(t0 + j) * H, tmp, H);
     }
@@ -672,7 +684,7 @@ int main(int argc, char **argv) {
     if (getenv("GTSL_ROWSCALE")) g_rowscale = 1;
     amx_init();
     if (!strcmp(argv[1], "synth")) {
-        V = 50368; D = 1024; NL = argc > 2 ? atoi(argv[2]) : 28; H = 16; N = 64; P = 64; NT = 4; DEPTH = 9;
+        V = 50368; D = 1024; NL = argc > 2 ? atoi(argv[2]) : 28; H = 16; N = getenv("GTSL_SYNTH_N") ? atoi(getenv("GTSL_SYNTH_N")) : 64; P = 64; NT = 4; DEPTH = 9;
         R = argc > 3 ? atoi(argv[3]) : 0; EPS = 1e-5f;
         set_shape();
         emb = frnd((size_t)V * D, 0.05f); emb_norm = frnd(D, 0); norm_f = emb_norm;
@@ -705,7 +717,7 @@ int main(int argc, char **argv) {
     V = rdi(); D = rdi(); NL = rdi(); H = rdi(); N = rdi(); P = rdi(); NT = rdi(); DEPTH = rdi(); R = rdi();
     if (fread(&EPS, 4, 1, g_f) != 1) return 1;
     set_shape();
-    if (D % 128 || D > 1024 || N > 64 || P != 64 || H > 64 || H * P != D || NT > 16 || (R && (R % 64 || R > 1024))) { fprintf(stderr, "unsupported shape\n"); return 1; }
+    if (D % 128 || D > 1024 || N > 64 || P != 64 || H > 64 || H % 4 || H * P != D || NT > 16 || (R && (R % 64 || R > 1024))) { fprintf(stderr, "unsupported shape\n"); return 1; }
     emb = rdf((size_t)V * D); emb_norm = rdf(D); norm_f = rdf(D); head_dense = rdf((size_t)D * D); head_norm = rdf(D); dec_bias = rdf(V);
     layers = (Layer *)xalloc(NL * sizeof(Layer));
     for (int l = 0; l < NL; l++) { load_layer(&layers[l]); build_gemm(&layers[l]); }
