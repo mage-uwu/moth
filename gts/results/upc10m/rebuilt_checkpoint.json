@@ -1,0 +1,61 @@
+{
+  "run": "Rebuilt standalone reference checkpoint; separate from the initial Xeon pilot",
+  "provenance": "The first local experiment files did not persist across a runtime transition. The core repository commit survived. The download bundle was reconstructed, retrained with the same recipe, and evaluated again. These results describe the delivered rebuilt weights, not the initial pilot weights.",
+  "source_commit": "e77f93616d4b5891b971535fdcad328d4ff4c268",
+  "core_integration_commit": "1324eae8a9fb1184580fad36253bff09bdac20c3",
+  "parameters": 9967276,
+  "master_checkpoint_sha256": "9a3afca6ff6ab5d5c9aee2ebbf8b0ffe15c8f30bdc003baa8a0ff7122e12cef8",
+  "local_backend": "Reduced standalone implementation of inspected GTS equations; not a byte-identical upstream copy. Repo wrapper imports original GTSMixed, but original-package equivalence remains unverified.",
+  "training": {
+    "seed": 1701,
+    "steps": 900,
+    "batch": 12,
+    "synthetic_records": 10800,
+    "working_set_sizes": [4, 8, 16, 32],
+    "elapsed_through_step900_seconds": 218.591769153,
+    "cpu_threads": 2,
+    "cpu": "AMD EPYC 9V74 80-Core Processor",
+    "learning_rate": 0.0007,
+    "game_training_records": 0,
+    "pretrained_GTS3_weights_used": false
+  },
+  "held_out_binding": {
+    "metric": "Complete opcode plus all four register pointers correct",
+    "evaluated_per_size": 256,
+    "correct_by_slot_count": {"4": 256, "8": 256, "16": 256, "32": 256, "64": 256},
+    "caveat": "Finite one-seed decoding samples, not arbitrary program reasoning or unseen tool semantics. Opcode is supplied in input and symbols use a fixed trained vocabulary."
+  },
+  "ablations_256_examples": {
+    "trained_complete_correct": 256,
+    "backbone_bypassed_complete_correct": 4,
+    "random_weights_complete_correct": 0,
+    "loop_iterations_passed": [4, 32, 128]
+  },
+  "game_smoke_tests": {
+    "seeds_per_mode": 3,
+    "step_or_piece_cap": 100,
+    "policies": "Fixed hand-authored prompts; structured-state adapters; no game-specific weight updates",
+    "neural_installed_and_exact_mean_scores": {"pong_returns": 2, "pong_misses": 0, "tetris_lines": 36.6666666667, "shooter_kills": 12.6666666667},
+    "random_mean_scores": {"pong_returns": 0.6666666667, "pong_misses": 2.3333333333, "tetris_lines": 0.6666666667, "shooter_kills": 4.6666666667},
+    "execution_failures": 0,
+    "caveats": "Only six Pong returns total per controller. Tetris exposes raw legal hard-drop afterstates; shooter is a toy lane game, not an FPS."
+  },
+  "timing": {
+    "cpu_threads": 1,
+    "effect_query_tokens": 21,
+    "timed_samples_after_warmup": 123,
+    "dense_torch_median_ms": 18.697105,
+    "sparse_C_plus_torch_heads_median_ms": 2.325728,
+    "complete_decision_median_ms": {
+      "pong": {"live_neural": 43.5612125, "installed_C": 0.047051, "exact_python": 0.3851755},
+      "tetris": {"live_neural": 50.830723, "installed_C": 0.086791, "exact_python": 0.583966},
+      "shooter": {"live_neural": 72.1732515, "installed_C": 0.0539415, "exact_python": 0.596084}
+    },
+    "caveat": "Game entries are medians of three per-episode medians. Installed C performs NO neural inference during ticks. Neural installation and shape compilation are charged separately; an exact decoder can emit the same C. C uses float32 ternary-valued rows, not packed-integer compute."
+  },
+  "C_vs_torch": {"typed_effect_agreement": "128/128", "maximum_absolute_logit_error": 1.8803272247, "strict_numerical_parity": "unresolved"},
+  "storage": {"packed_checkpoint_bytes": 3872315, "expanded_native_backbone_bytes": 38940252, "packed_vs_master_max_logit_error_eight_probes": 0.0, "caveat": "2-bit storage is expanded for computation; not total runtime RAM or integer inference."},
+  "clean_bundle_tests": {"passed": 29, "skipped": 1, "skip": "optional original-package numerical equivalence; original package not mounted", "demo": "Installed Tetris completed 100 pieces, 34 lines at seed8000"},
+  "scope": "Learned opcode decoding and symbol-to-slot binding. Host sequencing, exact arithmetic and supplied policies do the deterministic program work. Universal planning and underspecified-policy interpretation are not demonstrated.",
+  "delivery": "Trained weights, standalone source, CPU runtimes, games, logs and checksums delivered in the conversation archive; not stored as large binary blobs in this repository."
+}
