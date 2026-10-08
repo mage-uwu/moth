@@ -1,0 +1,62 @@
+[
+ {
+  "text": "The capital of France is [MASK].",
+  "top5": [
+   "France",
+   "located",
+   "Germany",
+   "Belgium",
+   "Paris"
+  ]
+ },
+ {
+  "text": "Water freezes at zero degrees [MASK].",
+  "top5": [
+   "C",
+   "F",
+   "below",
+   "degrees",
+   "0"
+  ]
+ },
+ {
+  "text": "The [MASK] Ocean is the largest ocean on Earth.",
+  "top5": [
+   "Atlantic",
+   "Arctic",
+   "Pacific",
+   "Indian",
+   "Antarctic"
+  ]
+ },
+ {
+  "text": "He played the [MASK] in the orchestra for twenty years.",
+  "top5": [
+   "piano",
+   "role",
+   "violin",
+   "orchestra",
+   "music"
+  ]
+ },
+ {
+  "text": "The film was directed by Steven [MASK].",
+  "top5": [
+   "Brown",
+   "Smith",
+   "Miller",
+   "Anderson",
+   "Williams"
+  ]
+ },
+ {
+  "text": "She was born in 1950 and died in [MASK].",
+  "top5": [
+   "1960",
+   "1945",
+   "1946",
+   "1950",
+   "1947"
+  ]
+ }
+]
