@@ -8,3 +8,4 @@ kernel/gts_kernel
 kernel/ar_bench
 runs/
 kernel/enc_bench
+kernel/gtsl_bench
