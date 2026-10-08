@@ -29,6 +29,9 @@
 #error "gtsl_bench needs AVX-512 (F and BW)"
 #endif
 
+// Output address of token t, row r: token-major (ldo > 0), or with ldo == 0 "panels": every 64 rows are a contiguous
+// T x 64 block, so a head's C, B or x (and the scans' outputs) for consecutive tokens are consecutive in memory.
+#define OUTPTR(out, ldo, T, t, r) ((ldo) > 0 ? (out) + (size_t)(t) * (ldo) + (r) : (out) + ((size_t)((r) / 64) * (T) + (t)) * 64 + (r) % 64)
 // ------------------------------------------------------------------------------- ternary GEMM (VNNI)
 // The dense projections run over all tokens at once. Weights as int8 codes {-1, 0, +1}, laid out in blocks of 16
 // rows x 4 inputs (one 64-byte register: lane i holds row i's 4 codes), so one vpdpbusd multiplies 4 inputs of one
@@ -100,7 +103,7 @@ static void tg_gemm_vnni(const TG *g, const signed char *xs, int ldx, const floa
             const __mmask16 m1 = n1 >= 16 ? 0xFFFF : (__mmask16)((1u << (n1 > 0 ? n1 : 0)) - 1);
             for (int j = 0; j < 8 && t0 + j < T; j++) {
                 const __m512 st = _mm512_set1_ps(step[t0 + j]);
-                float *o = out + (size_t)(t0 + j) * ldo + r0;
+                float *o = OUTPTR(out, ldo, T, t0 + j, r0);
                 __m512 v0 = _mm512_mul_ps(_mm512_sub_ps(f0[j], o0), st), v1 = _mm512_mul_ps(_mm512_sub_ps(f1[j], o1), st);
                 if (acc) { v0 = _mm512_add_ps(v0, _mm512_maskz_loadu_ps(m0, o)); v1 = _mm512_add_ps(v1, _mm512_maskz_loadu_ps(m1, o + 16)); }
                 _mm512_mask_storeu_ps(o, m0, v0); _mm512_mask_storeu_ps(o + 16, m1, v1);
@@ -182,7 +185,7 @@ static void tg_gemm_amx(const TG *g, const signed char *xs_rows, int ldx, const 
                 const __mmask16 m1 = n1 >= 16 ? 0xFFFF : (__mmask16)((1u << (n1 > 0 ? n1 : 0)) - 1);
                 for (int j = 0; j < 32 && t0 + j < T; j++) {
                     const __m512 st = _mm512_set1_ps(step[t0 + j]);
-                    float *o = out + (size_t)(t0 + j) * ldo + r0;
+                    float *o = OUTPTR(out, ldo, T, t0 + j, r0);
                     __m512 v0 = _mm512_mul_ps(_mm512_load_ps(fa[j]), st), v1 = _mm512_mul_ps(_mm512_load_ps(fa[j] + 16), st);
                     if (acc) { v0 = _mm512_add_ps(v0, _mm512_maskz_loadu_ps(m0, o)); v1 = _mm512_add_ps(v1, _mm512_maskz_loadu_ps(m1, o + 16)); }
                     _mm512_mask_storeu_ps(o, m0, v0); _mm512_mask_storeu_ps(o + 16, m1, v1);
@@ -324,10 +327,11 @@ static void scans_amx(const Layer *L, int T) {
                 float run = 0;
                 for (int i = 0; i < 64; i++) {
                     idx[i] = i < n ? (dir ? T - 1 - (c0 + i) : c0 + i) : -1;
-                    if (i < n) {
-                        const float *z = Z + (size_t)idx[i] * ZR;
-                        memcpy(Cc + i * 64, z + h * N, 256); memcpy(Bc + i * 64, z + H * N + h * N, 256); memcpy(Xc + i * 64, z + 2 * H * N + h * P, 256);
-                        dts[i] = DT[(size_t)idx[i] * H + h];
+                    if (i < n) {  // the head's panels: C, B, x of token t at Z + (panel * T + t) * 64
+                        const size_t t = idx[i];
+                        memcpy(Cc + i * 64, Z + ((size_t)h * T + t) * 64, 256); memcpy(Bc + i * 64, Z + ((size_t)(H + h) * T + t) * 64, 256);
+                        memcpy(Xc + i * 64, Z + ((size_t)(2 * H + h) * T + t) * 64, 256);
+                        dts[i] = DT[t * H + h];
                     } else {
                         memset(Cc + i * 64, 0, 256); memset(Bc + i * 64, 0, 256); memset(Xc + i * 64, 0, 256); dts[i] = 0;
                     }
@@ -378,7 +382,7 @@ static void scans_amx(const Layer *L, int T) {
                 pair_rows(Tb, (unsigned *)Sv);
                 transpose_words((const unsigned *)Sv, 32, 64, (unsigned *)Ab);
                 mm64(Ab, Xv, S, 1);
-                for (int i = 0; i < n; i++) memcpy(Yout + (size_t)idx[i] * D + h * P, Y + i * 64, 256);
+                for (int i = 0; i < n; i++) memcpy(Yout + ((size_t)h * T + idx[i]) * 64, Y + i * 64, 256);  // panels
             }
         }
         _tile_release();
@@ -462,25 +466,13 @@ static void bissd(const Layer *L, int T) {
         for (int j = 0; j < nb; j++) softplus_array(pre[j], DT + (size_t)(t0 + j) * H, tmp, H);
     }
     double tb = now(); t_sub[1] += tb - ta;
-    if (g_gemm) tg_gemm(&L->gin, QU, D, STEP, T, Z, ZR, 0);
+    const int panel = g_gemm && g_amx && N == 64 && P == 64 && !getenv("GTSL_RECUR");  // chunked scans read panels
+    if (g_gemm) tg_gemm(&L->gin, QU, D, STEP, T, Z, panel ? 0 : ZR, 0);
     double t1 = now(); t_sub[2] += t1 - tb;
     t_proj_in += t1 - t0;
     // the scans: one (head, direction) per job; the head's state S is N rows of P floats
 #ifdef __AMX_BF16__
-    if (g_amx && N == 64 && P == 64 && !getenv("GTSL_RECUR")) {
-        scans_amx(L, T);
-        if (!getenv("GTSL_SCANCHECK")) goto scanned;
-        float *cf = (float *)xalloc((size_t)T * D * 4), *cb = (float *)xalloc((size_t)T * D * 4);
-        memcpy(cf, YF, (size_t)T * D * 4); memcpy(cb, YB, (size_t)T * D * 4);
-        setenv("GTSL_RECUR", "1", 1); bissd_scans_only = 1;
-        scan_recurrence(L, T);
-        unsetenv("GTSL_RECUR"); bissd_scans_only = 0;
-        double ef = 0, eb = 0, nf = 0, nb = 0;
-        for (size_t i = 0; i < (size_t)T * D; i++) { ef += (cf[i] - YF[i]) * (cf[i] - YF[i]); nf += YF[i] * YF[i]; eb += (cb[i] - YB[i]) * (cb[i] - YB[i]); nb += YB[i] * YB[i]; }
-        printf("    scan check: chunked vs recurrence, relative L2 error: forward %.2e, backward %.2e\n", sqrt(ef / nf), sqrt(eb / nb));
-        free(cf); free(cb);
-        goto scanned;
-    }
+    if (panel) { scans_amx(L, T); goto scanned; }
 #endif
     scan_recurrence(L, T);
     goto scanned;
@@ -490,8 +482,16 @@ scanned:;
 #pragma omp parallel for schedule(static)
     for (int t = 0; t < T; t++) {  // y = forward + backward + D x; int8; out_proj; residual
         float y[1024];
-        const float *x = Z + (size_t)t * ZR + 2 * H * N;
-        for (int c = 0; c < D; c++) y[c] = YF[(size_t)t * D + c] + YB[(size_t)t * D + c] + L->Dsk[c / P] * x[c];
+        if (panel)
+            for (int h = 0; h < H; h++) {
+                const float *f = YF + ((size_t)h * T + t) * 64, *b = YB + ((size_t)h * T + t) * 64, *x = Z + ((size_t)(2 * H + h) * T + t) * 64;
+                const float dk = L->Dsk[h];
+                for (int p = 0; p < 64; p++) y[h * 64 + p] = f[p] + b[p] + dk * x[p];
+            }
+        else {
+            const float *x = Z + (size_t)t * ZR + 2 * H * N;
+            for (int c = 0; c < D; c++) y[c] = YF[(size_t)t * D + c] + YB[(size_t)t * D + c] + L->Dsk[c / P] * x[c];
+        }
         signed char *q = Q + (size_t)t * (D + 64);
         const float st = STEP[t] = quant8(y, q, D);
         if (g_gemm) { to_u8(q, QU + (size_t)t * D, D); continue; }
