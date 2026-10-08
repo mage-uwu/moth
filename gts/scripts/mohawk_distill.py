@@ -168,6 +168,27 @@ def clean_state(sd):
     return {k.replace("_orig_mod.", ""): v for k, v in sd.items()}
 
 
+class SpikeGuard:
+    """Skip an update whose gradient norm is non-finite or above ``factor`` x the median of the last ``window`` norms.
+    Every finite norm enters the window, skipped ones too, so a lasting rise (the end of a warmup, say) becomes the new
+    normal instead of freezing training; and at most ``max_run`` updates in a row are skipped."""
+
+    def __init__(self, factor, window=50, warm=20, max_run=3):
+        self.factor, self.window, self.warm, self.max_run = factor, window, warm, max_run
+        self.hist, self.run, self.skipped = [], 0, 0
+
+    def __call__(self, gn):
+        if not math.isfinite(gn):
+            bad = True
+        else:
+            med = sorted(self.hist)[len(self.hist) // 2] if len(self.hist) >= self.warm else None
+            self.hist = (self.hist + [gn])[-self.window:]
+            bad = self.factor > 0 and med is not None and gn > self.factor * med and self.run < self.max_run
+        self.run = self.run + 1 if bad else 0
+        self.skipped += bad
+        return bad
+
+
 def rel(a, b):
     """Relative squared error ||a - b||^2 / ||b||^2, in float32."""
     a, b = a.float(), b.float()
@@ -309,7 +330,7 @@ def train(a):
         paused[0] = 0.0
         curve = log["stages"].setdefault(name, {}).setdefault("curve", [])
         parts, rate, usd = {}, 0.0, 0.0
-        norms, skipped = [], 0  # recent accepted gradient norms, for the spike guard
+        guard = SpikeGuard(a.spike_factor)
         while n_tok < budget:
             frac = n_tok / budget
             for gr in opt.param_groups:
@@ -318,14 +339,11 @@ def train(a):
             opt.zero_grad(set_to_none=True)
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(params, 1.0).item()
-            med = sorted(norms)[len(norms) // 2] if len(norms) >= 50 else None
-            if not math.isfinite(gn) or (a.spike_factor > 0 and med is not None and gn > a.spike_factor * med):
-                skipped += 1  # a spike: drop this update rather than let it knock the student off course
-                print(f"  [{name}] step {step}: skipped update, gradient norm {gn:.3g} (median {med or 0:.3g})", flush=True)
+            if guard(gn):  # a spike: drop this update rather than let it knock the student off course
+                print(f"  [{name}] step {step}: skipped update, gradient norm {gn:.3g}", flush=True)
             else:
                 opt.step()
-                norms = (norms + [gn])[-200:]
-            parts = {**parts, "gnorm": gn, "skipped": skipped}
+            parts = {**parts, "gnorm": gn, "skipped": guard.skipped}
             step += 1
             n_tok += bsz * a.seq_len
             if step % a.log_every == 0 or step == 3:
@@ -495,7 +513,8 @@ def main():
     t.add_argument("--lr2", type=float, default=2e-3)
     t.add_argument("--lr3", type=float, default=2e-4)
     t.add_argument("--spike-factor", type=float, default=4.0,
-                   help="skip an update whose gradient norm exceeds this x the median of the last 200 (0: off)")
+                   help="skip an update whose gradient norm exceeds this x the median of the last 50 norms, at most 3 "
+                        "in a row (0: off)")
     t.add_argument("--warm3", type=float, default=0.05, help="Stage 3 warmup fraction")
     t.add_argument("--decay3", type=float, default=0.07, help="Stage 3 final decay fraction (the ternary hold)")
     t.add_argument("--mlp-weight", type=float, default=2.0, help="Stage 2: weight of the trees' alignment term")
